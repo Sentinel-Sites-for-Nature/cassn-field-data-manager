@@ -675,17 +675,26 @@ class BoxUploadThread(QThread):
             ]
             total_files = len(uploadable_files)
             uploaded = 0
-            
-            # Upload all files
+            skipped = 0
+
             for file_path in uploadable_files:
                 rel_path = file_path.relative_to(self.deployment_folder)
-                self.upload_file_with_path(
+                was_skipped = self.upload_file_with_path(
                     file_path, deploy_folder.id, rel_path
                 )
-                uploaded += 1
-                self.progress.emit(uploaded, total_files, file_path.name)
-            
-            self.finished.emit(True, f"Successfully uploaded {uploaded} files to Box")
+                if was_skipped:
+                    skipped += 1
+                else:
+                    uploaded += 1
+                self.progress.emit(uploaded + skipped, total_files, file_path.name)
+
+            if skipped > 0:
+                self.finished.emit(
+                    True,
+                    f"Upload complete: {uploaded} uploaded, {skipped} already on Box (skipped)"
+                )
+            else:
+                self.finished.emit(True, f"Successfully uploaded {uploaded} files to Box")
             
         except Exception as e:
             self.finished.emit(False, f"Upload error: {str(e)}")
@@ -698,35 +707,50 @@ class BoxUploadThread(QThread):
         return not (name.startswith('.') or name.startswith('._') or name in SKIP_NAMES)
     
     def find_or_create_folder(self, client, parent_id, folder_name):
-        """Find existing folder or create new one"""
+        """Find existing folder or create new one, using paginated listing."""
+        from box_sdk_gen import CreateFolderParent
+        from box_sdk_gen.box.errors import BoxAPIError
+
+        def _search_pages():
+            offset = 0
+            while True:
+                page = client.folders.get_folder_items(parent_id, limit=1000, offset=offset)
+                entries = page.entries or []
+                for item in entries:
+                    if item.type == 'folder' and item.name == folder_name:
+                        return item
+                if len(entries) < 1000:
+                    return None
+                offset += 1000
+
+        existing = _search_pages()
+        if existing:
+            return existing
+
         try:
-            # Search for existing folder
-            items = client.folders.get_folder_items(parent_id).entries
-            for item in items:
-                if item.type == 'folder' and item.name == folder_name:
-                    return item
-            
-            # Create new folder - using proper CreateFolderParent format
-            from box_sdk_gen import CreateFolderParent
-            parent = CreateFolderParent(id=parent_id)
-            new_folder = client.folders.create_folder(folder_name, parent)
-            return new_folder
-        except Exception as e:
+            return client.folders.create_folder(folder_name, CreateFolderParent(id=parent_id))
+        except BoxAPIError as e:
+            if e.response_info.status_code == 409 and e.response_info.code == 'item_name_in_use':
+                # Created between our listing and now — fetch it
+                found = _search_pages()
+                if found:
+                    return found
+                raise Exception(f"Folder '{folder_name}' conflict but not found in listing")
             raise Exception(f"Error creating folder '{folder_name}': {e}")
     
     def upload_file_with_path(self, local_path, parent_folder_id, relative_path):
-        """Upload file maintaining directory structure"""
-        # Create any intermediate folders
+        """Upload file maintaining directory structure. Returns True if skipped (already on Box)."""
+        from box_sdk_gen.box.errors import BoxAPIError
+
         current_folder_id = parent_folder_id
-        
         if len(relative_path.parts) > 1:
             for folder_name in relative_path.parts[:-1]:
                 folder = self.find_or_create_folder(
                     self.client, current_folder_id, folder_name
                 )
                 current_folder_id = folder.id
-        
-        # Skip if already on Box — build a paginated cache per folder on first access
+
+        # Build a paginated name cache for this folder on first access
         file_name = relative_path.name
         if current_folder_id not in self._box_folder_files:
             existing = set()
@@ -735,32 +759,41 @@ class BoxUploadThread(QThread):
                 page = self.client.folders.get_folder_items(
                     current_folder_id, limit=1000, offset=offset
                 )
-                for item in page.entries:
+                entries = page.entries or []
+                for item in entries:
                     if item.type == 'file':
                         existing.add(item.name)
-                if len(page.entries) < 1000:
+                if len(entries) < 1000:
                     break
                 offset += 1000
             self._box_folder_files[current_folder_id] = existing
 
         if file_name in self._box_folder_files[current_folder_id]:
-            return
+            return True  # already on Box
 
         file_size = local_path.stat().st_size
-        with open(local_path, 'rb') as file_stream:
-            if file_size >= CHUNKED_UPLOAD_THRESHOLD:
-                self.client.chunked_uploads.upload_big_file(
-                    file=file_stream,
-                    file_name=file_name,
-                    file_size=file_size,
-                    parent_folder_id=current_folder_id,
-                )
-            else:
-                self.client.uploads.upload_file(
-                    attributes={'name': file_name, 'parent': {'id': current_folder_id}},
-                    file=file_stream,
-                )
-        self._box_folder_files[current_folder_id].add(file_name)
+        try:
+            with open(local_path, 'rb') as file_stream:
+                if file_size >= CHUNKED_UPLOAD_THRESHOLD:
+                    self.client.chunked_uploads.upload_big_file(
+                        file=file_stream,
+                        file_name=file_name,
+                        file_size=file_size,
+                        parent_folder_id=current_folder_id,
+                    )
+                else:
+                    self.client.uploads.upload_file(
+                        attributes={'name': file_name, 'parent': {'id': current_folder_id}},
+                        file=file_stream,
+                    )
+            self._box_folder_files[current_folder_id].add(file_name)
+            return False
+        except BoxAPIError as e:
+            if e.response_info.status_code == 409 and e.response_info.code == 'item_name_in_use':
+                # File already in Box (cache miss) — update cache and treat as uploaded
+                self._box_folder_files[current_folder_id].add(file_name)
+                return True
+            raise
 
 
 class ProvenanceUploadThread(QThread):
@@ -1003,8 +1036,10 @@ class FieldDataWizard(QMainWindow):
             }
 
             session_path = self.current_deployment_folder / "session.json"
-            with open(session_path, "w") as f:
+            tmp_path = session_path.with_suffix('.json.tmp')
+            with open(tmp_path, "w") as f:
                 json.dump(session, f, indent=2, default=str)
+            tmp_path.replace(session_path)  # atomic on POSIX — never leaves a half-written file
         except Exception:
             pass  # never crash the app on a failed save
 
@@ -1970,6 +2005,7 @@ class FieldDataWizard(QMainWindow):
             aru_container = SOUNDHUB_CONFIG.get(f'ARU_container_{dev_type}', '')
             aru_microphone = SOUNDHUB_CONFIG.get('ARU_microphone', '')
             sh_feature_type = SOUNDHUB_CONFIG.get('feature_type', '')
+            sh_mounted_on   = SOUNDHUB_CONFIG.get('mounted_on', '')
 
             base = {
                 'filename':           entry.get('new_filename', ''),
@@ -2069,7 +2105,7 @@ class FieldDataWizard(QMainWindow):
                     'feature_type_details':  '',
                     'ARU_container':         aru_container,
                     'ARU_microphone':        aru_microphone,
-                    'mounted_on':            aru_row.get('mounted_on', ''),
+                    'mounted_on':            sh_mounted_on,
                     'sensor_height_meters':  aru_row.get('sensor_height_meters', ''),
                     'ARU_status':            aru_row.get('ARU_status', ''),
                     'is_submitted_to_soundhub': False,
