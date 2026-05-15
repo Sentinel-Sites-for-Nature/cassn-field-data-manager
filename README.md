@@ -246,6 +246,131 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 - **BD**: Acoustic Recorder (Birds)
 - **BT**: Acoustic Recorder (Bats)
 
+## Data Quality Checks
+
+The app runs a layered set of QC checks at every stage of data movement —
+during SD card copy, at device completion, before/after Box upload, and on
+demand from buttons in the GUI. Every check writes a pass/warning/error
+entry to `qc_report.json` in the deployment folder, which travels to Box with
+the data and serves as the audit trail.
+
+### Reading `qc_report.json`
+
+The file has two top-level sections:
+
+```json
+{
+  "generated": "<ISO timestamp>",
+  "current_state": [
+    // One entry per (check, device) pair — latest result wins.
+    // Sorted: errors first, then warnings, then passes.
+    // Per-file detail entries (file_hash_mismatch, file_hash_missing) are
+    // automatically dropped here once a later passing file_hash_verification_run
+    // supersedes them.
+  ],
+  "history": {
+    "session_checks": [...],   // all session-level entries, chronological
+    "devices": {
+      "p1_ML": [...],          // per-device entries, chronological
+      "p1_BD": [...]
+    }
+  }
+}
+```
+
+**Read `current_state` first** to see where things stand right now. Errors
+appear at the top of the array; everything below is warnings then passes.
+The `history` section is the full append-only log if you want to dig into
+when something happened or what was tried.
+
+Every entry has the same shape:
+
+```json
+{
+  "check": "file_hash_verification_run",
+  "description": "On-demand: re-hashes every file in raw_data/...",
+  "severity": "pass",            // "pass" | "warning" | "error"
+  "message": "Fixity check complete: 60 files checked. 0 hash mismatch(es), 0 file(s) missing from disk.",
+  "timestamp": "2026-05-07T06:50:03"
+}
+```
+
+The `description` is plain-English explanation of what the check is testing,
+so the file is self-documenting — you don't need to come back to this README
+to interpret it.
+
+### All checks at a glance
+
+| Check (qc_report key) | Description | When it runs | Where it's reported |
+|---|---|---|---|
+| `hash_verification` | SHA-256 of each file is computed at the source, then again at the destination after copy. Mismatch aborts the file and removes the destination. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
+| `file_size_floor` | Flags any copied media file (image or audio) under 50 KB — almost always a truncated/corrupted write. Config `.txt` files are excluded. | Automatic, every SD card copy (per file) | Log panel + warning summary at device completion; entry per device in `qc_report.json` |
+| `duplicate_detection` | Session-wide set of SHA-256 hashes. New file whose hash matches one already in inventory is deleted and skipped. | Automatic, every SD card copy (per file) | Log panel + per-duplicate entry plus a per-device aggregate in `qc_report.json` |
+| `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
+| `sequence_gap` | Per device: each RECONYX `sequence_event_num` should have exactly `sequence_total` frames; event numbers should be contiguous with no gaps. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
+| `temporal_plausibility` | Per device: flags files recorded before deployment start, >48h after the collection date, clock-reset clusters (≥3 files at the same second), and >30-day gaps within a single device. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
+| `field_completeness` | Required metadata fields per file type (see [Required fields by type](#required-fields-by-type)). Anything below 90% blocks CSV generation until the user acknowledges. | Automatic at "Generate CSVs" step | Blocking popup + session-level entry in `qc_report.json` |
+| (pre-upload manifest) | Before Box upload starts, writes `box_upload_manifest.json` listing every uploadable file with its SHA-256. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
+| `box_upload` | After upload, recursively lists the Box deployment folder and reconciles against the pre-upload manifest. Each file gets up to 3 retries (single-file failures don't abort the whole batch). | Automatic, after every Box upload | Status label + popup at upload finish; session-level entry in `qc_report.json` |
+| `orphan_scan` | Compares `file_inventory` against files actually on disk. Reports inventoried files missing from disk and disk files missing from inventory. No hashing — fast directory diff. | Manual button on Tab 2 ("Compare Inventory ↔ Disk") | Detail popup + log panel + session-level entry in `qc_report.json` |
+| `file_hash_verification_run` | Re-hashes every file in `raw_data/` and compares against the SHA-256 stored in the inventory at copy time. Catches silent disk corruption or post-copy modification. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Manual button on Tab 2 ("Verify File Hashes") | Detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
+| `box_verify` | Calls Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. Also runnable as a CLI: `python utils/box_verify.py <deployment_folder>`. | Manual button on Tab 2 ("Verify Box Upload"); also CLI | Detail popup + log panel + session-level entry in `qc_report.json` |
+| `session_health` | At app launch, every `session.json` in the staging root is parsed. Truncated or malformed files are surfaced in the Open Deployment dialog as "⚠ CORRUPTED" rather than being silently hidden. | Automatic at app launch and "Open Different Deployment…" | Resume dialog entry + per-deployment `qc_report.json` |
+| `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, per-device manifests written, file-hash verification run, Box upload done, no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
+| (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `deployment_summary.txt` in deployment folder |
+
+### Per-device check coverage
+
+Not every check applies to every file type:
+
+| Check | Image (ML, SA) | Audio (BD, BT) | Config (`.txt`) |
+|---|---|---|---|
+| `hash_verification` | ✓ | ✓ | ✓ |
+| `file_size_floor` (>50 KB) | ✓ | ✓ | — |
+| `duplicate_detection` | ✓ | ✓ | ✓ |
+| `expected_file_count` | ✓ | ✓ | counted |
+| `sequence_gap` (RECONYX bursts) | ✓ | — | — |
+| `temporal_plausibility` | ✓ | ✓ | — |
+| `field_completeness` | image fields | audio fields | — |
+
+Session-level checks (`box_upload`, `box_verify`, `file_hash_verification_run`,
+`orphan_scan`, `session_health`, `pre_departure`) cover all files regardless
+of type.
+
+### Required fields by type
+
+`field_completeness` enforces a different set of required metadata fields
+per file type. Fields populated in fewer than 90% of records of that type
+trigger a blocking warning at CSV generation.
+
+| File type | Required fields |
+|---|---|
+| Image (ML, SA) | `recorded_datetime`, `latitude`, `longitude`, `device_id`, `file_hash_sha256`, `file_size_bytes`, `sequence_trigger_type` |
+| Audio (BD, BT) | `recorded_datetime`, `latitude`, `longitude`, `device_id`, `file_hash_sha256`, `file_size_bytes`, `sample_rate_hz` |
+| Config (`.txt`) | none — config sidecars carry no required metadata |
+
+### Sidecar files written to the deployment folder
+
+Beyond `qc_report.json`, the QC system creates these files in the deployment
+folder (all upload to Box with the rest of the data, except as noted):
+
+| File | Written by | Uploaded to Box? | Purpose |
+|---|---|---|---|
+| `qc_report.json` | every QC entry | yes | full audit trail of every check run |
+| `box_upload_manifest.json` | pre-upload manifest step | yes | reconciliation source for post-upload check |
+| `box_upload_verification.json` | `utils/box_verify.py` CLI | yes | reconciliation report from CLI tool |
+| `deployment_summary.txt` | session-close summary | yes | human-readable rollup of the deployment |
+| `raw_data/<device>/<device>_manifest.json` | per-device completion | **no** (local-only fixity sidecar) | per-device file list with SHA-256, written before SD card is ejected |
+
+### Resilience features
+
+A few cross-cutting behaviors that aren't single QC checks but support them:
+
+- **Resume mid-deployment.** Every 10 files, `session.json` is rewritten with the latest inventory. If the SD card disconnects mid-copy or the app crashes, "Open Deployment" finds the in-progress session, restores state, skips already-copied files (matched by original filename + hash), cleans up partial writes, and continues.
+- **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.
+- **Filename collision safety.** All filename lookups (fixity check, orphan scan) key by `(device_label, filename)`, not filename alone. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.
+- **Migration of legacy reports.** When a `qc_report.json` from before the `current_state`/`history` schema is opened, it's migrated automatically — old entries become `history`, and `current_state` is computed fresh.
+
 ## Configuration
 
 ### Lookup Tables
