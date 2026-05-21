@@ -13,7 +13,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Per-file Metadata Generation**: Two CSVs written per deployment: `image_file_metadata.csv` (camera trap files) and `audio_file_metadata.csv` (AudioMoth recordings and config files). See the Metadata Schema section below for full field lists.
 - **Deployment Records**: Deployment configuration and file manifest saved as JSON for each session.
 - **Data Provenance**: Each metadata row records app version, processing timestamp, and Box upload status (uploader + datetime). Provenance CSVs are automatically re-uploaded to Box after the upload completes.
-- **Data Integrity**: SHA-256 checksum recorded for each file, enabling corruption detection if needed.
+- **Data Integrity**: SHA-256 and SHA-1 checksums recorded for each file. SHA-256 is the primary archival checksum; SHA-1 supports fast comparison with Box-reported hashes.
 - **AudioMoth Parsing**: Recording schedule, gain, filter cutoff, and sample rate extracted from CONFIG.TXT; per-file battery voltage, temperature, and gain parsed from WAV comment headers.
 - **Reconyx MakerNote Parsing**: Sequence position, trigger type (Motion/Time-lapse), sequence total, ambient temperature, moon phase, battery voltage, and battery type extracted directly from Reconyx HYPERFIRE HP4K EXIF MakerNote via ExifTool.
 - **Device Identification**: Physical device IDs recorded per file. Camera serial numbers sourced from `cameras.csv`, AudioMoth device IDs parsed from CONFIG.TXT.
@@ -107,7 +107,27 @@ This creates or refreshes `~/.cassn_credentials/box_tokens.json`, which enables 
 python cassn_field_data_manager.py
 ```
 
+To run the Box-free core version for local renaming and metadata generation only:
+
+```bash
+python cassn_field_data_manager_core.py
+```
+
+You can also launch core mode from the main script:
+
+```bash
+python cassn_field_data_manager.py --core
+```
+
+To package the core version as a separate macOS app:
+
+```bash
+python -m PyInstaller cassn_field_data_manager_core.spec --noconfirm
+```
+
 ### 3. Workflow
+
+For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 
 #### Step 1: Deployment Metadata
 - Select UC as the organization
@@ -157,6 +177,8 @@ ORG_SITE_YYYYMMDD/
 ├── deployment_event_record.json        # Deployment event record (devices, file count, dates)
 ├── image_file_metadata.csv             # Per-file metadata for all camera trap images
 ├── audio_file_metadata.csv             # Per-file metadata for all AudioMoth recordings
+├── qc/
+│   └── lookup_snapshot/                # Lookup/config files snapshotted at metadata generation time
 ├── WI_metadata/                        # Wildlife Insights deployment CSVs
 │   ├── wildlife_insights_ML_deployments.csv
 │   └── wildlife_insights_SA_deployments.csv
@@ -193,7 +215,7 @@ One row per camera trap file (images and associated files). Fields map directly 
 | `recorded_by` | Observer who downloaded the data |
 | `subproject`, `subproject_design`, `placename`, `event_name`, `event_description` | WI deployment descriptors |
 | `plot_number`, `device_type`, `camera_id`, `file_type` | Per-device identity |
-| `file_size_bytes`, `file_hash_sha256` | File properties |
+| `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from EXIF |
 | `latitude`, `longitude` | Plot coordinates from `plots.csv` |
 | `camera_make`, `camera_model` | Camera manufacturer and model from EXIF |
@@ -220,7 +242,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `deployment_start_date`, `deployment_end_date`, `recorded_by` | Deployment context |
 | `subproject`, `subproject_design`, `placename`, `event_name`, `event_description` | SoundHub deployment descriptors |
 | `plot_number`, `device_type`, `device_id`, `file_type` | Per-device identity |
-| `file_size_bytes`, `file_hash_sha256` | File properties |
+| `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from AudioMoth filename |
 | `latitude`, `longitude` | Plot coordinates from `plots.csv` |
 | `ARU_make`, `ARU_model` | Hardcoded `AudioMoth`; model from CONFIG.TXT firmware string |
@@ -303,18 +325,18 @@ to interpret it.
 
 | Check (qc_report key) | Description | When it runs | Where it's reported |
 |---|---|---|---|
-| `hash_verification` | SHA-256 of each file is computed at the source, then again at the destination after copy. Mismatch aborts the file and removes the destination. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
-| `file_size_floor` | Flags any copied media file (image or audio) under 50 KB — almost always a truncated/corrupted write. Config `.txt` files are excluded. | Automatic, every SD card copy (per file) | Log panel + warning summary at device completion; entry per device in `qc_report.json` |
+| `hash_verification` | SHA-256 and SHA-1 are computed at the source, then again at the destination after copy. Mismatch aborts the file and removes the destination. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
+| `file_size_floor` | Flags copied media files below device-aware floors: images under 500 KB, bird AudioMoth WAVs (`BD`) under 1 GB, and bat AudioMoth WAVs (`BT`) under 500 KB. Config `.txt` files are excluded. | Automatic, every SD card copy (per file) | Log panel + warning summary at device completion; entry per device in `qc_report.json` |
 | `duplicate_detection` | Session-wide set of SHA-256 hashes. New file whose hash matches one already in inventory is deleted and skipped. | Automatic, every SD card copy (per file) | Log panel + per-duplicate entry plus a per-device aggregate in `qc_report.json` |
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
-| `sequence_gap` | Per device: each RECONYX `sequence_event_num` should have exactly `sequence_total` frames; event numbers should be contiguous with no gaps. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
+| `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, >48h after the collection date, clock-reset clusters (≥3 files at the same second), and >30-day gaps within a single device. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `field_completeness` | Required metadata fields per file type (see [Required fields by type](#required-fields-by-type)). Anything below 90% blocks CSV generation until the user acknowledges. | Automatic at "Generate CSVs" step | Blocking popup + session-level entry in `qc_report.json` |
-| (pre-upload manifest) | Before Box upload starts, writes `box_upload_manifest.json` listing every uploadable file with its SHA-256. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
-| `box_upload` | After upload, recursively lists the Box deployment folder and reconciles against the pre-upload manifest. Each file gets up to 3 retries (single-file failures don't abort the whole batch). | Automatic, after every Box upload | Status label + popup at upload finish; session-level entry in `qc_report.json` |
+| (pre-upload manifest) | Before Box upload starts, writes `box_upload_manifest.json` listing every uploadable file with its SHA-256 and SHA-1 when available. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
+| `box_upload` | After upload, recursively lists the Box deployment folder and reconciles against the pre-upload manifest. Each file gets up to 3 retries (single-file failures don't abort the whole batch). | Automatic, after every Box upload | Upload progress panel + session-level entry in `qc_report.json` |
 | `orphan_scan` | Compares `file_inventory` against files actually on disk. Reports inventoried files missing from disk and disk files missing from inventory. No hashing — fast directory diff. | Manual button on Tab 2 ("Compare Inventory ↔ Disk") | Detail popup + log panel + session-level entry in `qc_report.json` |
-| `file_hash_verification_run` | Re-hashes every file in `raw_data/` and compares against the SHA-256 stored in the inventory at copy time. Catches silent disk corruption or post-copy modification. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Manual button on Tab 2 ("Verify File Hashes") | Detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
-| `box_verify` | Calls Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. Also runnable as a CLI: `python utils/box_verify.py <deployment_folder>`. | Manual button on Tab 2 ("Verify Box Upload"); also CLI | Detail popup + log panel + session-level entry in `qc_report.json` |
+| `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Automatic after successful Box upload; manual button on Tab 2 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
+| `box_verify` | Calls Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. Also runnable as a CLI: `python utils/box_verify.py <deployment_folder>`. | Automatic after successful Box upload; manual button on Tab 2 ("Verify Box Upload"); also CLI | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json` |
 | `session_health` | At app launch, every `session.json` in the staging root is parsed. Truncated or malformed files are surfaced in the Open Deployment dialog as "⚠ CORRUPTED" rather than being silently hidden. | Automatic at app launch and "Open Different Deployment…" | Resume dialog entry + per-deployment `qc_report.json` |
 | `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, per-device manifests written, file-hash verification run, Box upload done, no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
 | (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `deployment_summary.txt` in deployment folder |
@@ -326,7 +348,7 @@ Not every check applies to every file type:
 | Check | Image (ML, SA) | Audio (BD, BT) | Config (`.txt`) |
 |---|---|---|---|
 | `hash_verification` | ✓ | ✓ | ✓ |
-| `file_size_floor` (>50 KB) | ✓ | ✓ | — |
+| `file_size_floor` | >500 KB | BD >1 GB; BT >500 KB | — |
 | `duplicate_detection` | ✓ | ✓ | ✓ |
 | `expected_file_count` | ✓ | ✓ | counted |
 | `sequence_gap` (RECONYX bursts) | ✓ | — | — |

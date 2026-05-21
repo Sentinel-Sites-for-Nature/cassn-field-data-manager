@@ -26,6 +26,10 @@ else:
     _BUNDLE_DIR = Path(__file__).parent
 _LOCAL_DATA_DIR = Path.home() / ".cassn_config" / "lookup_tables"
 _LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
+CORE_MODE = (
+    os.environ.get("CASSN_CORE_ONLY", "").lower() in {"1", "true", "yes"}
+    or "--core" in sys.argv
+)
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -44,7 +48,8 @@ try:
     BOX_AVAILABLE = True
 except ImportError:
     BOX_AVAILABLE = False
-    print("Warning: box-sdk-gen not available. Install with: pip install box-sdk-gen")
+    if not CORE_MODE:
+        print("Warning: box-sdk-gen not available. Install with: pip install box-sdk-gen")
 
 # EXIF handling
 try:
@@ -56,12 +61,14 @@ except ImportError:
     EXIF_AVAILABLE = False
     print("Warning: PIL/piexif not available. Install with: pip install pillow piexif")
 
-APP_TITLE = "CA-SSN Field Data Manager"
+APP_TITLE = "CA-SSN Field Data Manager Core" if CORE_MODE else "CA-SSN Field Data Manager"
 VERSION = "3.0"
 
 # Load Box credentials from config.json
 def load_box_config():
     """Load Box configuration from config.json"""
+    if CORE_MODE:
+        return None, None, None, None
     config_path = _CONFIG_DIR / "config.json"
     if not config_path.exists():
         raise FileNotFoundError(
@@ -86,7 +93,9 @@ except FileNotFoundError as e:
     BOX_CLIENT_ID = BOX_CLIENT_SECRET = BOX_TARGET_FOLDER_ID = BOX_APP_CONFIG_FOLDER_ID = None
 
 CHUNKED_UPLOAD_THRESHOLD = 20 * 1024 * 1024  # 20 MB — use chunked upload above this size
-MIN_IMAGE_SIZE_BYTES = 50 * 1024              # 50 KB — files below this are likely corrupted writes
+IMAGE_SIZE_FLOOR_BYTES = 500 * 1024          # 500 KB — unusually small for field camera JPGs
+BIRD_AUDIO_SIZE_FLOOR_BYTES = 1_000_000_000  # 1 GB — scheduled bird recordings should be large
+BAT_AUDIO_SIZE_FLOOR_BYTES = 500 * 1024      # 500 KB — conservative floor for triggered bat recordings
 
 # Subfolder under each deployment that holds QC/audit sidecar files
 # (qc_report.json, box_upload_manifest.json, box_upload_verification.json,
@@ -98,6 +107,32 @@ QC_SIDECAR_FILES = (
     "box_upload_verification.json",
     "deployment_summary.txt",
 )
+
+
+def sanitize_box_folder_name(folder_name: str) -> str:
+    """Return a Box-safe folder name matching the app's create/find behavior."""
+    return str(folder_name).replace("/", "-").replace("\\", "-")
+
+
+def format_size_floor(size_bytes: int) -> str:
+    """Format QC thresholds in human-readable decimal units."""
+    if size_bytes >= 1_000_000_000:
+        return f"{size_bytes / 1_000_000_000:g} GB"
+    if size_bytes >= 1_000_000:
+        return f"{size_bytes / 1_000_000:g} MB"
+    return f"{size_bytes // 1024} KB"
+
+
+def file_size_floor_for(file_type: str, device_type: str) -> int | None:
+    """Return the suspicious-size threshold for media where a floor is defined."""
+    dev_code = (device_type or "").upper()
+    if file_type == "image":
+        return IMAGE_SIZE_FLOOR_BYTES
+    if file_type == "audio" and dev_code == "BD":
+        return BIRD_AUDIO_SIZE_FLOOR_BYTES
+    if file_type == "audio" and dev_code == "BT":
+        return BAT_AUDIO_SIZE_FLOOR_BYTES
+    return None
 
 
 def qc_path_for(deployment_folder: Path, filename: str) -> Path:
@@ -569,7 +604,7 @@ IMAGE_FIELDS = [
     'start_date', 'end_date', 'recorded_by',
     'subproject', 'subproject_design', 'placename', 'event_name', 'event_description',
     'plot_number', 'device_type', 'camera_id', 'file_type',
-    'file_size_bytes', 'file_hash_sha256', 'recorded_datetime',
+    'file_size_bytes', 'file_hash_sha256', 'file_hash_sha1', 'recorded_datetime',
     'latitude', 'longitude',
     'camera_make', 'camera_model',
     'sequence_trigger_type', 'sequence_event_num', 'sequence_position', 'sequence_total',
@@ -591,7 +626,7 @@ AUDIO_FIELDS = [
     'deployment_start_date', 'deployment_end_date', 'recorded_by',
     'subproject', 'subproject_design', 'placename', 'event_name', 'event_description',
     'plot_number', 'device_type', 'device_id', 'file_type',
-    'file_size_bytes', 'file_hash_sha256', 'recorded_datetime',
+    'file_size_bytes', 'file_hash_sha256', 'file_hash_sha1', 'recorded_datetime',
     'latitude', 'longitude',
     'ARU_make', 'ARU_model', 'sample_rate_hz', 'gain', 'filter_type_khz',
     'battery_voltage', 'temperature_c',
@@ -615,6 +650,17 @@ def compute_file_hash(filepath):
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
+
+
+def compute_file_hashes(filepath):
+    """Compute SHA-256 and SHA-1 in a single file-read pass."""
+    sha256_hash = hashlib.sha256()
+    sha1_hash = hashlib.sha1()
+    with open(filepath, "rb") as f:
+        for byte_block in iter(lambda: f.read(65536), b""):
+            sha256_hash.update(byte_block)
+            sha1_hash.update(byte_block)
+    return sha256_hash.hexdigest(), sha1_hash.hexdigest()
 
 
 def compute_file_sha1(filepath):
@@ -642,6 +688,7 @@ def write_device_manifest(device_label: str, device_dir: Path, entries: list):
                 "filename": e.get("new_filename", ""),
                 "size_bytes": e.get("file_size_bytes", 0),
                 "sha256": e.get("file_hash_sha256", ""),
+                "sha1": e.get("file_hash_sha1", ""),
             }
             for e in entries
         ],
@@ -772,15 +819,56 @@ def generate_session_summary(
     return summary_path
 
 
+def snapshot_lookup_tables(deployment_folder: Path) -> list[dict]:
+    """Copy current lookup/config files into qc/lookup_snapshot/ and return a manifest."""
+    snapshot_dir = deployment_folder / QC_SUBFOLDER / "lookup_snapshot"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    manifest = []
+
+    if not _LOCAL_DATA_DIR.exists():
+        return manifest
+
+    for source in sorted(p for p in _LOCAL_DATA_DIR.iterdir() if p.is_file()):
+        if source.name == ".DS_Store":
+            continue
+        dest = snapshot_dir / source.name
+        try:
+            shutil.copy2(source, dest)
+            manifest.append({
+                "filename": source.name,
+                "relative_path": str(dest.relative_to(deployment_folder)),
+                "size_bytes": dest.stat().st_size,
+                "sha256": compute_file_hash(dest),
+                "snapshotted_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            manifest.append({
+                "filename": source.name,
+                "relative_path": str(dest.relative_to(deployment_folder)),
+                "error": str(exc),
+                "snapshotted_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    manifest_path = snapshot_dir / "lookup_snapshot_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "generated": datetime.now(timezone.utc).isoformat(),
+            "source_directory": str(_LOCAL_DATA_DIR),
+            "file_count": len(manifest),
+            "files": manifest,
+        }, f, indent=2)
+    return manifest
+
+
 QC_CHECK_DESCRIPTIONS = {
     "hash_verification": (
-        "Per-file SHA-256 hash verification: source hash computed before copy, destination "
-        "hash computed after copy, and the two must match. Mismatches abort the copy and "
-        "remove the destination file."
+        "Per-file hash verification: SHA-256 and SHA-1 are computed before copy, "
+        "then again after copy, and both must match. Mismatches abort the copy "
+        "and remove the destination file."
     ),
     "file_size_floor": (
-        "Files copied below the 50 KB threshold are flagged as possible corrupted writes. "
-        "Real RECONYX images are >1 MB; AudioMoth WAVs are at least several MB."
+        "Files copied below device-aware floors are flagged as possible corrupted writes: "
+        "images <500 KB, bird AudioMoth WAVs <1 GB, and bat AudioMoth WAVs <500 KB."
     ),
     "duplicate_detection": (
         "Files whose SHA-256 matches an already-inventoried file in this session are flagged "
@@ -791,8 +879,9 @@ QC_CHECK_DESCRIPTIONS = {
         "number of files actually copied. Mismatch means files were skipped or missed."
     ),
     "sequence_gap": (
-        "RECONYX burst integrity: each event_num should have exactly sequence_total frames, "
-        "and event numbers should be contiguous with no missing events."
+        "RECONYX burst/event grouping integrity: each event_num should have exactly "
+        "sequence_total frames, positions should be sequential, timestamps within each "
+        "named event should be tightly clustered, and event numbers should be contiguous."
     ),
     "temporal_plausibility": (
         "Recorded timestamps should fall within the deployment window. Flags files dated "
@@ -813,10 +902,10 @@ QC_CHECK_DESCRIPTIONS = {
         "with no error but left files behind."
     ),
     "file_hash_verification_run": (
-        "On-demand end-to-end check: compute SHA-1 of every local file in raw_data/ and "
-        "compare against the SHA-1 Box reports for the same file. Box computes SHA-1 "
-        "server-side from the stored bytes, so a match proves the file on Box is "
-        "byte-identical to the file locally — catches any corruption introduced during upload."
+        "On-demand end-to-end check: compare each local raw_data file's stored SHA-1 "
+        "(or compute it for older sessions) against the SHA-1 Box reports for the same file. "
+        "Box computes SHA-1 server-side from the stored bytes, so a match proves the file "
+        "on Box matches the file captured at local ingest."
     ),
     "file_hash_mismatch": (
         "Local file's SHA-1 does not match the SHA-1 Box has on file. Indicates either "
@@ -838,6 +927,11 @@ QC_CHECK_DESCRIPTIONS = {
     "pre_departure": (
         "Aggregate readiness check before closing or switching deployments: all devices "
         "complete, manifests written, fixity check run, Box upload done, no QC errors."
+    ),
+    "lookup_snapshot": (
+        "Lookup/config snapshot: copies the currently loaded lookup tables into "
+        "qc/lookup_snapshot/ so regenerated metadata can be tied to the exact "
+        "site, plot, camera, ARU, SoundHub, and Wildlife Insights configuration used."
     ),
 }
 
@@ -956,11 +1050,13 @@ def append_qc_report(deployment_folder: Path, check: str, device: str, severity:
 
 def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
     """
-    Check RECONYX sequence completeness for one device's file_inventory entries.
+    Check RECONYX sequence/event grouping integrity for one device's entries.
     Returns a list of warning strings (empty = all clear).
     Checks:
       (a) for each sequence_event_num, actual file count vs sequence_total
-      (b) gaps in sequence_event_num across the device
+      (b) positions within each named event are sequential
+      (c) timestamps within each named event are close enough to support grouping
+      (d) gaps in sequence_event_num across the device
     """
     warnings = []
     image_entries = [e for e in entries if e.get('file_type') == 'image' and e.get('sequence_event_num') not in ('', None)]
@@ -977,9 +1073,10 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
     if not bursts:
         return warnings
 
-    # (a) check each burst: actual count vs sequence_total
+    # (a-c) check each named burst/event: count, positions, and timestamp coherence.
     for event_num, files in sorted(bursts.items()):
         totals = {e.get('sequence_total') for e in files if e.get('sequence_total') not in ('', None)}
+        expected = None
         if totals:
             try:
                 expected = int(next(iter(totals)))
@@ -990,9 +1087,70 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
                         f"(missing {expected - actual})"
                     )
             except (ValueError, TypeError):
+                expected = None
+
+        positioned = []
+        for e in files:
+            try:
+                positioned.append((int(e.get('sequence_position')), e))
+            except (ValueError, TypeError):
                 pass
 
-    # (b) check for gaps in event_num sequence
+        if positioned:
+            positions = sorted(pos for pos, _ in positioned)
+            if len(set(positions)) != len(positions):
+                warnings.append(
+                    f"Burst #{event_num}: duplicate sequence positions {positions}"
+                )
+            observed_sequence = list(range(min(positions), max(positions) + 1))
+            if positions != observed_sequence:
+                warnings.append(
+                    f"Burst #{event_num}: non-sequential observed positions {positions}; "
+                    f"observed positions should not skip within an app-assigned event"
+                )
+            if min(positions) != 1:
+                warnings.append(
+                    f"Burst #{event_num}: first observed sequence position is {min(positions)}; "
+                    "expected position 1 to start the event"
+                )
+
+        timed = []
+        for pos, e in sorted(positioned):
+            dt_str = e.get('recorded_datetime', '')
+            if not dt_str:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(dt_str))
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                timed.append((pos, dt, e.get('new_filename', '')))
+            except Exception:
+                pass
+
+        if len(timed) >= 2:
+            for (pos1, dt1, _), (pos2, dt2, _) in zip(timed, timed[1:]):
+                gap_seconds = (dt2 - dt1).total_seconds()
+                if gap_seconds <= 0:
+                    warnings.append(
+                        f"Burst #{event_num}: timestamps are not increasing between "
+                        f"positions {pos1} and {pos2}"
+                    )
+                elif gap_seconds > 2:
+                    warnings.append(
+                        f"Burst #{event_num}: positions {pos1} and {pos2} are "
+                        f"{gap_seconds:g}s apart; expected 1s, tolerating up to 2s"
+                    )
+
+            span_seconds = (timed[-1][1] - timed[0][1]).total_seconds()
+            span_limit = expected if expected is not None else max(1, len(timed) - 1)
+            if span_seconds > span_limit:
+                warnings.append(
+                    f"Burst #{event_num}: timestamp span is {span_seconds:g}s across "
+                    f"{len(timed)} frame(s); expected about {max(0, len(timed) - 1)}s "
+                    f"and tolerating up to {span_limit}s"
+                )
+
+    # (d) check for gaps in event_num sequence
     event_nums = sorted(bursts.keys())
     for i in range(1, len(event_nums)):
         if event_nums[i] != event_nums[i - 1] + 1:
@@ -1274,11 +1432,18 @@ class BoxUploadThread(QThread):
                 if path.is_file() and self.should_upload_file(path)
             ]
             total_files = len(uploadable_files)
+            completed = 0
             uploaded = 0
+            skipped = 0
+            versioned = 0
 
             # Build hash lookup from file_inventory (name → sha256)
             hash_lookup = {
                 e.get('new_filename', ''): e.get('file_hash_sha256', '')
+                for e in (self.file_inventory or [])
+            }
+            sha1_lookup = {
+                e.get('new_filename', ''): e.get('file_hash_sha1', '')
                 for e in (self.file_inventory or [])
             }
 
@@ -1288,6 +1453,7 @@ class BoxUploadThread(QThread):
                     "relative_path": str(fp.relative_to(self.deployment_folder)),
                     "filename": fp.name,
                     "sha256": hash_lookup.get(fp.name, ""),
+                    "sha1": sha1_lookup.get(fp.name, ""),
                 }
                 for fp in uploadable_files
             ]
@@ -1359,8 +1525,8 @@ class BoxUploadThread(QThread):
                     if self._cancel_event.is_set():
                         return ("cancelled", str(rel_path), None)
                     try:
-                        self.upload_file_with_path(file_path, deploy_folder.id, rel_path)
-                        return ("ok", str(rel_path), file_path.name)
+                        action = self.upload_file_with_path(file_path, deploy_folder.id, rel_path)
+                        return ("ok", str(rel_path), f"{action}: {rel_path}")
                     except Exception as e:
                         last_err = e
                 return ("fail", str(rel_path), str(last_err)[:200] if last_err else "unknown error")
@@ -1377,22 +1543,29 @@ class BoxUploadThread(QThread):
 
                     with self._state_lock:
                         if status == "ok":
-                            uploaded += 1
-                            self.progress.emit(uploaded, total_files, payload or "")
+                            completed += 1
+                            if payload and payload.startswith("skipped:"):
+                                skipped += 1
+                            elif payload and payload.startswith("versioned:"):
+                                versioned += 1
+                            else:
+                                uploaded += 1
+                            self.progress.emit(completed, total_files, payload or "")
                         elif status == "cancelled":
                             cancelled_count += 1
                         else:
                             failed_uploads.append((rel_path, payload or ""))
                             # Still bump the progress so the UI doesn't appear stuck
-                            self.progress.emit(uploaded, total_files, "")
+                            completed += 1
+                            self.progress.emit(completed, total_files, f"failed: {rel_path}")
 
             if self._cancel_event.is_set():
                 # User-requested cancellation — exit before verification.
                 append_qc_report(self.deployment_folder, "box_upload", "", "warning",
-                                 f"Upload cancelled by user. {uploaded}/{total_files} uploaded, "
+                                 f"Upload cancelled by user. {completed}/{total_files} completed, "
                                  f"{cancelled_count} not attempted, {len(failed_uploads)} failed.")
                 self.finished.emit(False,
-                    f"Upload cancelled. {uploaded} of {total_files} files uploaded; "
+                    f"Upload cancelled. {completed} of {total_files} files completed; "
                     f"{cancelled_count} not yet attempted; {len(failed_uploads)} failed. "
                     "Re-run the upload to resume — already-uploaded files will be skipped.")
                 return
@@ -1401,7 +1574,7 @@ class BoxUploadThread(QThread):
             # Paginates each folder — without this, large device folders (>1000 files)
             # were being undercounted, causing huge false-positive "missing from Box" reports.
             try:
-                box_file_names: set[str] = set()
+                box_paths: set[str] = set()
 
                 def _list_all_paginated(folder_id):
                     offset = 0
@@ -1415,23 +1588,24 @@ class BoxUploadThread(QThread):
                             return
                         offset += limit
 
-                def _collect(folder_id):
+                def _collect(folder_id, path_prefix=()):
                     for sub in _list_all_paginated(folder_id):
                         if sub.type == "file":
-                            box_file_names.add(sub.name)
+                            box_paths.add(str(Path(*path_prefix, sub.name)) if path_prefix else sub.name)
                         elif sub.type == "folder":
-                            _collect(sub.id)
+                            _collect(sub.id, (*path_prefix, sub.name))
 
                 _collect(deploy_folder.id)
 
-                expected_names = {e["filename"] for e in manifest_entries}
-                missing = expected_names - box_file_names
+                expected_paths = {e["relative_path"] for e in manifest_entries}
+                missing = expected_paths - box_paths
                 if missing:
                     missing_str = ", ".join(sorted(missing)[:10])
                     append_qc_report(self.deployment_folder, "box_upload", "", "warning",
                                      f"{len(missing)} file(s) uploaded but missing from Box: {missing_str}")
                     self.finished.emit(failed_uploads == [],
-                        f"Uploaded {uploaded} of {total_files} files. "
+                        f"Completed {completed} of {total_files} files "
+                        f"({uploaded} uploaded, {versioned} metadata versioned, {skipped} skipped). "
                         f"{len(missing)} appear missing from Box after verification: {missing_str}. "
                         f"{len(failed_uploads)} per-file upload error(s). "
                         "Run 'Verify Box Upload' to investigate. Re-running the upload will retry failed/missing files.")
@@ -1448,12 +1622,17 @@ class BoxUploadThread(QThread):
                 append_qc_report(self.deployment_folder, "box_upload", "", "warning",
                                  f"{len(failed_uploads)} file(s) failed to upload after retries")
                 self.finished.emit(False,
-                    f"Uploaded {uploaded} of {total_files} files. "
+                    f"Completed {completed} of {total_files} files "
+                    f"({uploaded} uploaded, {versioned} metadata versioned, {skipped} skipped). "
                     f"{len(failed_uploads)} file(s) failed after 3 retries each:\n{fail_lines}{more}\n\n"
                     "Re-run the upload — successfully uploaded files will be skipped, only failed ones retry.")
                 return
 
-            self.finished.emit(True, f"Successfully uploaded {uploaded} files to Box (verified)")
+            self.finished.emit(
+                True,
+                f"Box upload verified: {uploaded} uploaded, {versioned} metadata file(s) versioned, "
+                f"{skipped} existing raw file(s) skipped."
+            )
         except Exception as e:
             self.finished.emit(False, f"Upload error: {str(e)}")
 
@@ -1472,6 +1651,7 @@ class BoxUploadThread(QThread):
     def find_or_create_folder(self, client, parent_id, folder_name):
         """Find existing folder or create new one. Resolution is cached so the same
         (parent_id, folder_name) pair is only resolved once per upload session."""
+        folder_name = sanitize_box_folder_name(folder_name)
         cache_key = (parent_id, folder_name)
         cached_id = self._resolved_folders.get(cache_key)
         if cached_id is not None:
@@ -1542,7 +1722,7 @@ class BoxUploadThread(QThread):
         # Immutable raw_data files: skip if already on Box
         is_raw_data = "raw_data" in relative_path.parts
         if existing_id and is_raw_data:
-            return
+            return "skipped"
 
         file_size = local_path.stat().st_size
 
@@ -1554,6 +1734,7 @@ class BoxUploadThread(QThread):
                     attributes=UploadFileVersionAttributes(name=file_name),
                     file=file_stream,
                 )
+                return "versioned"
             elif file_size >= CHUNKED_UPLOAD_THRESHOLD:
                 self.client.chunked_uploads.upload_big_file(
                     file=file_stream,
@@ -1561,6 +1742,8 @@ class BoxUploadThread(QThread):
                     file_size=file_size,
                     parent_folder_id=current_folder_id,
                 )
+                self._box_folder_files[current_folder_id].setdefault(file_name, "")
+                return "uploaded"
             else:
                 result = self.client.uploads.upload_file(
                     attributes={'name': file_name, 'parent': {'id': current_folder_id}},
@@ -1571,6 +1754,7 @@ class BoxUploadThread(QThread):
                     self._box_folder_files[current_folder_id][file_name] = new_id
                 except Exception:
                     self._box_folder_files[current_folder_id].setdefault(file_name, "")
+                return "uploaded"
 
 
 class BoxVerifyThread(QThread):
@@ -1598,13 +1782,19 @@ class BoxVerifyThread(QThread):
                 return
 
             year = self.metadata.get("deployment_end", "")[:4]
+            reserve_folder_name = sanitize_box_folder_name(reserve_name)
             deploy_name = self.deployment_folder.name
 
             def _list_all(folder_id):
                 offset = 0
                 limit = 1000
                 while True:
-                    page = client.folders.get_folder_items(folder_id, limit=limit, offset=offset)
+                    page = client.folders.get_folder_items(
+                        folder_id,
+                        fields=["id", "type", "name", "sha1"],
+                        limit=limit,
+                        offset=offset,
+                    )
                     entries = page.entries or []
                     for it in entries:
                         yield it
@@ -1622,42 +1812,47 @@ class BoxVerifyThread(QThread):
             if not year_id:
                 self.finished.emit(False, f"Year folder '{year}' not found on Box", [])
                 return
-            reserve_id = _find_child(year_id, reserve_name)
+            reserve_id = _find_child(year_id, reserve_folder_name)
             if not reserve_id:
-                self.finished.emit(False, f"Reserve folder '{reserve_name}' not found on Box", [])
+                self.finished.emit(False, f"Reserve folder '{reserve_folder_name}' not found on Box", [])
                 return
             deploy_id = _find_child(reserve_id, deploy_name)
             if not deploy_id:
                 self.finished.emit(False, f"Deployment folder '{deploy_name}' not found on Box", [])
                 return
 
-            box_filenames: set[str] = set()
-            def _collect(folder_id):
+            box_paths: set[str] = set()
+            def _collect(folder_id, path_prefix=()):
                 for it in _list_all(folder_id):
                     if it.type == "file":
-                        box_filenames.add(it.name)
+                        box_paths.add(str(Path(*path_prefix, it.name)) if path_prefix else it.name)
                     elif it.type == "folder":
-                        _collect(it.id)
+                        _collect(it.id, (*path_prefix, it.name))
             _collect(deploy_id)
 
-            local_filenames = {e["new_filename"] for e in self.file_inventory if e.get("new_filename")}
-            missing = local_filenames - box_filenames
-            extra = box_filenames - local_filenames
+            local_paths = {
+                str(Path("raw_data", e["device_label"], e["new_filename"]))
+                for e in self.file_inventory
+                if e.get("device_label") and e.get("new_filename")
+            }
+            missing = local_paths - box_paths
+            extra = box_paths - local_paths
 
             EXPECTED_METADATA = {
                 "image_file_metadata.csv",
                 "audio_file_metadata.csv",
                 "deployment_event_record.json",
-                "qc_report.json",
-                "box_upload_manifest.json",
-                "box_upload_verification.json",
-                "deployment_summary.txt",
+                "qc/qc_report.json",
+                "qc/box_upload_manifest.json",
+                "qc/box_upload_verification.json",
+                "qc/deployment_summary.txt",
             }
             extra = {
-                name for name in extra
-                if name not in EXPECTED_METADATA
-                and not name.startswith("wildlife_insights_")
-                and not name.endswith("_manifest.json")
+                path for path in extra
+                if path not in EXPECTED_METADATA
+                and not path.startswith("qc/lookup_snapshot/")
+                and not Path(path).name.startswith("wildlife_insights_")
+                and not Path(path).name.endswith("_manifest.json")
             }
 
             issues = (
@@ -1716,10 +1911,12 @@ class ProvenanceUploadThread(QThread):
 
 
 class FixityCheckThread(QThread):
-    """End-to-end file-hash verification: compute SHA-1 of each local file and
-    compare against the SHA-1 Box reports for the same file. Box's SHA-1 is
-    computed server-side from the bytes that actually arrived and are stored,
-    so a match proves the file on Box is byte-identical to the file locally."""
+    """End-to-end file-hash verification against Box.
+
+    Uses the SHA-1 captured at local ingest when available; falls back to
+    computing local SHA-1 for older sessions. Box's SHA-1 is computed
+    server-side from the bytes that actually arrived and are stored.
+    """
     progress = Signal(int, int, str)   # checked, total, current_filename
     finished = Signal(bool, str, list)  # ok, summary_message, mismatch_list
 
@@ -1750,13 +1947,19 @@ class FixityCheckThread(QThread):
                 return
 
             year = self.metadata.get('deployment_end', '')[:4]
+            reserve_folder_name = sanitize_box_folder_name(reserve_name)
             deploy_name = self.deployment_folder.name
 
-            def _list_all(folder_id):
+            def _list_all_with_sha1(folder_id):
                 offset = 0
                 limit = 1000
                 while True:
-                    page = client.folders.get_folder_items(folder_id, limit=limit, offset=offset)
+                    page = client.folders.get_folder_items(
+                        folder_id,
+                        fields=["id", "type", "name", "sha1"],
+                        limit=limit,
+                        offset=offset,
+                    )
                     entries = page.entries or []
                     for it in entries:
                         yield it
@@ -1765,7 +1968,7 @@ class FixityCheckThread(QThread):
                     offset += limit
 
             def _find_child(parent_id, name):
-                for it in _list_all(parent_id):
+                for it in _list_all_with_sha1(parent_id):
                     if it.type == "folder" and it.name == name:
                         return it.id
                 return None
@@ -1774,9 +1977,9 @@ class FixityCheckThread(QThread):
             if not year_id:
                 self.finished.emit(False, f"Year folder '{year}' not found on Box.", [])
                 return
-            reserve_id = _find_child(year_id, reserve_name)
+            reserve_id = _find_child(year_id, reserve_folder_name)
             if not reserve_id:
-                self.finished.emit(False, f"Reserve folder '{reserve_name}' not found on Box.", [])
+                self.finished.emit(False, f"Reserve folder '{reserve_folder_name}' not found on Box.", [])
                 return
             deploy_id = _find_child(reserve_id, deploy_name)
             if not deploy_id:
@@ -1792,9 +1995,9 @@ class FixityCheckThread(QThread):
             def _collect(folder_id, parent_name):
                 if self._cancel_event.is_set():
                     return
-                for it in _list_all(folder_id):
+                for it in _list_all_with_sha1(folder_id):
                     if it.type == "file":
-                        sha1 = getattr(it, 'sha1', None) or ''
+                        sha1 = getattr(it, 'sha_1', None) or getattr(it, 'sha1', None) or ''
                         box_hashes[(parent_name, it.name)] = sha1.lower()
                         box_names_only.add(it.name)
                     elif it.type == "folder":
@@ -1814,11 +2017,22 @@ class FixityCheckThread(QThread):
 
             files_to_check = [
                 f for f in raw_data_dir.rglob("*")
-                if f.is_file() and not f.name.startswith(".")
+                if f.is_file() and BoxUploadThread.should_upload_file(f)
             ]
+            inventory_sha1_by_key = {
+                (e.get("device_label", ""), e.get("new_filename", "")): e.get("file_hash_sha1", "")
+                for e in self.file_inventory
+                if e.get("device_label") and e.get("new_filename")
+            }
+            inventory_entry_by_key = {
+                (e.get("device_label", ""), e.get("new_filename", "")): e
+                for e in self.file_inventory
+                if e.get("device_label") and e.get("new_filename")
+            }
             total = len(files_to_check)
             mismatches = []          # local SHA-1 != Box SHA-1
             missing_from_box = []    # local file has no counterpart on Box
+            box_hash_unavailable = []  # Box file found, but API did not return a SHA-1
             checked = 0
             seen_keys: set[tuple[str, str]] = set()
 
@@ -1834,8 +2048,15 @@ class FixityCheckThread(QThread):
                 if box_sha1 is None:
                     # Box doesn't have this file at this path
                     missing_from_box.append(f"{fp.parent.name}/{fp.name}")
+                elif not box_sha1:
+                    box_hash_unavailable.append(f"{fp.parent.name}/{fp.name}")
                 else:
-                    local_sha1 = compute_file_sha1(fp)
+                    local_sha1 = inventory_sha1_by_key.get(key)
+                    if not local_sha1:
+                        local_sha1 = compute_file_sha1(fp)
+                        entry = inventory_entry_by_key.get(key)
+                        if entry is not None:
+                            entry["file_hash_sha1"] = local_sha1
                     if local_sha1.lower() != box_sha1:
                         mismatches.append({
                             "filename": f"{fp.parent.name}/{fp.name}",
@@ -1847,14 +2068,16 @@ class FixityCheckThread(QThread):
             self.progress.emit(checked, total, "")
 
             # 5) Compose result
-            all_ok = not mismatches and not missing_from_box
+            all_ok = not mismatches and not missing_from_box and not box_hash_unavailable
             summary = (
                 f"End-to-end hash verification: {checked} local file(s) checked against Box. "
-                f"{len(mismatches)} hash mismatch(es), {len(missing_from_box)} file(s) missing from Box."
+                f"{len(mismatches)} hash mismatch(es), {len(missing_from_box)} file(s) missing from Box, "
+                f"{len(box_hash_unavailable)} Box hash(es) unavailable."
             )
             issues = (
                 [{"type": "mismatch", "filename": m["filename"]} for m in mismatches]
                 + [{"type": "missing", "filename": n} for n in missing_from_box]
+                + [{"type": "box_hash_unavailable", "filename": n} for n in box_hash_unavailable]
             )
             self.finished.emit(all_ok, summary, issues)
 
@@ -1877,7 +2100,10 @@ class FieldDataWizard(QMainWindow):
         self.seen_file_hashes = set()  # session-wide duplicate detection
         self.upload_thread = None
         self.provenance_thread = None
+        self.box_verify_thread = None
         self.fixity_thread = None
+        self._post_upload_box_summary = ""
+        self._post_upload_box_issues = []
         self.fixity_check_run = False  # set True once fixity check completes this session
         self.box_upload_complete = False  # set True once BoxUploadThread finishes successfully
         
@@ -1890,10 +2116,11 @@ class FieldDataWizard(QMainWindow):
         self.wi_config = self._load_wi_config()
 
         # Check Box authentication
-        self.box_authenticated = self.check_box_auth()
+        self.box_authenticated = False if CORE_MODE else self.check_box_auth()
 
         # Sync lookup tables from Box app_config folder (falls back to cache if offline)
-        self.sync_lookup_tables()
+        if not CORE_MODE:
+            self.sync_lookup_tables()
 
         # Build UI
         self.init_ui()
@@ -1905,6 +2132,8 @@ class FieldDataWizard(QMainWindow):
 
     def check_box_auth(self):
         """Check if Box is authenticated"""
+        if CORE_MODE:
+            return False
         if not BOX_AVAILABLE:
             return False
         
@@ -1931,6 +2160,8 @@ class FieldDataWizard(QMainWindow):
           - If cache exists: warns user with last-synced date and asks to confirm.
           - If no cache: hard blocks with an error and quits.
         """
+        if CORE_MODE:
+            return
         if not BOX_APP_CONFIG_FOLDER_ID:
             return
 
@@ -2037,8 +2268,16 @@ class FieldDataWizard(QMainWindow):
         """Save configuration"""
         try:
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            config = {}
+            if self.config_file.exists():
+                try:
+                    with open(self.config_file, 'r') as f:
+                        config = json.load(f)
+                except Exception:
+                    config = {}
+            config['staging_root'] = str(self.staging_root)
             with open(self.config_file, 'w') as f:
-                json.dump({'staging_root': str(self.staging_root)}, f)
+                json.dump(config, f, indent=2)
         except:
             pass
 
@@ -2134,10 +2373,17 @@ class FieldDataWizard(QMainWindow):
         dlg.setWindowTitle("Open Deployment")
         dlg.setMinimumWidth(560)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel(
-            "Select a deployment to open. You can resume in-progress sessions or reopen\n"
-            "completed deployments to run integrity checks (Verify Box Upload, etc.)."
-        ))
+        if CORE_MODE:
+            help_text = (
+                "Select a deployment to open. You can resume in-progress sessions or reopen\n"
+                "completed deployments to review local outputs."
+            )
+        else:
+            help_text = (
+                "Select a deployment to open. You can resume in-progress sessions or reopen\n"
+                "completed deployments to run integrity checks (Verify Box Upload, etc.)."
+            )
+        layout.addWidget(QLabel(help_text))
 
         list_widget = QListWidget()
         for s in sessions:
@@ -2425,35 +2671,37 @@ class FieldDataWizard(QMainWindow):
         staging_group.setLayout(staging_layout)
         layout.addWidget(staging_group)
         
-        # Box upload option
-        box_group = QGroupBox("Box Cloud Storage")
-        box_layout = QVBoxLayout()
-        
-        # Box connection status indicator
-        box_status_layout = QHBoxLayout()
-        box_status_label = QLabel()
-        if self.box_authenticated:
-            box_status_label.setText("✓ Box Connected")
-            box_status_label.setStyleSheet("color: green; font-weight: bold;")
-        else:
-            box_status_label.setText("⚠ Box Not Connected")
-            box_status_label.setStyleSheet("color: orange; font-weight: bold;")
-        box_status_layout.addWidget(box_status_label)
-        box_status_layout.addStretch()
-        box_layout.addLayout(box_status_layout)
-        
         self.upload_to_box_cb = QCheckBox("Upload to Box after processing")
-        self.upload_to_box_cb.setChecked(self.box_authenticated)
-        self.upload_to_box_cb.setEnabled(self.box_authenticated)
-        box_layout.addWidget(self.upload_to_box_cb)
-        
-        if not self.box_authenticated:
-            auth_note = QLabel("⚠ Box not connected. Run box_auth_setup.py to authenticate.")
-            auth_note.setStyleSheet("color: orange;")
-            box_layout.addWidget(auth_note)
-        
-        box_group.setLayout(box_layout)
-        layout.addWidget(box_group)
+        self.upload_to_box_cb.setChecked(False)
+        if not CORE_MODE:
+            # Box upload option
+            box_group = QGroupBox("Box Cloud Storage")
+            box_layout = QVBoxLayout()
+            
+            # Box connection status indicator
+            box_status_layout = QHBoxLayout()
+            box_status_label = QLabel()
+            if self.box_authenticated:
+                box_status_label.setText("✓ Box Connected")
+                box_status_label.setStyleSheet("color: green; font-weight: bold;")
+            else:
+                box_status_label.setText("⚠ Box Not Connected")
+                box_status_label.setStyleSheet("color: orange; font-weight: bold;")
+            box_status_layout.addWidget(box_status_label)
+            box_status_layout.addStretch()
+            box_layout.addLayout(box_status_layout)
+            
+            self.upload_to_box_cb.setChecked(self.box_authenticated)
+            self.upload_to_box_cb.setEnabled(self.box_authenticated)
+            box_layout.addWidget(self.upload_to_box_cb)
+            
+            if not self.box_authenticated:
+                auth_note = QLabel("⚠ Box not connected. Run box_auth_setup.py to authenticate.")
+                auth_note.setStyleSheet("color: orange;")
+                box_layout.addWidget(auth_note)
+            
+            box_group.setLayout(box_layout)
+            layout.addWidget(box_group)
         
         # Navigation button
         nav_layout = QHBoxLayout()
@@ -2563,7 +2811,7 @@ class FieldDataWizard(QMainWindow):
         summary_group.setLayout(summary_layout)
         layout.addWidget(summary_group)
         
-        # Upload progress (hidden by default)
+        # Box upload progress (hidden by default)
         self.upload_group = QGroupBox("Box Upload Progress")
         upload_layout = QVBoxLayout()
         
@@ -2587,7 +2835,25 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_group.setLayout(upload_layout)
         self.upload_group.hide()
-        layout.addWidget(self.upload_group)
+        if not CORE_MODE:
+            layout.addWidget(self.upload_group)
+
+        # Box verification progress (hidden by default)
+        self.hash_group = QGroupBox("Box Verification Progress")
+        hash_layout = QVBoxLayout()
+
+        self.hash_progress_bar = QProgressBar()
+        self.hash_progress_bar.setMinimum(0)
+        self.hash_progress_bar.setMaximum(100)
+        hash_layout.addWidget(self.hash_progress_bar)
+
+        self.hash_status_label = QLabel("")
+        hash_layout.addWidget(self.hash_status_label)
+
+        self.hash_group.setLayout(hash_layout)
+        self.hash_group.hide()
+        if not CORE_MODE:
+            layout.addWidget(self.hash_group)
         
         # Action buttons
         button_layout = QHBoxLayout()
@@ -2601,20 +2867,20 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_now_btn = QPushButton("Upload to Box Now")
         self.upload_now_btn.clicked.connect(self.upload_to_box_manual)
-        self.upload_now_btn.setEnabled(self.box_authenticated)
+        self.upload_now_btn.setEnabled(self.box_authenticated and not CORE_MODE)
 
         self.orphan_scan_btn = QPushButton("Compare Inventory ↔ Disk")
         self.orphan_scan_btn.clicked.connect(self.run_orphan_scan)
         self.orphan_scan_btn.setToolTip("Fast check: list files in inventory missing from disk and files on disk missing from inventory. No hashing.")
 
-        self.fixity_btn = QPushButton("Verify File Hashes")
+        self.fixity_btn = QPushButton("Verify Box ↔ Local Hashes")
         self.fixity_btn.clicked.connect(self.run_fixity_check)
-        self.fixity_btn.setToolTip("End-to-end verification: compute SHA-1 of each local file and compare against the SHA-1 Box reports for the corresponding file on Box. Proves the bytes on Box are byte-identical to the bytes locally. Slow on large datasets — reads every file.")
+        self.fixity_btn.setToolTip("End-to-end Box/local verification: compare each local raw file's SHA-1 against the SHA-1 reported by Box.")
 
         self.box_verify_btn = QPushButton("Verify Box Upload")
         self.box_verify_btn.clicked.connect(self.run_box_verify)
         self.box_verify_btn.setToolTip("List the deployment folder on Box and reconcile against local inventory. Reports missing or unexpected files.")
-        self.box_verify_btn.setEnabled(self.box_authenticated)
+        self.box_verify_btn.setEnabled(self.box_authenticated and not CORE_MODE)
 
         self.new_btn = QPushButton("Start New Deployment")
         self.new_btn.clicked.connect(self.start_new_deployment)
@@ -2624,10 +2890,12 @@ class FieldDataWizard(QMainWindow):
 
         button_layout.addWidget(self.open_btn)
         button_layout.addWidget(self.switch_deployment_btn)
-        button_layout.addWidget(self.upload_now_btn)
+        if not CORE_MODE:
+            button_layout.addWidget(self.upload_now_btn)
         button_layout.addWidget(self.orphan_scan_btn)
-        button_layout.addWidget(self.fixity_btn)
-        button_layout.addWidget(self.box_verify_btn)
+        if not CORE_MODE:
+            button_layout.addWidget(self.fixity_btn)
+            button_layout.addWidget(self.box_verify_btn)
         button_layout.addWidget(self.new_btn)
         button_layout.addStretch()
         button_layout.addWidget(exit_btn)
@@ -2926,6 +3194,7 @@ class FieldDataWizard(QMainWindow):
         hash_mismatch_count = 0
         duplicate_count = 0
         small_file_names: list[str] = []
+        small_file_thresholds: Counter[str] = Counter()
         hash_mismatch_names: list[str] = []
         duplicate_names: list[str] = []
 
@@ -3044,17 +3313,17 @@ class FieldDataWizard(QMainWindow):
                     except Exception as e:
                         self.log(f"  Warning: could not remove partial file {dest_path.name}: {e}")
 
-                source_hash = compute_file_hash(source_path)
+                source_hash, source_sha1 = compute_file_hashes(source_path)
                 shutil.copy2(source_path, dest_path)
-                file_hash = compute_file_hash(dest_path)
+                file_hash, file_sha1 = compute_file_hashes(dest_path)
 
                 # Post-copy hash verification: destination must match source
-                if file_hash != source_hash:
+                if file_hash != source_hash or file_sha1 != source_sha1:
                     try:
                         dest_path.unlink()
                     except Exception:
                         pass
-                    self.log(f"  ERROR: hash mismatch after copy — {filename} skipped (source hash {source_hash[:8]}… ≠ dest {file_hash[:8]}…)")
+                    self.log(f"  ERROR: hash mismatch after copy — {filename} skipped (source SHA-256 {source_hash[:8]}… ≠ dest {file_hash[:8]}…)")
                     hash_mismatch_count += 1
                     hash_mismatch_names.append(filename)
                     append_qc_report(self.current_deployment_folder, "hash_verification", device_label, "error",
@@ -3064,12 +3333,18 @@ class FieldDataWizard(QMainWindow):
                         f"The file has been removed from staging. Check the SD card and retry.")
                     continue
 
-                # File size floor: flag suspiciously small files
+                # File size floor: flag suspiciously small files using device-aware thresholds.
                 dest_size = dest_path.stat().st_size
-                if file_type in ("image", "audio") and dest_size < MIN_IMAGE_SIZE_BYTES:
-                    self.log(f"  Warning: {new_filename} is only {dest_size} bytes — possible corrupted write")
+                size_floor = file_size_floor_for(file_type, dev_code)
+                if size_floor is not None and dest_size < size_floor:
+                    floor_label = format_size_floor(size_floor)
+                    self.log(
+                        f"  Warning: {new_filename} is only {format_size_floor(dest_size)} "
+                        f"(below {floor_label} floor) — possible corrupted write"
+                    )
                     small_file_count += 1
                     small_file_names.append(new_filename)
+                    small_file_thresholds[floor_label] += 1
 
                 # Recorded datetime: authoritative time from device
                 if file_type == "image":
@@ -3103,6 +3378,7 @@ class FieldDataWizard(QMainWindow):
                     'file_type': file_type,
                     'file_size_bytes': dest_path.stat().st_size,
                     'file_hash_sha256': file_hash,
+                    'file_hash_sha1': file_sha1,
                     'recorded_datetime': recorded_datetime,
                     'latitude': plot_metadata.get('plot_latitude') or '',
                     'longitude': plot_metadata.get('plot_longitude') or '',
@@ -3149,7 +3425,7 @@ class FieldDataWizard(QMainWindow):
                 files_copied += 1
 
                 if file_type == "audio":
-                    size_mb = dest_path.stat().st_size / (1024 * 1024)
+                    size_mb = dest_path.stat().st_size / 1_000_000
                     self.log(f"  [{files_copied}] {new_filename}  ({size_mb:.1f} MB)")
                 elif files_copied % 10 == 0:
                     self.log(f"  ...{files_copied} files processed")
@@ -3157,8 +3433,19 @@ class FieldDataWizard(QMainWindow):
                 if files_copied % 10 == 0:
                     self.save_session()
 
+        expected_floor = (
+            file_size_floor_for("audio", dev_code)
+            if dev_code in audio_device_types
+            else file_size_floor_for("image", dev_code)
+        )
+        floor_summary = (
+            ", ".join(f"{count} under {floor}" for floor, count in small_file_thresholds.items())
+            if small_file_thresholds
+            else format_size_floor(expected_floor) if expected_floor is not None else "no configured threshold"
+        )
+
         if small_file_count:
-            self.log(f"  Warning: {small_file_count} file(s) below {MIN_IMAGE_SIZE_BYTES // 1024} KB — possible corrupted writes. Review before proceeding.")
+            self.log(f"  Warning: {small_file_count} file(s) below size floor(s): {floor_summary}. Review before proceeding.")
 
         # Per-file aggregate summaries for qc_report.json
         if files_copied > 0:
@@ -3169,10 +3456,13 @@ class FieldDataWizard(QMainWindow):
             pass
         if small_file_count > 0:
             append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "warning",
-                             f"{small_file_count} file(s) under {MIN_IMAGE_SIZE_BYTES // 1024} KB threshold")
+                             f"{small_file_count} file(s) below device-aware size floor(s): {floor_summary}")
+        elif expected_floor is not None:
+            append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "pass",
+                             f"All {files_copied} file(s) above {format_size_floor(expected_floor)} threshold")
         else:
             append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "pass",
-                             f"All {files_copied} file(s) above {MIN_IMAGE_SIZE_BYTES // 1024} KB threshold")
+                             "No device-specific file-size floor applied")
         if duplicate_count > 0:
             append_qc_report(self.current_deployment_folder, "duplicate_detection", device_label, "warning",
                              f"{duplicate_count} duplicate file(s) skipped")
@@ -3431,6 +3721,7 @@ class FieldDataWizard(QMainWindow):
                 'file_type':          file_type,
                 'file_size_bytes':    entry.get('file_size_bytes', ''),
                 'file_hash_sha256':   entry.get('file_hash_sha256', ''),
+                'file_hash_sha1':     entry.get('file_hash_sha1', ''),
                 'recorded_datetime':  entry.get('recorded_datetime', ''),
                 'latitude':           entry.get('latitude', ''),
                 'longitude':          entry.get('longitude', ''),
@@ -3576,6 +3867,40 @@ class FieldDataWizard(QMainWindow):
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2)
         self.log(f"{'Updated' if existed else 'Generated'}: deployment_event_record.json")
+
+        try:
+            lookup_manifest = snapshot_lookup_tables(self.current_deployment_folder)
+            if lookup_manifest:
+                ok_count = sum(1 for item in lookup_manifest if "error" not in item)
+                err_count = len(lookup_manifest) - ok_count
+                severity = "warning" if err_count else "pass"
+                append_qc_report(
+                    self.current_deployment_folder,
+                    "lookup_snapshot",
+                    "",
+                    severity,
+                    f"Snapshotted {ok_count} lookup/config file(s) to qc/lookup_snapshot/"
+                    + (f"; {err_count} failed" if err_count else ""),
+                )
+                self.log(f"Updated: qc/lookup_snapshot/ ({ok_count} file(s))")
+            else:
+                append_qc_report(
+                    self.current_deployment_folder,
+                    "lookup_snapshot",
+                    "",
+                    "warning",
+                    f"No lookup/config files found in {_LOCAL_DATA_DIR}",
+                )
+                self.log("Warning: no lookup/config files available to snapshot")
+        except Exception as e:
+            append_qc_report(
+                self.current_deployment_folder,
+                "lookup_snapshot",
+                "",
+                "warning",
+                f"Could not snapshot lookup/config files: {e}",
+            )
+            self.log(f"Warning: could not snapshot lookup/config files: {e}")
 
     def generate_metadata_files(self):
         """Generate CSVs, deployment_event_record.json, and WI deployment exports."""
@@ -3815,8 +4140,12 @@ class FieldDataWizard(QMainWindow):
         summary.append("NEXT STEPS")
         summary.append("=" * 60)
         summary.append("1. Review the files in the staging folder")
-        summary.append("2. Verify Box upload completed successfully")
-        summary.append("3. Keep a backup of the original SD cards until transfer is verified")
+        if CORE_MODE:
+            summary.append("2. Review image/audio metadata CSVs")
+            summary.append("3. Keep a backup of the original SD cards until local outputs are verified")
+        else:
+            summary.append("2. Verify Box upload completed successfully")
+            summary.append("3. Keep a backup of the original SD cards until transfer is verified")
         
         self.summary_text.setText('\n'.join(summary))
     
@@ -3874,19 +4203,18 @@ class FieldDataWizard(QMainWindow):
         """Handle upload completion"""
         # Re-enable buttons, hide the cancel button
         self.open_btn.setEnabled(True)
-        self.upload_now_btn.setEnabled(True)
-        self.new_btn.setEnabled(True)
         self.cancel_upload_btn.hide()
         
         if success:
             self.upload_progress_bar.setValue(100)
             self.upload_status_label.setText(f"✓ {message}")
             self.upload_status_label.setStyleSheet("color: green; font-weight: bold;")
-            QMessageBox.information(self, "Upload Complete", message)
             self.box_upload_complete = True
             # Update provenance in both metadata CSVs
             self._write_upload_provenance()
         else:
+            self.upload_now_btn.setEnabled(True)
+            self.new_btn.setEnabled(True)
             self.upload_status_label.setText(f"✗ {message}")
             self.upload_status_label.setStyleSheet("color: red; font-weight: bold;")
             QMessageBox.warning(self, "Upload Failed", message)
@@ -3930,6 +4258,9 @@ class FieldDataWizard(QMainWindow):
             self.provenance_thread.start()
         elif updated_paths:
             self.log("Warning: deploy_folder_id not available — provenance CSVs updated locally only")
+            self._start_post_upload_verification()
+        else:
+            self._start_post_upload_verification()
     
     def _on_provenance_upload_finished(self, success, message):
         """Handle completion of provenance CSV re-upload to Box."""
@@ -3937,6 +4268,184 @@ class FieldDataWizard(QMainWindow):
             self.log(f"✓ {message}")
         else:
             self.log(f"Warning: {message}")
+        self._start_post_upload_verification()
+
+    def _start_post_upload_verification(self):
+        """Run Box file-list verification, then Box/local hash verification."""
+        if CORE_MODE or not self.current_deployment_folder or not self.file_inventory:
+            self.upload_now_btn.setEnabled(self.box_authenticated and not CORE_MODE)
+            self.new_btn.setEnabled(True)
+            return
+        if self.box_verify_thread and self.box_verify_thread.isRunning():
+            return
+        if self.fixity_thread and self.fixity_thread.isRunning():
+            return
+
+        self._post_upload_box_summary = ""
+        self._post_upload_box_issues = []
+        self.hash_group.setTitle("Post-upload Verification Progress")
+        self.hash_group.show()
+        self.hash_progress_bar.setRange(0, 100)
+        self.hash_progress_bar.setValue(0)
+        self.hash_status_label.setStyleSheet("")
+        self.hash_status_label.setText("Starting post-upload verification...")
+        self.upload_status_label.setStyleSheet("")
+        self.upload_status_label.setText("Upload complete. Running post-upload verification...")
+        self.log("Starting automatic post-upload verification...")
+
+        self.upload_now_btn.setEnabled(False)
+        self.box_verify_btn.setEnabled(False)
+        self.fixity_btn.setEnabled(False)
+        self.new_btn.setEnabled(False)
+
+        self.hash_progress_bar.setValue(5)
+        self.hash_status_label.setText("Checking Box file list and folder contents...")
+        self.box_verify_thread = BoxVerifyThread(
+            self.current_deployment_folder, self.file_inventory, self.metadata
+        )
+        self.box_verify_thread.finished.connect(self._on_auto_box_verify_finished)
+        self.box_verify_thread.start()
+
+    def _on_auto_box_verify_finished(self, ok: bool, summary: str, issues: list):
+        """Continue automatic post-upload verification after Box file-list check."""
+        self._post_upload_box_summary = summary
+        self._post_upload_box_issues = issues or []
+        self.log(summary)
+
+        severity = "pass" if ok and not issues else ("warning" if ok else "error")
+        append_qc_report(self.current_deployment_folder, "box_verify", "", severity, summary)
+
+        if not ok:
+            self._finish_post_upload_verification(False, "Post-upload verification failed during Box file-list check.", [])
+            return
+
+        self.hash_progress_bar.setValue(10)
+        self.hash_status_label.setText("Box file list checked. Starting Box ↔ local hash verification...")
+        self.log("Starting automatic Box ↔ local hash verification...")
+
+        self.fixity_thread = FixityCheckThread(self.current_deployment_folder, self.file_inventory, self.metadata)
+        self.fixity_thread.progress.connect(self._on_auto_fixity_progress)
+        self.fixity_thread.finished.connect(self._on_auto_fixity_finished)
+        self.fixity_thread.start()
+
+    def _on_auto_fixity_progress(self, checked: int, total: int, filename: str):
+        if total <= 0:
+            if filename:
+                self.hash_status_label.setText(filename)
+                self.log(f"  Hash verify: {filename}")
+            return
+
+        hash_percent = int((checked / total) * 90)
+        percent = min(100, 10 + hash_percent)
+        self.hash_progress_bar.setValue(percent)
+        if filename:
+            self.hash_status_label.setText(
+                f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%) — {filename}"
+            )
+        else:
+            self.hash_status_label.setText(
+                f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%)"
+            )
+
+        if filename and (checked == 0 or checked % 500 == 0):
+            self.log(f"  Hash verify: {checked}/{total} — {filename}")
+
+    def _on_auto_fixity_finished(self, ok: bool, summary: str, issues: list):
+        self.fixity_check_run = True
+        self.log(summary)
+        self.save_session()
+
+        severity = "pass" if ok else "error"
+        append_qc_report(self.current_deployment_folder, "file_hash_verification_run", "", severity, summary)
+        for issue in issues:
+            append_qc_report(
+                self.current_deployment_folder,
+                "file_hash_" + issue["type"],
+                "",
+                "error",
+                issue["filename"],
+            )
+
+        self._finish_post_upload_verification(ok, summary, issues or [])
+
+    def _finish_post_upload_verification(self, hash_ok: bool, hash_summary: str, hash_issues: list):
+        box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
+        box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
+        has_box_warning = bool(box_extra)
+        all_ok = hash_ok and not box_missing and not box_extra and not hash_issues
+
+        self.upload_now_btn.setEnabled(self.box_authenticated and not CORE_MODE)
+        self.box_verify_btn.setEnabled(self.box_authenticated and not CORE_MODE)
+        self.fixity_btn.setEnabled(not CORE_MODE)
+        self.new_btn.setEnabled(True)
+
+        self.hash_progress_bar.setValue(100 if hash_ok else self.hash_progress_bar.value())
+        final_summary = (
+            "Post-upload verification complete.\n"
+            f"Box file list: {self._post_upload_box_summary or 'Not run'}\n"
+            f"Box/local hashes: {hash_summary}"
+        )
+        if all_ok:
+            self.hash_status_label.setText("✓ Post-upload verification complete: Box file list and hashes verified.")
+            self.hash_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.upload_status_label.setText("✓ Upload and post-upload verification complete.")
+            QMessageBox.information(self, "Post-upload Verification Complete", final_summary)
+            return
+
+        if has_box_warning and hash_ok and not box_missing and not hash_issues:
+            self.hash_status_label.setText("⚠ Post-upload verification complete with Box extras.")
+            self.hash_status_label.setStyleSheet("color: orange; font-weight: bold;")
+            self.upload_status_label.setText("⚠ Upload verified with Box extras.")
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Post-upload Verification Warning")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(final_summary)
+            msg.setDetailedText(self._format_post_upload_issues(hash_issues))
+            msg.exec()
+            return
+
+        self.hash_status_label.setText("✗ Post-upload verification found issues.")
+        self.hash_status_label.setStyleSheet("color: red; font-weight: bold;")
+        self.upload_status_label.setText("✗ Upload completed, but post-upload verification found issues.")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Post-upload Verification Issues")
+        msg.setIcon(QMessageBox.Critical)
+        msg.setText(final_summary)
+        msg.setDetailedText(self._format_post_upload_issues(hash_issues))
+        msg.exec()
+
+    def _format_post_upload_issues(self, hash_issues: list) -> str:
+        lines = []
+        box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
+        box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
+        hash_mismatches = [i for i in hash_issues if i["type"] == "mismatch"]
+        hash_missing = [i for i in hash_issues if i["type"] == "missing"]
+        hash_unavailable = [i for i in hash_issues if i["type"] == "box_hash_unavailable"]
+
+        if box_missing:
+            lines.append(f"FILES IN INVENTORY BUT MISSING FROM BOX ({len(box_missing)}):")
+            lines.extend(f"  ✗ {m['filename']}" for m in box_missing[:100])
+        if box_extra:
+            if lines:
+                lines.append("")
+            lines.append(f"FILES ON BOX BUT NOT IN LOCAL INVENTORY ({len(box_extra)}):")
+            lines.extend(f"  ⚠ {m['filename']}" for m in box_extra[:100])
+        if hash_mismatches:
+            if lines:
+                lines.append("")
+            lines.append(f"HASH MISMATCHES ({len(hash_mismatches)}):")
+            lines.extend(f"  ✗ {m['filename']}" for m in hash_mismatches[:100])
+        if hash_missing:
+            if lines:
+                lines.append("")
+            lines.append(f"FILES LOCAL BUT MISSING FROM BOX DURING HASH CHECK ({len(hash_missing)}):")
+            lines.extend(f"  ✗ {m['filename']}" for m in hash_missing[:100])
+        if hash_unavailable:
+            if lines:
+                lines.append("")
+            lines.append(f"BOX HASHES UNAVAILABLE ({len(hash_unavailable)}):")
+            lines.extend(f"  ✗ {m['filename']}" for m in hash_unavailable[:100])
+        return "\n".join(lines)
 
     def _run_device_qc_checks(self, device_entries: list, device_label: str):
         """Run QC checks after a device completes. Logs each check (pass + fail) to qc_report.json."""
@@ -4000,7 +4509,7 @@ class FieldDataWizard(QMainWindow):
             self.log("\n".join(f"  {l}" for l in lines if l))
 
     def run_fixity_check(self):
-        """Re-hash all raw_data/ files and compare against session inventory hashes."""
+        """Compare raw_data/ SHA-1 values against Box-reported SHA-1 values."""
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Session", "Load a session first.")
             return
@@ -4013,7 +4522,12 @@ class FieldDataWizard(QMainWindow):
 
         self.fixity_btn.setEnabled(False)
         self.fixity_btn.setText("Checking…")
-        self.log("Starting staging drive fixity check…")
+        self.hash_group.setTitle("Box ↔ Local Hash Verification Progress")
+        self.hash_group.show()
+        self.hash_progress_bar.setValue(0)
+        self.hash_status_label.setStyleSheet("")
+        self.hash_status_label.setText("Starting Box ↔ local hash verification...")
+        self.log("Starting Box ↔ local hash verification…")
 
         self.fixity_thread = FixityCheckThread(self.current_deployment_folder, self.file_inventory, self.metadata)
         self.fixity_thread.progress.connect(self._on_fixity_progress)
@@ -4021,14 +4535,37 @@ class FieldDataWizard(QMainWindow):
         self.fixity_thread.start()
 
     def _on_fixity_progress(self, checked: int, total: int, filename: str):
-        if total > 0 and filename:
-            self.log(f"  Fixity: {checked}/{total} — {filename}")
+        if total <= 0:
+            if filename:
+                self.hash_status_label.setText(filename)
+                self.log(f"  Hash verify: {filename}")
+            return
+
+        percent = int((checked / total) * 100)
+        self.hash_progress_bar.setValue(percent)
+        if filename:
+            self.hash_status_label.setText(
+                f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%) — {filename}"
+            )
+        else:
+            self.hash_status_label.setText(
+                f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%)"
+            )
+
+        if filename and (checked == 0 or checked % 500 == 0):
+            self.log(f"  Hash verify: {checked}/{total} — {filename}")
 
     def _on_fixity_finished(self, ok: bool, summary: str, issues: list):
         self.fixity_btn.setEnabled(True)
-        self.fixity_btn.setText("Verify File Hashes")
+        self.fixity_btn.setText("Verify Box ↔ Local Hashes")
         self.fixity_check_run = True
         self.log(summary)
+        self.save_session()
+        self.hash_progress_bar.setValue(100 if ok else self.hash_progress_bar.value())
+        self.hash_status_label.setText(("✓ " if ok else "✗ ") + summary)
+        self.hash_status_label.setStyleSheet(
+            "color: green; font-weight: bold;" if ok else "color: red; font-weight: bold;"
+        )
 
         # Aggregate fixity_check entry covering the whole run
         severity = "pass" if ok else "error"
@@ -4041,6 +4578,7 @@ class FieldDataWizard(QMainWindow):
         lines = []
         mismatches = [i for i in issues if i["type"] == "mismatch"]
         missing = [i for i in issues if i["type"] == "missing"]
+        unavailable = [i for i in issues if i["type"] == "box_hash_unavailable"]
         if mismatches:
             lines.append(f"HASH MISMATCHES ({len(mismatches)}) — local bytes differ from Box bytes:")
             for m in mismatches:
@@ -4051,9 +4589,15 @@ class FieldDataWizard(QMainWindow):
             lines.append(f"FILES LOCAL BUT MISSING FROM BOX ({len(missing)}):")
             for m in missing:
                 lines.append(f"  ✗ {m['filename']}")
+        if unavailable:
+            if lines:
+                lines.append("")
+            lines.append(f"BOX HASHES UNAVAILABLE ({len(unavailable)}) — Box file found, but no SHA-1 was returned:")
+            for m in unavailable:
+                lines.append(f"  ✗ {m['filename']}")
 
         msg = QMessageBox(self)
-        msg.setWindowTitle("Verify File Hashes — Issues Found")
+        msg.setWindowTitle("Verify Box ↔ Local Hashes — Issues Found")
         msg.setIcon(QMessageBox.Critical)
         msg.setText(summary)
         msg.setDetailedText("\n".join(lines))
@@ -4200,22 +4744,23 @@ class FieldDataWizard(QMainWindow):
             "note": f"Missing: {', '.join(missing_manifests)}" if missing_manifests else "",
         })
 
-        # 3. Fixity check run this session
-        items.append({
-            "label": "Staging drive fixity check run",
-            "ok": self.fixity_check_run,
-            "note": "Click 'Verify File Hashes' before departing" if not self.fixity_check_run else "",
-        })
+        if not CORE_MODE:
+            # 3. Fixity check run this session
+            items.append({
+                "label": "Staging drive fixity check run",
+                "ok": self.fixity_check_run,
+                "note": "Click 'Verify Box ↔ Local Hashes' before departing" if not self.fixity_check_run else "",
+            })
 
-        # 4. Box upload verified
-        verification_file = qc_path_for(self.current_deployment_folder, "box_upload_verification.json")
-        upload_manifest = qc_path_for(self.current_deployment_folder, "box_upload_manifest.json")
-        box_ok = self.box_upload_complete or verification_file.exists() or upload_manifest.exists()
-        items.append({
-            "label": "Box upload completed",
-            "ok": box_ok,
-            "note": "No upload recorded for this session" if not box_ok else "",
-        })
+            # 4. Box upload verified
+            verification_file = qc_path_for(self.current_deployment_folder, "box_upload_verification.json")
+            upload_manifest = qc_path_for(self.current_deployment_folder, "box_upload_manifest.json")
+            box_ok = self.box_upload_complete or verification_file.exists() or upload_manifest.exists()
+            items.append({
+                "label": "Box upload completed",
+                "ok": box_ok,
+                "note": "No upload recorded for this session" if not box_ok else "",
+            })
 
         # 5. No QC errors in qc_report.json
         qc_ok = True
@@ -4364,6 +4909,8 @@ class FieldDataWizard(QMainWindow):
             self.log_text.clear()
             self.summary_text.clear()
             self.upload_group.hide()
+            if hasattr(self, "hash_group"):
+                self.hash_group.hide()
             
             self.tabs.setCurrentIndex(0)
 
@@ -4373,7 +4920,7 @@ def main():
         print("Warning: PIL/piexif not available. EXIF extraction will be disabled.")
         print("Install with: pip install pillow piexif")
     
-    if not BOX_AVAILABLE:
+    if not CORE_MODE and not BOX_AVAILABLE:
         print("Warning: box-sdk-gen not available. Box upload will be disabled.")
         print("Install with: pip install box-sdk-gen")
         print("Then run box_auth_setup.py to authenticate")
