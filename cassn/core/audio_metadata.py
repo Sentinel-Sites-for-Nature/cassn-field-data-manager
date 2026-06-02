@@ -199,8 +199,6 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
         m = re.search(r"(\d+)s minimum trigger duration", comment, re.IGNORECASE)
         if m:
             result["filter_type_duration"] = m.group(1)
-
-        result["ARU_make"] = "Open Acoustic Devices"
     except Exception as e:
         print(f"    WARNING: failed to parse WAV comment at {wav_path}: {e}")
     return result
