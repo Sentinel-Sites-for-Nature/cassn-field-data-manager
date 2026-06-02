@@ -200,7 +200,7 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
         if m:
             result["filter_type_duration"] = m.group(1)
 
-        result["ARU_make"] = "AudioMoth"
+        result["ARU_make"] = "Open Acoustic Devices"
     except Exception as e:
         print(f"    WARNING: failed to parse WAV comment at {wav_path}: {e}")
     return result
@@ -275,6 +275,16 @@ def parse_audiomoth_guano(wav_path: Path) -> dict:
             result["recorded_datetime"] = _normalize_guano_timestamp(fields["Timestamp"])
         if fields.get("Serial"):
             result["device_id"] = fields["Serial"]
+        # Hardware identity, straight from the device. GUANO is authoritative:
+        # "Make: Open Acoustic Devices", "Model: AudioMoth". The firmware string
+        # is stored as ARU_model to match the CONFIG.TXT-derived value, e.g.
+        # "AudioMoth-Firmware-Basic (1.11.0)" -> "AudioMoth-Firmware-Basic 1.11.0".
+        if fields.get("Make"):
+            result["ARU_make"] = fields["Make"]
+        if fields.get("Firmware Version"):
+            result["ARU_model"] = re.sub(r"\((.+?)\)", r"\1", fields["Firmware Version"]).strip()
+        elif fields.get("Model"):
+            result["ARU_model"] = fields["Model"]
         if fields.get("OAD|Battery Voltage"):
             result["battery_voltage"] = fields["OAD|Battery Voltage"]
         if fields.get("Temperature Int"):

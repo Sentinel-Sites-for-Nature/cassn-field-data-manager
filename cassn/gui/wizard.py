@@ -1409,7 +1409,9 @@ class FieldDataWizard(QMainWindow):
                         recorded_datetime = guano_data["recorded_datetime"]
                     if guano_data.get("device_id"):
                         device_id = guano_data["device_id"]
-                    for _guano_field in ("battery_voltage", "temperature_c"):
+                    # GUANO is authoritative for hardware identity too, so it
+                    # overrides the ICMT-derived make and supplies the model.
+                    for _guano_field in ("battery_voltage", "temperature_c", "ARU_make", "ARU_model"):
                         if guano_data.get(_guano_field):
                             wav_data[_guano_field] = guano_data[_guano_field]
 
