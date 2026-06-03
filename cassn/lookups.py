@@ -29,7 +29,7 @@ def load_reserves(csv_path: Path) -> list[tuple[str, str]]:
     """
     reserves: list[tuple[str, str]] = []
     try:
-        with open(csv_path, "r", encoding="utf-8") as f:
+        with open(csv_path, "r", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 site_code = row["site_code"].strip()
                 site_name = row["site_name"].strip()
@@ -60,7 +60,7 @@ def load_plot_names(csv_path: Path) -> tuple[dict, dict]:
     plot_metadata: dict[tuple, dict] = {}
 
     try:
-        for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        for encoding in ("utf-8-sig", "latin-1"):
             try:
                 with open(csv_path, "r", encoding=encoding) as f:
                     for row in csv.DictReader(f):
@@ -101,7 +101,7 @@ def load_soundhub_config(json_path: Path) -> dict:
     if not json_path.exists():
         print(f"  WARNING: soundhub_config.json not found at {json_path}")
         return {}
-    with open(json_path, encoding="utf-8") as f:
+    with open(json_path, encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -116,7 +116,7 @@ def load_arus(csv_path: Path) -> dict:
     if not csv_path.exists():
         print(f"  WARNING: ARUs.csv not found at {csv_path}")
         return result
-    with open(csv_path, encoding="utf-8") as f:
+    with open(csv_path, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             try:
                 key = (
@@ -139,7 +139,7 @@ def load_cameras(csv_path: Path) -> dict:
     result: dict[tuple, dict] = {}
     if not csv_path.exists():
         return result
-    with open(csv_path, "r", encoding="utf-8") as f:
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             try:
                 key = (row["site_code"].strip(), int(row["plot_number"]), row["device_type"].strip())
@@ -159,7 +159,7 @@ def load_wi_config(json_path: Path) -> dict:
     if not json_path.exists():
         return {}
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception as e:
         print(f"Warning: could not load wi_config.json: {e}")
@@ -177,7 +177,7 @@ def load_program_config(json_path: Path) -> dict:
     if not json_path.exists():
         return {}
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
+        with open(json_path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception as e:
         print(f"Warning: could not load program_config.json: {e}")
@@ -193,7 +193,7 @@ def load_plot_coords(csv_path: Path) -> dict:
     result: dict[tuple, dict] = {}
     if not csv_path.exists():
         return result
-    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+    for encoding in ("utf-8-sig", "latin-1"):
         try:
             with open(csv_path, "r", encoding=encoding) as f:
                 for row in csv.DictReader(f):
