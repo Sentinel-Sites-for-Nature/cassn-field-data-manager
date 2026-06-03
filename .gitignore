@@ -39,6 +39,9 @@ ENV/
 .LSOverride
 ._*
 
+# Windows
+Thumbs.db
+
 # Box configuration and tokens (IMPORTANT: Never commit these!)
 config.json
 box_tokens.json
@@ -62,4 +65,3 @@ sample_data/
 .RData
 .Rproj.user
 scratch/
-screenshots/
