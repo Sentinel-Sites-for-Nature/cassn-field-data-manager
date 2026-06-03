@@ -1,8 +1,8 @@
 # CA-SSN Field Data Manager
 
-A Python desktop application for downloading, uploading, and managing wildlife image and audio data. Designed for the University of California Natural Reserve System (UCNRS) California Sentinel Sites for Nature (CASSN) team collecting standardized biodiversity data with camera traps and acoustic recorders across California.
+A Python desktop application for downloading, uploading, and managing wildlife image and audio data. Built for the California Sentinel Sites for Nature (CASSN) program — standardized biodiversity data collected with camera traps and acoustic recorders across California reserves and partner organizations.
 
-![Version](https://img.shields.io/badge/version-3.0-blue)
+![Version](https://img.shields.io/badge/version-4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,7 +20,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Timestamps**: `recorded_datetime` stored as ISO 8601 with UTC offset (e.g. `2025-12-04T15:48:05-08:00`), sourced from EXIF for cameras and AudioMoth filename for audio; DST-aware via `zoneinfo`
 - **Cloud Storage**: Automatic upload to Box with progress tracking and OAuth token refresh
 - **Multi-Format File Support**: Images (JPG, PNG, TIF, RAW), audio (WAV, MP3, FLAC)
-- **Configurable Lookup Tables**: Site, plot, camera, and ARU metadata loaded from local CSV/json files.
+- **Box-Synced Lookup Tables**: Site, plot, camera, and ARU metadata are synced from your organization's Box `app_config` folder on launch and cached locally, so every install runs against the same authoritative tables.
 - **Wildlife Insights Export**: Generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, using camera metadata from `cameras.csv` and `wi_config.json`.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
 - **Session Persistence**: Interrupted downloads resume automatically. Previously copied files are skipped and sequence/event numbering continues correctly.
@@ -35,7 +35,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 ### Install Dependencies
 
 ```bash
-pip install PySide6 pillow piexif box-sdk-gen PyExifTool
+pip install -r requirements.txt
 ```
 
 Reconyx MakerNote extraction also requires the **ExifTool** command-line program
@@ -53,58 +53,70 @@ extras (temperature, moon phase, battery) and the ExifTool sequence fallback.
 
 ### Download
 
-Clone this repository or download the latest release:
+Clone this repository:
 
 ```bash
-git clone https://github.com/john-imperato/cassn-field-data-manager.git
+git clone https://github.com/Sentinel-Sites-for-Nature/cassn-field-data-manager.git
 cd cassn-field-data-manager
 ```
 
 ### Configure Box Credentials
 
-Credentials to connect with your Box account are stored in `~/.cassn_credentials/`, a hidden folder in your home directory, outside the repo so they are never accidentally committed to version control.
+Box credentials live in `~/.cassn_config/`, a hidden folder in your home
+directory, outside the repo so they are never accidentally committed to version
+control. The app also caches synced lookup tables and Box tokens here.
 
 Create the folder and config file:
 
 ```bash
-mkdir -p ~/.cassn_credentials
-cp config.json.example ~/.cassn_credentials/config.json
+mkdir -p ~/.cassn_config
+cp config.json.example ~/.cassn_config/config.json
 ```
 
-Edit `~/.cassn_credentials/config.json` and add your Box application credentials:
+Edit `~/.cassn_config/config.json` and add your Box application credentials and
+folder IDs:
 
 ```json
 {
   "box": {
     "client_id": "YOUR_BOX_CLIENT_ID",
     "client_secret": "YOUR_BOX_CLIENT_SECRET",
-    "target_folder_id": "YOUR_BOX_FOLDER_ID"
+    "field_data_folder_id": "YOUR_CASSN_FIELD_DATA_FOLDER_ID",
+    "app_config_folder_id": "YOUR_CASSN_APP_CONFIG_FOLDER_ID"
   }
 }
 ```
 
+- **`field_data_folder_id`** — the Box folder uploads are written to.
+- **`app_config_folder_id`** — the Box folder the app syncs lookup tables *from*
+  on launch (sites, plots, cameras, ARUs, and the JSON config files).
+
 Lock down the folder permissions so only you can read it:
 
 ```bash
-chmod 700 ~/.cassn_credentials
-chmod 600 ~/.cassn_credentials/config.json
+chmod 700 ~/.cassn_config
+chmod 600 ~/.cassn_config/config.json
 ```
 
 **To get Box credentials:**
 1. Go to https://app.box.com/developers/console
 2. Create a new app (Custom App → OAuth 2.0)
 3. Copy the Client ID and Client Secret
-4. Navigate to the Box folder where you want data uploaded and copy the ID from the URL (e.g. `https://app.box.com/folder/123456789` → folder ID is `123456789`)
+4. Navigate to each Box folder and copy its ID from the URL (e.g. `https://app.box.com/folder/123456789` → folder ID is `123456789`)
+
+> For a managed program, the organization admin typically provides a ready-made
+> `config.json` (client credentials + the two folder IDs) over a secure channel.
+> Treat it like a password — never commit it or place it in a shared cloud folder.
 
 ## Usage
 
 ### 1. Box Authentication (First Time Setup)
 
-After configuring `~/.cassn_credentials/config.json`, authenticate with Box
+After configuring `~/.cassn_config/config.json`, authenticate with Box
 using the utility script:
 
 ```bash
-python3 utils/box_auth_setup.py
+python utils/box_auth_setup.py
 ```
 
 Follow the prompts to:
@@ -112,38 +124,29 @@ Follow the prompts to:
 - Grant access to the application
 - Paste the full redirect URL back into the terminal
 
-This creates or refreshes `~/.cassn_credentials/box_tokens.json`, which enables automatic cloud uploads. No manual copy step is required. For detailed Box utility documentation, see [`utils/README.md`](utils/README.md). Box tokens expire after ~60 days of inactivity. Re-run the command above to refresh them.
+This creates or refreshes `~/.cassn_config/box_tokens.json`, which enables
+automatic cloud uploads and lookup-table sync. No manual copy step is required.
+For detailed Box utility documentation, see [`utils/README.md`](utils/README.md).
+Box tokens expire after ~60 days of inactivity — re-run the command above to
+refresh them.
 
 ### 2. Run the Application
 
 ```bash
-python cassn_field_data_manager.py
+python -m cassn
 ```
 
-To run the Box-free core version for local renaming and metadata generation only:
-
-```bash
-python cassn_field_data_manager_core.py
-```
-
-You can also launch core mode from the main script:
-
-```bash
-python cassn_field_data_manager.py --core
-```
-
-To package the core version as a separate macOS app:
-
-```bash
-python -m PyInstaller cassn_field_data_manager_core.spec --noconfirm
-```
+On launch the app syncs the latest lookup tables from your Box `app_config`
+folder into `~/.cassn_config/lookup_tables/`. The first launch requires an
+internet connection; afterward the cached tables are reused if Box is
+unreachable (with a confirmation prompt showing when they were last synced).
 
 ### 3. Workflow
 
 For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 
 #### Step 1: Deployment Metadata
-- Select UC as the organization
+- Select your organization (driven by the synced `program_config.json`)
 - Choose the reserve/site from dropdown (auto-complete enabled)
 - Enter deployment start and end dates
 - Select who is downloading the data
@@ -161,6 +164,7 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 - Review deployment summary
 - View file counts and sizes by device
 - Files automatically upload to Box (if enabled)
+- Re-run Box verification checks on demand from the "Re-run QC Checks" group
 - Open staging folder to verify
 - Start new deployment or exit
 
@@ -190,7 +194,11 @@ ORG_SITE_YYYYMMDD/
 ├── deployment_event_record.json        # Deployment event record (devices, file count, dates)
 ├── image_file_metadata.csv             # Per-file metadata for all camera trap images
 ├── audio_file_metadata.csv             # Per-file metadata for all AudioMoth recordings
-├── qc/
+├── qc/                                 # QC / audit sidecars (travel to Box with the data)
+│   ├── qc_report.json                  # Full audit trail of every QC check
+│   ├── box_upload_manifest.json        # Pre-upload manifest (reconciliation source)
+│   ├── box_upload_verification.json    # Post-upload Box reconciliation report
+│   ├── deployment_summary.txt          # Human-readable rollup of the deployment
 │   └── lookup_snapshot/                # Lookup/config files snapshotted at metadata generation time
 ├── WI_metadata/                        # Wildlife Insights deployment CSVs
 │   ├── wildlife_insights_ML_deployments.csv
@@ -200,6 +208,7 @@ ORG_SITE_YYYYMMDD/
     │   ├── UC_Bodega_plot1_ML_20260303_00001_1.jpg   # Trigger event 1, photo 1
     │   ├── UC_Bodega_plot1_ML_20260303_00001_2.jpg   # Trigger event 1, photo 2
     │   ├── UC_Bodega_plot1_ML_20260303_00002_1.jpg   # Trigger event 2, photo 1
+    │   ├── plot1_ML_manifest.json      # Per-device file list + SHA-256 (local-only)
     │   └── ...
     ├── plot1_BD/                       # Plot 1, Bird recorder
     │   ├── UC_Bodega_plot1_BD_20260303_00001.wav
@@ -209,7 +218,7 @@ ORG_SITE_YYYYMMDD/
 
 ### Wildlife Insights Deployment CSV
 
-At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires `cameras.csv` and `wi_config.json` to be populated in `local_data/`.
+At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires `cameras.csv` and `wi_config.json` in the synced lookup tables.
 
 ## Metadata Schema
 
@@ -286,8 +295,8 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 The app runs a layered set of QC checks at every stage of data movement —
 during SD card copy, at device completion, before/after Box upload, and on
 demand from buttons in the GUI. Every check writes a pass/warning/error
-entry to `qc_report.json` in the deployment folder, which travels to Box with
-the data and serves as the audit trail.
+entry to `qc/qc_report.json` in the deployment folder, which travels to Box
+with the data and serves as the audit trail.
 
 ### Reading `qc_report.json`
 
@@ -330,7 +339,7 @@ Every entry has the same shape:
 }
 ```
 
-The `description` is plain-English explanation of what the check is testing,
+The `description` is a plain-English explanation of what the check is testing,
 so the file is self-documenting — you don't need to come back to this README
 to interpret it.
 
@@ -343,16 +352,16 @@ to interpret it.
 | `duplicate_detection` | Session-wide set of SHA-256 hashes. New file whose hash matches one already in inventory is deleted and skipped. | Automatic, every SD card copy (per file) | Log panel + per-duplicate entry plus a per-device aggregate in `qc_report.json` |
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
 | `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
-| `temporal_plausibility` | Per device: flags files recorded before deployment start, >48h after the collection date, clock-reset clusters (≥3 files at the same second), and >30-day gaps within a single device. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
-| `field_completeness` | Required metadata fields per file type (see [Required fields by type](#required-fields-by-type)). Anything below 90% blocks CSV generation until the user acknowledges. | Automatic at "Generate CSVs" step | Blocking popup + session-level entry in `qc_report.json` |
-| (pre-upload manifest) | Before Box upload starts, writes `box_upload_manifest.json` listing every uploadable file with its SHA-256 and SHA-1 when available. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
+| `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
+| `coordinate_validation` | Plot coordinates (from `plots.csv`) must be non-null and fall within the California study-area bounding box. Catches unset (0,0) coordinates and values baked into the lookup table that land outside the expected region. | Automatic before CSV generation | Log panel + session-level entry in `qc_report.json` |
+| `lookup_snapshot` | Copies the lookup/config tables in use into `qc/lookup_snapshot/` (with a manifest) so regenerated metadata can be tied to the exact site, plot, camera, ARU, SoundHub, and WI configuration used. | Automatic at metadata generation | `qc/lookup_snapshot/` + session-level entry in `qc_report.json` |
+| (pre-upload manifest) | Before Box upload starts, writes `qc/box_upload_manifest.json` listing every uploadable file with its SHA-256 and SHA-1 when available. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
 | `box_upload` | After upload, recursively lists the Box deployment folder and reconciles against the pre-upload manifest. Each file gets up to 3 retries (single-file failures don't abort the whole batch). | Automatic, after every Box upload | Upload progress panel + session-level entry in `qc_report.json` |
-| `orphan_scan` | Compares `file_inventory` against files actually on disk. Reports inventoried files missing from disk and disk files missing from inventory. No hashing — fast directory diff. | Manual button on Tab 2 ("Compare Inventory ↔ Disk") | Detail popup + log panel + session-level entry in `qc_report.json` |
-| `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Automatic after successful Box upload; manual button on Tab 2 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
-| `box_verify` | Calls Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. Also runnable as a CLI: `python utils/box_verify.py <deployment_folder>`. | Automatic after successful Box upload; manual button on Tab 2 ("Verify Box Upload"); also CLI | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json` |
+| `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
+| `box_verify` | Calls the Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box Upload") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json` |
 | `session_health` | At app launch, every `session.json` in the staging root is parsed. Truncated or malformed files are surfaced in the Open Deployment dialog as "⚠ CORRUPTED" rather than being silently hidden. | Automatic at app launch and "Open Different Deployment…" | Resume dialog entry + per-deployment `qc_report.json` |
 | `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, per-device manifests written, file-hash verification run, Box upload done, no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
-| (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `deployment_summary.txt` in deployment folder |
+| (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `qc/deployment_summary.txt` in deployment folder |
 
 ### Per-device check coverage
 
@@ -366,23 +375,10 @@ Not every check applies to every file type:
 | `expected_file_count` | ✓ | ✓ | counted |
 | `sequence_gap` (RECONYX bursts) | ✓ | — | — |
 | `temporal_plausibility` | ✓ | ✓ | — |
-| `field_completeness` | image fields | audio fields | — |
 
-Session-level checks (`box_upload`, `box_verify`, `file_hash_verification_run`,
-`orphan_scan`, `session_health`, `pre_departure`) cover all files regardless
-of type.
-
-### Required fields by type
-
-`field_completeness` enforces a different set of required metadata fields
-per file type. Fields populated in fewer than 90% of records of that type
-trigger a blocking warning at CSV generation.
-
-| File type | Required fields |
-|---|---|
-| Image (ML, SA) | `recorded_datetime`, `latitude`, `longitude`, `device_id`, `file_hash_sha256`, `file_size_bytes`, `sequence_trigger_type` |
-| Audio (BD, BT) | `recorded_datetime`, `latitude`, `longitude`, `device_id`, `file_hash_sha256`, `file_size_bytes`, `sample_rate_hz` |
-| Config (`.txt`) | none — config sidecars carry no required metadata |
+Session-level checks (`coordinate_validation`, `lookup_snapshot`, `box_upload`,
+`box_verify`, `file_hash_verification_run`, `session_health`, `pre_departure`)
+cover all files regardless of type.
 
 ### Sidecar files written to the deployment folder
 
@@ -391,10 +387,11 @@ folder (all upload to Box with the rest of the data, except as noted):
 
 | File | Written by | Uploaded to Box? | Purpose |
 |---|---|---|---|
-| `qc_report.json` | every QC entry | yes | full audit trail of every check run |
-| `box_upload_manifest.json` | pre-upload manifest step | yes | reconciliation source for post-upload check |
-| `box_upload_verification.json` | `utils/box_verify.py` CLI | yes | reconciliation report from CLI tool |
-| `deployment_summary.txt` | session-close summary | yes | human-readable rollup of the deployment |
+| `qc/qc_report.json` | every QC entry | yes | full audit trail of every check run |
+| `qc/box_upload_manifest.json` | pre-upload manifest step | yes | reconciliation source for post-upload check |
+| `qc/box_upload_verification.json` | Box verify step | yes | reconciliation report from the Box-verify check |
+| `qc/deployment_summary.txt` | session-close summary | yes | human-readable rollup of the deployment |
+| `qc/lookup_snapshot/` | metadata generation | yes | copy of the lookup/config tables used, with a manifest |
 | `raw_data/<device>/<device>_manifest.json` | per-device completion | **no** (local-only fixity sidecar) | per-device file list with SHA-256, written before SD card is ejected |
 
 ### Resilience features
@@ -403,28 +400,36 @@ A few cross-cutting behaviors that aren't single QC checks but support them:
 
 - **Resume mid-deployment.** Every 10 files, `session.json` is rewritten with the latest inventory. If the SD card disconnects mid-copy or the app crashes, "Open Deployment" finds the in-progress session, restores state, skips already-copied files (matched by original filename + hash), cleans up partial writes, and continues.
 - **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.
-- **Filename collision safety.** All filename lookups (fixity check, orphan scan) key by `(device_label, filename)`, not filename alone. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.
+- **Filename collision safety.** All filename lookups (fixity check, Box verify) key by `(device_label, filename)`, not filename alone. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.
 - **Migration of legacy reports.** When a `qc_report.json` from before the `current_state`/`history` schema is opened, it's migrated automatically — old entries become `history`, and `current_state` is computed fresh.
 
 ## Configuration
 
 ### Lookup Tables
 
-The application requires real site and plot CSVs in the repo-local ignored
-`local_data/` folder:
+The app runs against a set of lookup tables and config files that define your
+sites, plots, cameras, ARUs, and export defaults:
 
-- `local_data/sites.csv`
-- `local_data/plots.csv`
-- `local_data/cameras.csv`
-- `local_data/wi_config.json`
-- `local_data/soundhub_config.json` — ARU hardware defaults (container type, microphone)
-- `local_data/ARUs.csv` — Per-deployment ARU physical setup (mount height, substrate)
+- `sites.csv` — site/reserve names and codes
+- `plots.csv` — plot names, numbers, and coordinates
+- `cameras.csv` — camera serial numbers and Wildlife Insights metadata per plot
+- `ARUs.csv` — per-plot ARU physical setup (mount, sensor height, status)
+- `wi_config.json` — Wildlife Insights project IDs and upload defaults
+- `soundhub_config.json` — ARU hardware defaults (make, model, microphone, containers)
+- `program_config.json` — organization label(s) and observer names for the dropdowns
 
-These files are not tracked by git and are intended for operational metadata,
-including any sensitive plot information you do not want in a public repository.
+**How the app gets them:** on launch the app downloads these files from your
+Box `app_config` folder (`app_config_folder_id` in `config.json`) into
+`~/.cassn_config/lookup_tables/` and reloads them. This keeps every install on
+the same authoritative tables — to update them, edit the files in the Box
+`app_config` folder and relaunch. If Box is unreachable, the cached copies are
+reused after a confirmation prompt; if no cache exists yet, the app stops and
+asks you to connect to the internet.
 
-The repo includes tracked example files in `example_lookups/` so you can create
-your local copies:
+### Example / template files
+
+The repo includes tracked example versions in `example_lookups/` to document
+the expected schema and to seed your Box `app_config` folder:
 
 - `example_lookups/sites.csv`
 - `example_lookups/plots.csv`
@@ -433,56 +438,16 @@ your local copies:
 - `example_lookups/soundhub_config.json`
 - `example_lookups/ARUs.csv`
 
-To create your private local copies:
+Field notes:
 
-```bash
-mkdir -p local_data
-cp example_lookups/sites.csv local_data/sites.csv
-cp example_lookups/plots.csv local_data/plots.csv
-cp example_lookups/cameras.csv local_data/cameras.csv
-cp example_lookups/wi_config.json local_data/wi_config.json
-cp example_lookups/soundhub_config.json local_data/soundhub_config.json
-cp example_lookups/ARUs.csv local_data/ARUs.csv
-```
+- **`cameras.csv`**: Camera serial numbers and Wildlife Insights metadata per plot. Columns include `camera_id` (physical serial number), `feature_type` (e.g. `Road dirt`, `Trail game`), `sensor_height`, `sensor_orientation`, `plot_treatment`, `plot_treatment_description`, and `detection_distance`.
+- **`wi_config.json`**: Wildlife Insights project IDs and upload defaults. Edit `project_id_ML` and `project_id_SA` to match your project IDs in Wildlife Insights.
+- **`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_make`, `ARU_model`, `ARU_microphone`, container types, sample rates, and schedule. Values are copied into `audio_file_metadata.csv` at processing time.
+- **`ARUs.csv`**: One row per `(site_code, plot_number, device_type)` recording physical ARU setup — `mounted_on`, `sensor_height_meters`, `ARU_status`. Add a row for each ARU before or after processing.
 
-**`cameras.csv`**: Camera serial numbers and Wildlife Insights metadata per plot. Columns include `camera_id` (physical serial number), `feature_type` (e.g. `Road dirt`, `Trail game`), `sensor_height`, `sensor_orientation`, `plot_treatment`, `plot_treatment_description`, and `detection_distance`.
-
-**`wi_config.json`**: Wildlife Insights project IDs and upload defaults. Edit
-`project_id_ML` and `project_id_SA` to match your project IDs in Wildlife Insights.
-
-**`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_microphone`, `ARU_container_BD`, `ARU_container_BT`. Values are copied into `audio_file_metadata.csv` at processing time.
-
-**`ARUs.csv`**: One row per `(site_code, plot_number, device_type)` recording physical ARU setup — `mounted_on`, `sensor_height_meters`, `ARU_status`. Add a row for each ARU before or after processing.
-
-Then edit the files in `local_data/`. Changes take effect on next app launch.
-
-The application does not fall back to `example_lookups/` during normal operation.
-Those files are templates only.
-
-## Building the macOS App
-
-To run as a double-clickable macOS `.app` (no terminal required):
-
-```bash
-bash build.sh
-```
-
-This will:
-1. Install PyInstaller if needed
-2. Convert the icon to macOS format
-3. Bundle Python, all dependencies, assets, and example data into a self-contained `.app`
-4. Output `dist/CASSN Field Data Manager.app`
-
-Then install it:
-
-```bash
-sudo rm -rf "/Applications/CASSN Field Data Manager.app"
-cp -r "dist/CASSN Field Data Manager.app" /Applications/
-```
-
-**Note:** `~/.cassn_credentials/config.json` and `~/.cassn_credentials/box_tokens.json` must be set up before launching the `.app`. The bundle does not include credentials.
-
-To rebuild after code changes, run `bash build.sh` again and reinstall.
+> The standalone CLI tools in `utils/` (e.g. `generate_wi_deployments.py`) read
+> their lookup tables from a repo-local `local_data/` folder instead of the
+> Box-synced cache. See [`utils/README.md`](utils/README.md) for details.
 
 ## Development
 
@@ -490,30 +455,36 @@ To rebuild after code changes, run `bash build.sh` again and reinstall.
 
 ```
 cassn-field-data-manager/
-├── cassn_field_data_manager.py       # Main application
-├── build.sh                          # Script to build the macOS .app bundle
-├── cassn_field_data_manager.spec     # PyInstaller configuration for the .app build
-├── config.json.example               # Configuration template
-├── assets/                           # Visual assets (logos for app UI)
-│   ├── ucnrs_logo.png                # UCNRS logo
-│   ├── cassn_icon.png                # CA-SSN logo
-│   └── cassn_icon.icns               # macOS icon format (generated by build.sh)
-├── example_lookups/                     # Tracked templates and schema examples
-│   ├── sites.csv                     # Site/reserve lookup example
-│   ├── plots.csv                     # Plot lookup example
-│   ├── cameras.csv                   # Camera metadata example (serial numbers, WI fields)
-│   ├── wi_config.json                # Wildlife Insights config example
-│   ├── soundhub_config.json          # SoundHub ARU hardware config example
-│   └── ARUs.csv                      # ARU physical setup example
-├── local_data/                       # Real operational CSVs and config (gitignored)
-├── utils/
+├── cassn/                            # Application package — run with `python -m cassn`
+│   ├── __main__.py                   # Entry point: wires config, lookups, and the GUI together
+│   ├── config.py                     # Paths, thresholds, schema field lists, QC descriptions
+│   ├── lookups.py                    # Lookup-table loaders + LookupTables container
+│   ├── box/                          # Box auth, client, and upload/verify threads
+│   ├── core/                         # Classification, metadata extraction, inventory, QC
+│   ├── export/                       # Wildlife Insights / metadata CSV writers
+│   └── gui/                          # PySide6 wizard UI
+├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
-│   ├── generate_wi_deployments.py    # Wildlife Insights deployment CSV generator (reads image_file_metadata.csv)
+│   ├── generate_wi_deployments.py    # Wildlife Insights deployment CSV generator
 │   ├── generate_occurrences.py       # Wildlife Insights occurrences CSV generator
-│   ├── patch_metadata_v3.py          # One-time migration patch: v2 → v3 column renames
-│   ├── recover_file_metadata.py      # Metadata recovery utility
-│   └── verify_v3_output.py           # Verification script for v3 deployment output
-├── screenshots/                      # Application screenshots for README
-├── .gitignore                        # Git ignore file
+│   ├── convert_to_flac.py            # WAV → FLAC batch converter
+│   └── verify_flac_conversion.py     # FLAC conversion integrity check
+├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
+│   ├── sites.csv
+│   ├── plots.csv
+│   ├── cameras.csv
+│   ├── wi_config.json
+│   ├── soundhub_config.json
+│   └── ARUs.csv
+├── assets/                           # Logos / icon used by the UI
+├── screenshots/                      # Application screenshots for this README
+├── docs/                             # Supplementary docs (workflow diagram)
+├── config.json.example               # Box config template → ~/.cassn_config/config.json
+├── requirements.txt                  # Python dependencies
+├── .gitignore
 └── README.md                         # This file
 ```
+
+Operational data lives outside the repo: credentials, Box tokens, and the
+synced lookup-table cache are kept in `~/.cassn_config/`, and deployments are
+staged under `~/Desktop/CASSN_field_data_staging/` by default.
