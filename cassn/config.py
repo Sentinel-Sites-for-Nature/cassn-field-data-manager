@@ -9,25 +9,20 @@ ever touches the filesystem to ensure the config directories exist, which is
 idempotent and safe.
 """
 
-import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
 # Paths
 #
-# Credentials and lookup tables always live under ~/.cassn_config/ regardless
-# of how the app is launched. When frozen (bundled .app) assets live in
-# sys._MEIPASS; when running as a script they live next to the package.
+# Credentials and lookup tables always live under ~/.cassn_config/. Bundled
+# assets (logos) live next to the package, under BUNDLE_DIR.
 # ---------------------------------------------------------------------------
 
 CONFIG_DIR = Path.home() / ".cassn_config"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-if getattr(sys, "frozen", False):
-    BUNDLE_DIR = Path(sys._MEIPASS)
-else:
-    BUNDLE_DIR = Path(__file__).resolve().parent.parent
+BUNDLE_DIR = Path(__file__).resolve().parent.parent
 
 LOCAL_DATA_DIR = CONFIG_DIR / "lookup_tables"
 LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
