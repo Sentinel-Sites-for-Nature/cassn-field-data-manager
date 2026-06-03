@@ -111,7 +111,6 @@ from cassn.core.quality_control import (
     is_duplicate_hash,
     migrate_qc_sidecars,
     qc_path_for,
-    scan_orphans,
     validate_coordinates,
     validate_datetimes,
     verify_copy_hash,
@@ -868,10 +867,6 @@ class FieldDataWizard(QMainWindow):
         self.upload_now_btn.clicked.connect(self.upload_to_box_manual)
         self.upload_now_btn.setEnabled(self.box_authenticated)
 
-        self.orphan_scan_btn = QPushButton("Compare Inventory ↔ Disk")
-        self.orphan_scan_btn.clicked.connect(self.run_orphan_scan)
-        self.orphan_scan_btn.setToolTip("Fast check: list files in inventory missing from disk and files on disk missing from inventory. No hashing.")
-
         self.fixity_btn = QPushButton("Verify Box ↔ Local Hashes")
         self.fixity_btn.clicked.connect(self.run_fixity_check)
         self.fixity_btn.setToolTip("End-to-end Box/local verification: compare each local raw file's SHA-1 against the SHA-1 reported by Box.")
@@ -887,12 +882,18 @@ class FieldDataWizard(QMainWindow):
         exit_btn = QPushButton("Exit")
         exit_btn.clicked.connect(self.close)
 
+        # "Re-run QC Checks" group — the same Box-verification steps that run
+        # automatically after an upload, exposed for manual re-runs.
+        qc_group = QGroupBox("Re-run QC Checks")
+        qc_layout = QHBoxLayout()
+        qc_layout.addWidget(self.box_verify_btn)
+        qc_layout.addWidget(self.fixity_btn)
+        qc_group.setLayout(qc_layout)
+
         button_layout.addWidget(self.open_btn)
         button_layout.addWidget(self.switch_deployment_btn)
         button_layout.addWidget(self.upload_now_btn)
-        button_layout.addWidget(self.orphan_scan_btn)
-        button_layout.addWidget(self.fixity_btn)
-        button_layout.addWidget(self.box_verify_btn)
+        button_layout.addWidget(qc_group)
         button_layout.addWidget(self.new_btn)
         button_layout.addStretch()
         button_layout.addWidget(exit_btn)
@@ -2117,43 +2118,7 @@ class FieldDataWizard(QMainWindow):
         if not any_warnings:
             self.log(f"  QC [{device_label}] All checks passed.")
 
-    # -- orphan scan / verification (manual) -------------------------------
-
-    def run_orphan_scan(self):
-        """Scan staging folder for files missing from disk or not in inventory."""
-        if not self.current_deployment_folder:
-            QMessageBox.information(self, "No Session", "Load a session first.")
-            return
-        result = scan_orphans(self.current_deployment_folder, self.file_inventory)
-        missing = result["missing_from_disk"]
-        orphaned = result["orphaned_on_disk"]
-        if not missing and not orphaned:
-            append_qc_report(self.current_deployment_folder, "orphan_scan", "", "pass",
-                             "Inventory and disk match — no orphans or missing files")
-            QMessageBox.information(self, "Orphan Scan", "All clear — every inventoried file exists on disk and no unexpected files were found.")
-            return
-        append_qc_report(self.current_deployment_folder, "orphan_scan", "", "warning",
-                         f"{len(missing)} inventoried file(s) missing from disk; {len(orphaned)} disk file(s) not in inventory")
-        lines = []
-        if missing:
-            lines.append(f"FILES IN INVENTORY BUT MISSING FROM DISK ({len(missing)}):")
-            for m in missing:
-                lines.append(f"  [{m['device']}] {m['filename']}")
-        if orphaned:
-            if lines:
-                lines.append("")
-            lines.append(f"FILES ON DISK NOT IN INVENTORY ({len(orphaned)}):")
-            for o in orphaned:
-                lines.append(f"  [{o['device']}] {o['filename']}")
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Orphan Scan Results")
-        msg.setIcon(QMessageBox.Warning)
-        msg.setText(f"Orphan scan found issues ({len(missing)} missing from disk, {len(orphaned)} unexpected on disk).")
-        msg.setDetailedText("\n".join(lines))
-        msg.exec()
-        self.log(f"Orphan scan: {len(missing)} missing from disk, {len(orphaned)} unexpected on disk.")
-        if missing or orphaned:
-            self.log("\n".join(f"  {l}" for l in lines if l))
+    # -- verification (manual) ---------------------------------------------
 
     def run_fixity_check(self):
         """Compare raw_data/ SHA-1 values against Box-reported SHA-1 values."""

@@ -14,9 +14,8 @@ This module owns everything that lands in a deployment's ``qc/`` subfolder:
 * **The checks** — :func:`check_sequence_integrity` (Reconyx bursts),
   :func:`validate_datetimes` (temporal plausibility) and
   :func:`validate_coordinates` (study-area bounds).
-* **Audit scans** — :func:`scan_orphans` reconciles inventory against disk and
-  :func:`snapshot_lookup_tables` freezes the active lookup tables alongside the
-  metadata they produced.
+* **Audit scans** — :func:`snapshot_lookup_tables` freezes the active lookup
+  tables alongside the metadata they produced.
 
 Every function is pure given its inputs except the two that touch the
 filesystem (:func:`append_qc_report`, :func:`snapshot_lookup_tables`) and the
@@ -103,48 +102,6 @@ def migrate_qc_sidecars(deployment_folder: Path) -> None:
                 old.rename(new)
             except Exception:
                 pass  # best-effort; don't block on migration failure
-
-
-# ---------------------------------------------------------------------------
-# Orphan scan
-# ---------------------------------------------------------------------------
-
-def scan_orphans(deployment_folder: Path, file_inventory: list) -> dict:
-    """Detect orphaned files in both directions.
-
-    * ``missing_from_disk`` — inventory entries whose file no longer exists
-    * ``orphaned_on_disk`` — media files on disk with no inventory entry
-
-    Returns a dict with both lists (entries carry ``path``, ``device`` and
-    ``filename``).
-    """
-    raw_data = deployment_folder / "raw_data"
-    if not raw_data.exists():
-        return {"missing_from_disk": [], "orphaned_on_disk": []}
-
-    # Build set of paths that inventory says should exist
-    inventoried_new = {entry["new_filename"] for entry in file_inventory if entry.get("new_filename")}
-
-    missing_from_disk = []
-    for entry in file_inventory:
-        new_name = entry.get("new_filename", "")
-        device_label = entry.get("device_label", "")
-        if not new_name:
-            continue
-        expected = raw_data / device_label / new_name
-        if not expected.exists():
-            missing_from_disk.append({"path": str(expected), "device": device_label, "filename": new_name})
-
-    orphaned_on_disk = []
-    for device_dir in raw_data.iterdir():
-        if not device_dir.is_dir():
-            continue
-        for fpath in device_dir.iterdir():
-            if fpath.is_file() and not fpath.name.startswith(".") and fpath.suffix.lower() in (".jpg", ".wav", ".txt"):
-                if fpath.name not in inventoried_new:
-                    orphaned_on_disk.append({"path": str(fpath), "device": device_dir.name, "filename": fpath.name})
-
-    return {"missing_from_disk": missing_from_disk, "orphaned_on_disk": orphaned_on_disk}
 
 
 # ---------------------------------------------------------------------------

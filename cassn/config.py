@@ -214,10 +214,6 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "File listed in session inventory but no longer present on disk. Indicates accidental "
         "deletion or a drive that has gone offline."
     ),
-    "orphan_scan": (
-        "On-demand: compares file_inventory against files actually present on disk. Reports "
-        "inventoried files missing from disk and disk files missing from inventory."
-    ),
     "session_health": (
         "Each session.json found in staging is parsed at app launch. Truncated or malformed "
         "files are flagged so they can be repaired before being silently lost."
