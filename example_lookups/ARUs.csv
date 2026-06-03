@@ -1,0 +1,5 @@
+site_code,plot_number,device_type,mounted_on,sensor_height_meters,ARU_status
+ExampleSite,1,BD,Pole,1,
+ExampleSite,1,BT,Pole,2.5,
+ExampleSite,2,BD,Tree,1.5,
+ExampleSite,2,BT,Tree,2.5,

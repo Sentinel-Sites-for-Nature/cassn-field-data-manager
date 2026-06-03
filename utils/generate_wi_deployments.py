@@ -191,7 +191,7 @@ def load_wi_config() -> dict:
     if not path.exists():
         raise FileNotFoundError(
             f"wi_config.json not found at {path}.\n"
-            "Copy example_data/wi_config.json to local_data/ and fill in your project IDs."
+            "Copy example_lookups/wi_config.json to local_data/ and fill in your project IDs."
         )
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)

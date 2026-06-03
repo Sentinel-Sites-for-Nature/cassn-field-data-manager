@@ -1,0 +1,20 @@
+{
+  "ARU_make": "Open Acoustic Devices",
+  "ARU_model": "AudioMoth",
+  "ARU_microphone": "internal",
+  "ARU_container_BD": "polybag",
+  "ARU_container_BT": "AudioMoth IPX7 Waterproof Case",
+  "feature_type": "",
+  "sample_rate_hz_BD": "48000",
+  "sample_rate_hz_BT": "250000",
+  "gain_setting_BD": "High",
+  "gain_setting_BT": "Medium",
+  "frequency": "daily",
+  "deployment_start_time_BD": "00:00",
+  "deployment_end_time_BD": "23:59",
+  "duration_BD": "12:59",
+  "schedule_note_BD": "Recording schedule: 00:00-09:00, 20:00-23:59",
+  "high_pass_filter_hz_BT": "16000",
+  "filter_type_amplitude_BT": "6",
+  "filter_type_duration_BT": "2"
+}

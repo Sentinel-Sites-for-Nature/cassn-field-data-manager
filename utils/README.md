@@ -166,7 +166,7 @@ If the deployment folder already exists locally, the script fails and does not o
 - Writes recovered outputs locally only; it does not upload `file_metadata.csv`
   or `deployment_event_record.json` back to Box
 - Writes `recovery_report.json` even when the run completes with failures
-- Uses `local_data/plots.csv` for plot-label lookup; `example_data/` files are templates only
+- Uses `local_data/plots.csv` for plot-label lookup; `example_lookups/` files are templates only
 
 ---
 
@@ -213,7 +213,7 @@ Maps each site + plot + camera type to the camera used there, plus the few WI
 fields this script needs. Create it from the example:
 
 ```bash
-cp example_data/cameras.csv local_data/cameras.csv
+cp example_lookups/cameras.csv local_data/cameras.csv
 ```
 
 #### 2. `local_data/wi_config.json`
@@ -222,7 +222,7 @@ Stores WI project IDs and a few deployment-level defaults. Copy the template and
 fill in your values:
 
 ```bash
-cp example_data/wi_config.json local_data/wi_config.json
+cp example_lookups/wi_config.json local_data/wi_config.json
 ```
 
 To find your WI project ID: log in to [app.wildlifeinsights.org](https://app.wildlifeinsights.org),
