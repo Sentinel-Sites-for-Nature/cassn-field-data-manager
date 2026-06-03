@@ -266,7 +266,10 @@ def build_wi_rows(
     end = deployment_info.get("deployment_end", "")
     observer = deployment_info.get("observer", "")
 
-    subproject_name = f"{org}_{site}_{end.replace('-', '')}"
+    # Subproject groups deployments as Site_Year (year from the end date).
+    # Mirrors cassn.export.wildlife_insights.subproject_for; kept inline because
+    # this backfill script runs standalone without importing the package.
+    subproject_name = f"{site}_{end[:4]}" if site and len(end) >= 4 else ""
     event_name = _event_name(start, end)
 
     rows_by_type: dict[str, list[dict]] = {}

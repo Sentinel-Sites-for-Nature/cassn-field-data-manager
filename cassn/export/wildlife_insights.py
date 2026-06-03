@@ -11,8 +11,9 @@ the column list and the writer:
   deployment's devices + the ``cameras.csv`` / ``plots.csv`` / ``wi_config.json``
   lookups, for back-filling WI CSVs across Box.
 
-This module is the single source of truth for both. :data:`WI_COLUMNS` and the
-``event_name`` convention (:func:`deployment_event_name`) are defined once;
+This module is the single source of truth for both. :data:`WI_COLUMNS`, the
+``event_name`` convention (:func:`deployment_event_name`), and the
+``subproject`` (Site_Year) convention (:func:`subproject_for`) are defined once;
 :func:`build_wi_rows` is the CLI builder, :func:`reshape_image_metadata_to_wi`
 the GUI builder, and :func:`rows_to_csv_bytes` /
 :func:`generate_wi_deployments_from_image_csv` are the two writers.
@@ -54,6 +55,21 @@ def deployment_event_name(start_date: str, end_date: str) -> str:
         return ""
 
 
+def subproject_for(site: str, end_date: str) -> str:
+    """Return the ``Site_Year`` subproject grouping, e.g. ``ABCD_2026``.
+
+    Groups every deployment at a site within a calendar year into one
+    subproject; the year is taken from the deployment end date. Returns an
+    empty string if the site or a 4-digit year is missing. This is the single
+    definition of the convention, shared by the metadata CSV writer
+    (:mod:`cassn.export.metadata_csv`) and the WI builder below.
+    """
+    year = (end_date or "")[:4]
+    if not site or len(year) != 4 or not year.isdigit():
+        return ""
+    return f"{site}_{year}"
+
+
 def rows_to_csv_bytes(rows: list[dict]) -> bytes:
     """Encode WI rows as UTF-8 CSV bytes (used for Box uploads in the CLI)."""
     buf = io.StringIO()
@@ -90,7 +106,7 @@ def build_wi_rows(
     end = deployment_info.get("deployment_end", "")
     observer = deployment_info.get("observer", "")
 
-    subproject_name = f"{org}_{site}_{end.replace('-', '')}"
+    subproject_name = subproject_for(site, end)
     event_name = deployment_event_name(start, end)
 
     rows_by_type: dict[str, list[dict]] = {}

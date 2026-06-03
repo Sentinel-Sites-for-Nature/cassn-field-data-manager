@@ -25,7 +25,7 @@ from typing import Callable
 
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, LOCAL_DATA_DIR, VERSION
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
-from cassn.export.wildlife_insights import deployment_event_name
+from cassn.export.wildlife_insights import deployment_event_name, subproject_for
 
 
 def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[list[dict], list[dict]]:
@@ -52,7 +52,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             break
 
     deployment_event_id = f"{org}_{site}_{end_nodash}"
-    subproject = deployment_event_id
+    subproject = subproject_for(site, end)
     event_name = deployment_event_name(start, end)
     now_iso = datetime.now(timezone.utc).isoformat()
 
