@@ -559,7 +559,7 @@ class FieldDataWizard(QMainWindow):
 
         # Organization
         self.org_combo = QComboBox()
-        self.org_combo.addItems(ORGANIZATIONS)
+        self.org_combo.addItems(self.lookups.program_config.get("organizations") or ORGANIZATIONS)
         form_layout.addRow("Organization:", self.org_combo)
 
         # Site (with autocomplete)
@@ -594,7 +594,7 @@ class FieldDataWizard(QMainWindow):
         # Observer/Downloader
         self.observer_combo = QComboBox()
         self.observer_combo.setEditable(True)
-        self.observer_combo.addItems(DOWNLOADERS)
+        self.observer_combo.addItems(self.lookups.program_config.get("observers") or DOWNLOADERS)
         self.observer_combo.currentTextChanged.connect(self.on_observer_changed)
         form_layout.addRow("Who is downloading data?", self.observer_combo)
 

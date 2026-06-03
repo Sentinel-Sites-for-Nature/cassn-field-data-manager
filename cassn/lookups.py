@@ -166,6 +166,24 @@ def load_wi_config(json_path: Path) -> dict:
         return {}
 
 
+def load_program_config(json_path: Path) -> dict:
+    """Return per-organization program settings from program_config.json.
+
+    Holds the organization label(s) and observer/downloader names that populate
+    the two wizard dropdowns that would otherwise be hardcoded to UC. Lenient:
+    returns ``{}`` if the file is missing or unreadable, so installs without the
+    file fall back to the constants in :mod:`cassn.config`.
+    """
+    if not json_path.exists():
+        return {}
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: could not load program_config.json: {e}")
+        return {}
+
+
 def load_plot_coords(csv_path: Path) -> dict:
     """Return ``{(site_code, plot_number_int) -> {latitude, longitude}}`` from plots.csv.
 
@@ -204,6 +222,7 @@ ARUS_CSV = "ARUs.csv"
 CAMERAS_CSV = "cameras.csv"
 SOUNDHUB_JSON = "soundhub_config.json"
 WI_CONFIG_JSON = "wi_config.json"
+PROGRAM_CONFIG_JSON = "program_config.json"
 
 
 @dataclass
@@ -221,6 +240,7 @@ class LookupTables:
     arus: dict = field(default_factory=dict)
     cameras: dict = field(default_factory=dict)
     wi_config: dict = field(default_factory=dict)
+    program_config: dict = field(default_factory=dict)
     plot_coords: dict = field(default_factory=dict)
 
     @classmethod
@@ -237,6 +257,7 @@ class LookupTables:
         self.arus = load_arus(data_dir / ARUS_CSV)
         self.cameras = load_cameras(data_dir / CAMERAS_CSV)
         self.wi_config = load_wi_config(data_dir / WI_CONFIG_JSON)
+        self.program_config = load_program_config(data_dir / PROGRAM_CONFIG_JSON)
         self.plot_coords = load_plot_coords(data_dir / PLOTS_CSV)
 
     # -- convenience views over reserves --------------------------------
