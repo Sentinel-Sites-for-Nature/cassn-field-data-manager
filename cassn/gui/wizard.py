@@ -629,8 +629,15 @@ class FieldDataWizard(QMainWindow):
         self.device_checkboxes = {}
         self.plot_labels = {}
 
-        # Seed with a generic 4-plot grid; replaced on first reserve selection.
-        self._rebuild_plot_grid(reserve_code=None)
+        # Reflect the combo's default selection. addItems() already selected the
+        # first reserve, but on_reserve_changed was connected afterward, so its
+        # site-code + plot-grid setup never ran for that initial value — the user
+        # would otherwise have to re-select the site to proceed. Fall back to an
+        # empty grid when there is no default (e.g. lookups failed to load).
+        if self.reserve_combo.currentText():
+            self.on_reserve_changed(self.reserve_combo.currentText())
+        else:
+            self._rebuild_plot_grid(reserve_code=None)
 
         device_layout.addLayout(self.grid_layout)
 
