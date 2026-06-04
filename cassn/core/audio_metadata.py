@@ -10,7 +10,8 @@ Sources, in order of precedence for the fields each provides:
 * the recording filename encodes local Pacific time
   (``20251219_000000.WAV`` -> ``2025-12-19T00:00:00-08:00``) and is the
   fallback timestamp for pre-GUANO files;
-* ``CONFIG.TXT`` holds the schedule, gain, filter cutoffs, and device ID;
+* ``CONFIG.TXT`` holds the recording date range, schedule, gain, filter
+  cutoffs, and device ID;
 * the WAV ``ICMT`` comment chunk holds per-file battery voltage, temperature,
   gain, and filter settings.
 """
@@ -105,6 +106,11 @@ def parse_audiomoth_config_file(config_path: Path) -> dict:
                     if len(nums) == 2:
                         result["high_pass_filter_hz"] = str(int(float(nums[0]) * 1000))
                         result["low_pass_filter_hz"] = str(int(float(nums[1]) * 1000))
+            elif key == "First recording date":
+                # "2026-01-08 (UTC-8)" -> "2026-01-08"
+                result["deployment_start_date"] = val.split()[0] if val else ""
+            elif key == "Last recording date":
+                result["deployment_end_date"] = val.split()[0] if val else ""
             elif key == "Threshold setting":
                 result["filter_type_amplitude"] = val.rstrip("%") if val != "-" else ""
             elif key == "Minimum trigger duration (s)":

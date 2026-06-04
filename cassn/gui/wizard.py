@@ -583,12 +583,12 @@ class FieldDataWizard(QMainWindow):
         self.deploy_start_date = QDateEdit()
         self.deploy_start_date.setCalendarPopup(True)
         self.deploy_start_date.setDate(QDate.currentDate())
-        form_layout.addRow("Deployment Start Date:", self.deploy_start_date)
+        form_layout.addRow("Deployment Event Start Date:", self.deploy_start_date)
 
         self.deploy_end_date = QDateEdit()
         self.deploy_end_date.setCalendarPopup(True)
         self.deploy_end_date.setDate(QDate.currentDate())
-        form_layout.addRow("Deployment End Date:", self.deploy_end_date)
+        form_layout.addRow("Deployment Event End Date:", self.deploy_end_date)
 
         # Observer/Downloader
         self.observer_combo = QComboBox()
@@ -1713,7 +1713,7 @@ class FieldDataWizard(QMainWindow):
         summary.append(f"Organization: {self.metadata['organization']}")
         summary.append(f"Reserve: {self.metadata['reserve_name']}")
         summary.append(f"Site: {self.metadata['site']}")
-        summary.append(f"Deployment Period: {self.metadata['deployment_start']} to {self.metadata['deployment_end']}")
+        summary.append(f"Deployment Event Period: {self.metadata['deployment_start']} to {self.metadata['deployment_end']}")
         summary.append(f"Observer: {self.metadata['observer']}")
         summary.append("")
 

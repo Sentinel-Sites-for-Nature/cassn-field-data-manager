@@ -62,6 +62,20 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     image_rows: list[dict] = []
     audio_rows: list[dict] = []
 
+    # Per-device fallback recording range: earliest/latest actual recorded-file
+    # date for each device, used when a CONFIG.TXT omits its First/Last recording
+    # date. recorded_datetime is ISO 8601, so its date prefix sorts correctly.
+    dev_date_range: dict[str, tuple[str, str]] = {}
+    for entry in file_inventory:
+        if entry.get('file_type') != 'audio':
+            continue
+        rec = (entry.get('recorded_datetime') or '')[:10]
+        if not rec:
+            continue
+        label = entry.get('device_label', '')
+        lo, hi = dev_date_range.get(label, (rec, rec))
+        dev_date_range[label] = (min(lo, rec), max(hi, rec))
+
     for entry in file_inventory:
         plot_num = entry.get('plot_number', '')
         dev_type = entry.get('device_type', '')
@@ -161,9 +175,13 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             image_rows.append(row)
 
         else:  # audio or config
+            # Actual recording range: CONFIG.TXT dates first, else the device's
+            # earliest/latest recorded-file date. (date_installed below stays the
+            # GUI deployment-event start date.)
+            dev_min, dev_max = dev_date_range.get(entry.get('device_label', ''), ('', ''))
             row = {**base,
-                'deployment_start_date': start,
-                'deployment_end_date':   end,
+                'deployment_start_date': entry.get('deployment_start_date') or dev_min,
+                'deployment_end_date':   entry.get('deployment_end_date') or dev_max,
                 'recorded_by':           observer,
                 'device_id':             entry.get('device_id', ''),
                 'ARU_make':              entry.get('ARU_make', '') or soundhub_config.get('ARU_make', ''),

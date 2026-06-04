@@ -149,6 +149,10 @@ def build_inventory_record(
         'battery_voltage': wav_data.get('battery_voltage', ''),
         'temperature_c': wav_data.get('temperature_c', '') or reconyx_data.get('temperature_c', ''),
         'date_installed': date_installed,
+        # Actual recording date range from CONFIG.TXT (audio only); blank when the
+        # config omits it, so metadata_csv can fall back to file timestamps.
+        'deployment_start_date': config_data.get('deployment_start_date', ''),
+        'deployment_end_date':   config_data.get('deployment_end_date', ''),
         'deployment_start_time': config_data.get('deployment_start_time', '') or soundhub_config.get(f'deployment_start_time_{dev_code}', ''),
         'deployment_end_time':   config_data.get('deployment_end_time', '')   or soundhub_config.get(f'deployment_end_time_{dev_code}', ''),
         'frequency':   config_data.get('frequency', '') or soundhub_config.get('frequency', ''),
@@ -214,8 +218,8 @@ def generate_session_summary(
     lines.append(f"Reserve:          {metadata.get('reserve_name', '?')}")
     lines.append(f"Organization:     {metadata.get('organization', '?')}")
     lines.append(f"Observer:         {metadata.get('observer', '?')}")
-    lines.append(f"Deployment start: {metadata.get('deployment_start', '?')}")
-    lines.append(f"Deployment end:   {metadata.get('deployment_end', '?')}")
+    lines.append(f"Deployment event start: {metadata.get('deployment_start', '?')}")
+    lines.append(f"Deployment event end:   {metadata.get('deployment_end', '?')}")
     lines.append("")
 
     # Device summary
