@@ -119,6 +119,9 @@ def build_inventory_record(
         # Image identity comes from cameras.csv (the camera_id); audio rows
         # leave this blank and use device_id (the AudioMoth serial) instead.
         'camera_id': device_id if file_type == 'image' else '',
+        # The camera's hardware serial read from EXIF (image rows only); QC
+        # cross-checks that camera_id is a substring of this.
+        'camera_serial_exif': reconyx_data.get('camera_serial_exif', ''),
         'file_type': file_type,
         'file_size_bytes': file_size_bytes,
         'file_hash_sha256': file_hash_sha256,
@@ -157,6 +160,10 @@ def build_inventory_record(
         'deployment_end_time':   config_data.get('deployment_end_time', '')   or soundhub_config.get(f'deployment_end_time_{dev_code}', ''),
         'frequency':   config_data.get('frequency', '') or soundhub_config.get('frequency', ''),
         'duration':    config_data.get('duration', '')   or soundhub_config.get(f'duration_{dev_code}', ''),
+        # Actual file length (seconds) and why the recording ended — both from the
+        # WAV header/ICMT (audio rows only). Distinct from the scheduled 'duration'.
+        'recording_duration_sec': wav_data.get('recording_duration_sec', ''),
+        'recording_stop_reason':  wav_data.get('recording_stop_reason', ''),
         'filter_type_duration':  wav_data.get('filter_type_duration', '')  or config_data.get('filter_type_duration', ''),
         'filter_type_amplitude': wav_data.get('filter_type_amplitude', '') or config_data.get('filter_type_amplitude', ''),
         # Reconyx extras (image rows only; blank for audio)

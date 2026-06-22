@@ -146,6 +146,43 @@ def parse_audiomoth_config_file(config_path: Path) -> dict:
     return result
 
 
+def read_wav_duration_sec(wav_path: Path) -> int | None:
+    """Return the recording's actual length in whole seconds, or ``None``.
+
+    Computed from the RIFF header only — the ``data`` chunk's byte count divided
+    by ``fmt`` ``AvgBytesPerSec`` — so the multi-gigabyte audio body is never read.
+    This is the *actual* file duration, distinct from the *scheduled* duration the
+    CONFIG.TXT parser derives from the recording-period schedule.
+    """
+    try:
+        with open(wav_path, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+                return None
+            avg_bytes_per_sec = 0
+            data_size = 0
+            while True:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                chunk_id = chunk_header[:4]
+                chunk_size = struct.unpack_from("<I", chunk_header, 4)[0]
+                if chunk_id == b"fmt ":
+                    fmt = f.read(chunk_size + (chunk_size & 1))
+                    if len(fmt) >= 12:
+                        avg_bytes_per_sec = struct.unpack_from("<I", fmt, 8)[0]
+                elif chunk_id == b"data":
+                    data_size = chunk_size
+                    break  # data is all we need; the body follows
+                else:
+                    f.seek(chunk_size + (chunk_size & 1), 1)
+        if avg_bytes_per_sec > 0 and data_size > 0:
+            return round(data_size / avg_bytes_per_sec)
+    except Exception:
+        pass
+    return None
+
+
 def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
     """Extract AudioMoth metadata from a WAV ICMT comment chunk."""
     result: dict = {}
@@ -174,6 +211,10 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
         except Exception:
             pass
 
+        dur = read_wav_duration_sec(wav_path)
+        if dur is not None:
+            result["recording_duration_sec"] = dur
+
         m = re.search(r"at (\w[\w\s-]*?) gain", comment, re.IGNORECASE)
         if m:
             result["gain_setting"] = m.group(1).strip()
@@ -198,13 +239,26 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
         if m:
             result["low_pass_filter_hz"] = str(int(float(m.group(1)) * 1000))
 
-        m = re.search(r"Amplitude threshold was (\d+)%", comment, re.IGNORECASE)
+        # Firmware <1.8 reported the amplitude threshold as a percentage
+        # ("was 50%"); newer firmware reports a raw 16-bit value
+        # ("was 2048 with…"). Match the number either way so threshold-triggered
+        # (bat) recordings don't silently lose this field. Stored as the bare
+        # number, matching the CONFIG.TXT "Threshold setting" handling.
+        m = re.search(r"Amplitude threshold was (\d+)", comment, re.IGNORECASE)
         if m:
             result["filter_type_amplitude"] = m.group(1)
 
         m = re.search(r"(\d+)s minimum trigger duration", comment, re.IGNORECASE)
         if m:
             result["filter_type_duration"] = m.group(1)
+
+        # Why the recording ended, e.g. "Recording stopped due to file size limit"
+        # (normal for big bat files), "due to switch position change", or "due to
+        # low voltage" (a battery death worth flagging). Captured verbatim; the
+        # QC check decides which reasons are concerning.
+        m = re.search(r"Recording (?:stopped|cancelled)[^.]*?due to ([^.]+)", comment, re.IGNORECASE)
+        if m:
+            result["recording_stop_reason"] = m.group(1).strip()
     except Exception as e:
         print(f"    WARNING: failed to parse WAV comment at {wav_path}: {e}")
     return result

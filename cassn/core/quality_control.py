@@ -48,9 +48,13 @@ from cassn.core.hashing import sha256
 # it can be read and tested without Qt.
 # ---------------------------------------------------------------------------
 
-def verify_copy_hash(source_hash: str, source_sha1: str, dest_hash: str, dest_sha1: str) -> bool:
-    """True if the post-copy file is byte-identical to the source."""
-    return source_hash == dest_hash and source_sha1 == dest_sha1
+def verify_copy_hash(source_hash: str, dest_hash: str) -> bool:
+    """True if the post-copy file is byte-identical to the source.
+
+    Compares SHA-256 only — a matching SHA-256 already proves byte-identity.
+    SHA-1 is still computed/stored elsewhere for the Box↔disk fixity check.
+    """
+    return source_hash == dest_hash
 
 
 def check_file_size_floor(size_bytes: int, file_type: str, dev_code: str) -> tuple[int, str] | None:
@@ -395,6 +399,53 @@ def validate_datetimes(entries: list, deployment_start: str, collection_date: st
         warnings.append(f"Possible clock reset: {worst[1]} files share timestamp {worst[0].isoformat()} — camera clock may have reset to factory default")
 
     return warnings
+
+
+def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
+    """Flag audio recordings that ended for a concerning reason.
+
+    AudioMoth records why each recording stopped. "File size limit" is normal for
+    long high-sample-rate (bat) recordings and is ignored; **low voltage** (a
+    battery death) and a **switch position change** (the device switch was toggled,
+    often unexpectedly) are flagged. Returns one warning per distinct concerning
+    reason with a count. Self-filters to audio entries, so it is a no-op for
+    camera devices. Empty list = nothing concerning.
+    """
+    concerning = ("low voltage", "low battery", "switch position")
+    counts: Counter = Counter()
+    for e in entries:
+        if e.get('file_type') != 'audio':
+            continue
+        reason = (e.get('recording_stop_reason') or '').strip()
+        if reason and any(term in reason.lower() for term in concerning):
+            counts[reason] += 1
+    return [f"{n} recording(s) stopped due to: {reason}" for reason, n in counts.items()]
+
+
+def check_camera_serial(entries: list, device_label: str) -> list[str]:
+    """Cross-check the cameras.csv ``camera_id`` against the EXIF camera serial.
+
+    The lookup ``camera_id`` should be contained within the camera's full hardware
+    serial read from EXIF (e.g. ``08021269`` within ``4LPXKT08021269``). Warns once
+    per device when a non-empty ``camera_id`` is **not** a substring of a non-empty
+    ``camera_serial_exif`` (case-insensitive) — a sign the wrong physical camera is
+    deployed at this plot, or the lookup table is stale. Skips when either value is
+    blank, and self-filters to image entries (no-op for audio).
+    """
+    for e in entries:
+        if e.get('file_type') != 'image':
+            continue
+        cam_id = str(e.get('camera_id') or '').strip()
+        serial = str(e.get('camera_serial_exif') or '').strip()
+        if not cam_id or not serial:
+            continue
+        if cam_id.lower() not in serial.lower():
+            return [
+                f"camera_id '{cam_id}' (cameras.csv) is not contained in the "
+                f"camera's EXIF serial '{serial}' — possible wrong camera at this plot"
+            ]
+        break  # consistent within a device; one verified image is enough
+    return []
 
 
 def validate_coordinates(file_inventory: list, bounds: dict | None = None) -> list[str]:

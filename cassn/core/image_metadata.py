@@ -139,6 +139,12 @@ def _parse_reconyx_tags(tags: dict) -> dict:
     if not tags:
         return result
 
+    # Normalize keys: PyExifTool (ExifToolHelper) returns group-prefixed names
+    # ("MakerNotes:SerialNumber") while the one-shot subprocess returns bare names
+    # ("SerialNumber"). Strip the group so both paths produce identical lookups —
+    # without this, every Reconyx field is silently empty on the PyExifTool path.
+    tags = {str(k).split(":")[-1]: v for k, v in tags.items()}
+
     temp = tags.get("AmbientTemperature", "")
     m = re.match(r"([-\d.]+)", str(temp))
     if m:
@@ -148,6 +154,9 @@ def _parse_reconyx_tags(tags: dict) -> dict:
     result["battery_voltage"] = str(tags.get("BatteryVoltage", ""))
     result["battery_voltage_avg"] = str(tags.get("BatteryVoltageAvg", ""))
     result["battery_type"] = tags.get("BatteryType", "")
+    # The camera's hardware serial, straight from the Reconyx MakerNote. Captured
+    # for provenance and cross-checked against the cameras.csv camera_id in QC.
+    result["camera_serial_exif"] = str(tags.get("SerialNumber", ""))
 
     trigger, pos, total = _reconyx_sequence_from_exiftool_tags(tags)
     if pos is not None:
@@ -200,7 +209,11 @@ class ReconyxExtractor:
     def start(self) -> "ReconyxExtractor":
         if ExifToolHelper is not None:
             try:
-                et = ExifToolHelper()
+                # Drop PyExifTool's default "-n": with it, print-conversion is off and
+                # tags come back as numeric codes (MoonPhase=3, BatteryType=2) instead
+                # of the human labels ("Waxing Gibbous", "Lithium") the one-shot
+                # subprocess path returns. "-G" keys are normalized in _parse_reconyx_tags.
+                et = ExifToolHelper(common_args=["-G"])
                 et.run()
                 self._et = et
             except Exception as e:

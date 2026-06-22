@@ -105,8 +105,10 @@ from cassn.core.inventory import (
 from cassn.core.inventory import find_all_sessions as _find_all_sessions
 from cassn.core.quality_control import (
     append_qc_report,
+    check_camera_serial,
     check_expected_count,
     check_file_size_floor,
+    check_recording_stop_reasons,
     check_sequence_integrity,
     is_duplicate_hash,
     migrate_qc_sidecars,
@@ -1127,7 +1129,21 @@ class FieldDataWizard(QMainWindow):
         # and resource forks). Used silently as expected_file_count for post-copy
         # comparison — catches files that were skipped during copy (hash mismatch,
         # duplicate, etc.). No user prompt.
+        #
+        # For audio devices the inventory keeps .wav recordings plus the single
+        # CONFIG.TXT, so only count CONFIG.TXT among .txt files (a stray
+        # README/notes file on the card must not inflate the expected number).
+        # The CONFIG match mirrors the glob used to find configs below (~1287).
         media_exts = {".jpg", ".jpeg"} if dev_code not in ("BD", "BT") else {".wav", ".txt"}
+
+        def _counts_toward_expected(f: Path) -> bool:
+            suffix = f.suffix.lower()
+            if suffix not in media_exts:
+                return False
+            if suffix == ".txt":
+                return "CONFIG" in f.name.upper()
+            return True
+
         try:
             expected_file_count = sum(
                 1
@@ -1135,7 +1151,7 @@ class FieldDataWizard(QMainWindow):
                 if f.is_file()
                 and not f.name.startswith(".")
                 and not f.name.startswith("_")
-                and f.suffix.lower() in media_exts
+                and _counts_toward_expected(f)
             )
         except Exception:
             expected_file_count = None
@@ -1153,7 +1169,7 @@ class FieldDataWizard(QMainWindow):
         # spawning one per image (slow on a card of thousands). Closed in finally.
         reconyx = ReconyxExtractor().start()
         try:
-            self.process_sd_card_files(
+            _files_copied, duplicate_count, hash_mismatch_count = self.process_sd_card_files(
                 Path(sd_path), device_folder, plot_num, plot_label, dev_code, device_label,
                 reconyx,
             )
@@ -1181,16 +1197,29 @@ class FieldDataWizard(QMainWindow):
                 # Compare against total inventoried files for this device, not files
                 # copied in this run alone — otherwise resume runs falsely warn because
                 # already-copied files are skipped and don't count toward files_copied.
-                if not check_expected_count(expected_file_count, total_for_device):
-                    self.log(f"  ⚠ File count mismatch: expected {expected_file_count}, inventory has {total_for_device}. Check SD card!")
-                    append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "warning",
-                                     f"Expected {expected_file_count}, inventory has {total_for_device}")
-                    QMessageBox.warning(self, "File Count Mismatch",
-                        f"Expected {expected_file_count} files in source but device inventory has {total_for_device}.\n\n"
-                        f"Please verify the SD card for missing files before ejecting.")
-                else:
+                if check_expected_count(expected_file_count, total_for_device):
                     append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "pass",
                                      f"Expected {expected_file_count}, inventory has {total_for_device}")
+                else:
+                    # Drop-aware: a shortfall is expected when files were intentionally
+                    # dropped (byte-identical duplicates, or copies that failed hash
+                    # verification after retries). Only raise the modal on an
+                    # *unexplained* shortfall; an accounted-for gap is logged, not popped.
+                    accounted_drops = duplicate_count + hash_mismatch_count
+                    unexplained_shortfall = expected_file_count - total_for_device - accounted_drops
+                    if unexplained_shortfall > 0:
+                        self.log(f"  ⚠ File count mismatch: expected {expected_file_count}, inventory has {total_for_device}. Check SD card!")
+                        append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "warning",
+                                         f"Expected {expected_file_count}, inventory has {total_for_device}")
+                        QMessageBox.warning(self, "File Count Mismatch",
+                            f"Expected {expected_file_count} files in source but device inventory has {total_for_device}.\n\n"
+                            f"Please verify the SD card for missing files before ejecting.")
+                    else:
+                        self.log(f"  File count: expected {expected_file_count}, inventory {total_for_device} — "
+                                 f"{accounted_drops} duplicate(s)/hash-drop(s) dropped, accounted for")
+                        append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "pass",
+                                         f"Expected {expected_file_count}, inventory has {total_for_device} "
+                                         f"({accounted_drops} intentional drop(s) accounted for)")
 
             # Run QC checks and log findings to qc_report.json
             self._run_device_qc_checks(device_entries, device_label)
@@ -1357,23 +1386,36 @@ class FieldDataWizard(QMainWindow):
                     except Exception as e:
                         self.log(f"  Warning: could not remove partial file {dest_path.name}: {e}")
 
+                # Copy + post-copy hash verification with auto-retry: a transient
+                # SD-read glitch can corrupt a copy, so re-copy and re-verify up to
+                # 3 attempts total before declaring a hard failure. A copy recovered
+                # on retry is NOT counted as a mismatch.
                 source_hash, source_sha1 = sha256_sha1(source_path)
-                shutil.copy2(source_path, dest_path)
-                file_hash, file_sha1 = sha256_sha1(dest_path)
-
-                # Post-copy hash verification: destination must match source
-                if not verify_copy_hash(source_hash, source_sha1, file_hash, file_sha1):
+                max_attempts = 3
+                copy_ok = False
+                file_hash, file_sha1 = "", ""
+                for attempt in range(1, max_attempts + 1):
+                    shutil.copy2(source_path, dest_path)
+                    file_hash, file_sha1 = sha256_sha1(dest_path)
+                    if verify_copy_hash(source_hash, file_hash):
+                        copy_ok = True
+                        if attempt > 1:
+                            self.log(f"  Note: copy verified on retry {attempt - 1} — {filename}")
+                        break
+                    # Mismatch — remove the bad copy before retrying (or before erroring).
                     try:
                         dest_path.unlink()
                     except Exception:
                         pass
-                    self.log(f"  ERROR: hash mismatch after copy — {filename} skipped (source SHA-256 {source_hash[:8]}… ≠ dest {file_hash[:8]}…)")
+
+                if not copy_ok:
+                    self.log(f"  ERROR: hash mismatch after copy — {filename} skipped after {max_attempts} attempts (source SHA-256 {source_hash[:8]}… ≠ dest {file_hash[:8]}…)")
                     hash_mismatch_count += 1
                     hash_mismatch_names.append(filename)
                     append_qc_report(self.current_deployment_folder, "hash_verification", device_label, "error",
                                      f"Hash mismatch on {filename} (source ≠ dest)")
                     QMessageBox.critical(self, "Copy Verification Failed",
-                        f"Hash mismatch detected for:\n{filename}\n\nThe destination file does not match the source. "
+                        f"Hash mismatch detected for:\n{filename}\n\nThe destination file does not match the source after {max_attempts} attempts. "
                         f"The file has been removed from staging. Check the SD card and retry.")
                     continue
 
@@ -1510,7 +1552,9 @@ class FieldDataWizard(QMainWindow):
             append_qc_report(self.current_deployment_folder, "duplicate_detection", device_label, "pass",
                              "No duplicate file hashes encountered")
 
-        return files_copied
+        # Return the intentional-drop counts alongside files_copied so the caller's
+        # expected-count reconciliation can treat them as accounted-for shortfall.
+        return files_copied, duplicate_count, hash_mismatch_count
 
     def skip_device(self):
         """Skip selected device"""
@@ -1969,6 +2013,7 @@ class FieldDataWizard(QMainWindow):
             self.metadata,
             box_config=self.box_config,
             valid_reserve_names=self._valid_reserve_names(),
+            hash_retry=2,  # automatic run: absorb Box's post-upload SHA-1 lag
         )
         self.fixity_thread.progress.connect(self._on_auto_fixity_progress)
         self.fixity_thread.finished.connect(self._on_auto_fixity_finished)
@@ -2103,6 +2148,8 @@ class FieldDataWizard(QMainWindow):
         check_results = [
             ("sequence_gap", check_sequence_integrity(device_entries, device_label)),
             ("temporal_plausibility", validate_datetimes(device_entries, deploy_start, deploy_end)),
+            ("camera_serial_match", check_camera_serial(device_entries, device_label)),
+            ("recording_stop_reason", check_recording_stop_reasons(device_entries, device_label)),
         ]
 
         any_warnings = False
@@ -2365,11 +2412,29 @@ class FieldDataWizard(QMainWindow):
             "note": f"Missing: {', '.join(missing_manifests)}" if missing_manifests else "",
         })
 
-        # 3. Fixity check run this session
+        # 3. Hash verification passed. Auto-satisfied by a successful automatic
+        # post-upload hash verify: the automatic verify writes its result to
+        # qc_report.json under "file_hash_verification_run", so a passing entry
+        # there means a hash verification ran AND passed with no errors — no need
+        # to also click the manual button. The in-session manual flag still counts.
+        hash_verified = self.fixity_check_run
+        if not hash_verified:
+            hash_qc_path = qc_path_for(self.current_deployment_folder, "qc_report.json")
+            if hash_qc_path.exists():
+                try:
+                    with open(hash_qc_path) as f:
+                        hash_qc_data = json.load(f)
+                    hash_verified = any(
+                        c.get("check") == "file_hash_verification_run"
+                        and c.get("severity") == "pass"
+                        for c in hash_qc_data.get("current_state", [])
+                    )
+                except Exception:
+                    pass
         items.append({
-            "label": "Staging drive fixity check run",
-            "ok": self.fixity_check_run,
-            "note": "Click 'Verify Box ↔ Local Hashes' before departing" if not self.fixity_check_run else "",
+            "label": "Hash verification passed",
+            "ok": hash_verified,
+            "note": "Run an upload (auto-verifies) or click 'Verify Box ↔ Local Hashes'" if not hash_verified else "",
         })
 
         # 4. Box upload verified
