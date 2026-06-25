@@ -266,6 +266,30 @@ def _box_retry_delay(exc, attempt: int, *, base: float = 1.0, cap: float = 30.0)
     return min(base * (2 ** (attempt - 1)), cap)
 
 
+def _is_already_exists(exc) -> bool:
+    """True if a Box upload error is a 409 'item already exists'.
+
+    This means the file is already on Box — almost always because a prior attempt
+    in the same run actually landed it but its success response was lost, so the
+    retry hit a duplicate. Treating it as success (instead of a failure) avoids
+    cosmetic false-failures; the post-upload SHA-1 verification still confirms the
+    bytes match. Defensive across Box SDK exception shapes.
+    """
+    try:
+        info = getattr(exc, "response_info", None) or getattr(exc, "response", None)
+        status = (
+            getattr(info, "status_code", None)
+            or getattr(exc, "status_code", None)
+            or getattr(exc, "status", None)
+        )
+        if status == 409:
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return "already exists" in msg or "item with the same name" in msg
+
+
 class BoxUploadThread(QThread):
     """Background thread for uploading a deployment folder to Box."""
 
@@ -429,6 +453,11 @@ class BoxUploadThread(QThread):
                         action = storage.upload_file_with_path(file_path, deploy_id, rel_path)
                         return ("ok", str(rel_path), f"{action}: {rel_path}")
                     except Exception as e:
+                        # A 409 "already exists" means the file is on Box — typically a
+                        # prior attempt landed it but its ack was lost. Treat as success
+                        # (the post-upload SHA-1 check verifies the bytes), not a failure.
+                        if _is_already_exists(e):
+                            return ("ok", str(rel_path), f"uploaded: {rel_path}")
                         last_err = e
                         if attempt < max_attempts:
                             # Event.wait() doubles as an interruptible sleep.

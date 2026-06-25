@@ -211,6 +211,37 @@ def load_plot_coords(csv_path: Path) -> dict:
     return result
 
 
+def load_deployments(csv_path: Path) -> dict:
+    """Return ``{site_code -> [ {deployment_start, deployment_end, deployment_event_id} ]}``.
+
+    One entry per deployment event, sorted by start date. Powers the GUI's
+    deployment-event picker so dates aren't typed by hand. Missing/unreadable
+    file degrades to ``{}``.
+    """
+    result: dict[str, list] = {}
+    if not csv_path.exists():
+        return result
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            with open(csv_path, "r", encoding=encoding) as f:
+                for row in csv.DictReader(f):
+                    site = (row.get("site_code") or "").strip()
+                    if not site:
+                        continue
+                    result.setdefault(site, []).append({
+                        "deployment_start": (row.get("deployment_start") or "").strip(),
+                        "deployment_end": (row.get("deployment_end") or "").strip(),
+                        "deployment_event_id": (row.get("deployment_event_id") or "").strip(),
+                    })
+            break
+        except UnicodeDecodeError:
+            result = {}
+            continue
+    for events in result.values():
+        events.sort(key=lambda e: e["deployment_start"])
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Container — replaces module-level globals
 # ---------------------------------------------------------------------------
@@ -220,6 +251,7 @@ SITES_CSV = "sites.csv"
 PLOTS_CSV = "plots.csv"
 ARUS_CSV = "ARUs.csv"
 CAMERAS_CSV = "cameras.csv"
+DEPLOYMENTS_CSV = "deployments.csv"
 SOUNDHUB_JSON = "soundhub_config.json"
 WI_CONFIG_JSON = "wi_config.json"
 PROGRAM_CONFIG_JSON = "program_config.json"
@@ -242,6 +274,7 @@ class LookupTables:
     wi_config: dict = field(default_factory=dict)
     program_config: dict = field(default_factory=dict)
     plot_coords: dict = field(default_factory=dict)
+    deployments: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, data_dir: Path) -> "LookupTables":
@@ -259,6 +292,7 @@ class LookupTables:
         self.wi_config = load_wi_config(data_dir / WI_CONFIG_JSON)
         self.program_config = load_program_config(data_dir / PROGRAM_CONFIG_JSON)
         self.plot_coords = load_plot_coords(data_dir / PLOTS_CSV)
+        self.deployments = load_deployments(data_dir / DEPLOYMENTS_CSV)
 
     # -- convenience views over reserves --------------------------------
 

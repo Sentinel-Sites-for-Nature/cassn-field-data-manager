@@ -581,6 +581,16 @@ class FieldDataWizard(QMainWindow):
         self.site_code_edit.setReadOnly(True)
         form_layout.addRow("Site Code:", self.site_code_edit)
 
+        # Deployment-event picker — auto-fills the dates below from deployments.csv
+        # (populated per site). The date fields stay editable for manual override.
+        self.deploy_event_combo = QComboBox()
+        self.deploy_event_combo.setToolTip(
+            "Pick a known deployment event to auto-fill the start/end dates, "
+            "or choose manual entry to type them."
+        )
+        self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
+        form_layout.addRow("Deployment Event:", self.deploy_event_combo)
+
         # Deployment dates
         self.deploy_start_date = QDateEdit()
         self.deploy_start_date.setCalendarPopup(True)
@@ -911,8 +921,38 @@ class FieldDataWizard(QMainWindow):
             if name == text:
                 self.site_code_edit.setText(code)
                 self.update_plot_labels(code)
+                self._populate_deploy_events(code)
                 return
         self.site_code_edit.setText("")
+        self._populate_deploy_events("")
+
+    def _populate_deploy_events(self, site_code):
+        """Fill the deployment-event picker for the selected site from deployments.csv."""
+        if not hasattr(self, "deploy_event_combo"):
+            return
+        combo = self.deploy_event_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— Enter dates manually —", None)
+        for ev in self.lookups.deployments.get(site_code, []):
+            start, end = ev["deployment_start"], ev["deployment_end"]
+            label = f"{start} → {end}" if end else f"{start} → (still deployed)"
+            combo.addItem(label, ev)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def on_deploy_event_changed(self, index):
+        """Auto-fill the deployment start/end date pickers from the chosen event."""
+        ev = self.deploy_event_combo.itemData(index)
+        if not ev:
+            return  # manual entry — leave the date pickers untouched
+        start = QDate.fromString(ev["deployment_start"], "yyyy-MM-dd")
+        if start.isValid():
+            self.deploy_start_date.setDate(start)
+        if ev["deployment_end"]:
+            end = QDate.fromString(ev["deployment_end"], "yyyy-MM-dd")
+            if end.isValid():
+                self.deploy_end_date.setDate(end)
 
     def on_observer_changed(self, text):
         """Show/hide other observer entry"""
