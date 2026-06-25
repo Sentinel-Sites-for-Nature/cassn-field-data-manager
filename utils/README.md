@@ -291,3 +291,101 @@ python3 utils/generate_occurrences.py <file_metadata.csv> <images.csv> <output_d
 <output_dir>/
 └── UC_SITE_YYYYMMDD_occurrences.csv
 ```
+
+---
+
+## `fix_camera_clock.py`
+
+Corrects a camera **clock offset** on already-staged images, end to end. A camera
+deployed with a wrong internal clock writes wrong timestamps into every photo's
+EXIF; this rewrites the dates and keeps the deployment's QC/fixity records
+consistent so the normal Box upload + hash verification still pass.
+
+Per device, it:
+
+1. Shifts the EXIF dates with `exiftool` (`-AllDates`, which also moves the Reconyx
+   MakerNote `DateTimeOriginal`).
+2. Recomputes SHA-256/SHA-1 and file size (the bytes changed, so the old hashes
+   are stale).
+3. Re-reads `recorded_datetime` from the corrected EXIF.
+4. Patches the deployment's `session.json` file inventory.
+5. Rewrites the device manifest(s) and regenerates the metadata CSVs.
+
+The offset is fully general — any combination of
+years/months/days/hours/minutes/seconds, added or subtracted — so it handles a
+wrong year, a wrong month, or a few-hours timezone/DST slip.
+
+### When to use
+
+Use it when a camera's clock was set wrong and the photos are already staged
+locally (e.g. cameras that recorded 2025 because the clock was a year early).
+Audio (`BD`/`BT`) is never affected — AudioMoth datetimes come from the
+GUANO/filename, not a camera clock.
+
+> **Close the CASSN app before running.** Its autosave would otherwise overwrite
+> the corrected `session.json`.
+
+### Requirements
+
+`exiftool` on your PATH, plus the project's normal Python environment (the script
+imports the `cassn` package).
+
+```bash
+exiftool -ver        # confirm exiftool is installed
+```
+
+### Run
+
+Always preview with `--dry-run` first — it samples the current years and reports
+what would change without writing anything:
+
+```bash
+python utils/fix_camera_clock.py \
+  --deployment "/Volumes/G-DRIVE ArmorATD/.../UC_Sedgwick_20260610" \
+  --devices p1_ML p2_ML p3_ML p4_ML p4_SA \
+  --years 1 --only-year 2025 --dry-run
+```
+
+Drop `--dry-run` to apply. Each device folder named under `--devices` lives in
+`raw_data/`.
+
+### Speeding it up on a slow/HDD staging drive — `--scratch`
+
+The per-file EXIF rewrite + re-hash is slow on a spinning HDD's random I/O. Pass
+`--scratch <fast_dir>` (e.g. an internal SSD) and the tool, per device, copies the
+device folder to that scratch dir (one sequential read the HDD handles well), does
+the heavy work there, and copies the corrected files back only if they changed —
+then patches the inventory/manifests/CSVs exactly as the in-place run does. The
+data ends up back on the staging drive, so the app uploads from there unchanged.
+
+`--scratch` takes any fast local path with room for **one device folder at a
+time**; omit it to work in place.
+
+```bash
+python utils/fix_camera_clock.py \
+  --deployment "/Volumes/G-DRIVE ArmorATD/.../UC_Sedgwick_20260610" \
+  --devices p1_ML p2_ML p3_ML p4_ML p4_SA \
+  --years 1 --only-year 2025 --scratch /tmp/cassn_scratch
+```
+
+### Options
+
+| Flag | Meaning |
+| --- | --- |
+| `--deployment` | Deployment folder (contains `session.json` and `raw_data/`). Required. |
+| `--devices` | One or more device folder names under `raw_data/`, e.g. `p2_ML p4_SA`. Required. |
+| `--years/--months/--days/--hours/--minutes/--seconds` | The offset. At least one must be non-zero. |
+| `--subtract` | Subtract the offset (clock was **ahead**). Default adds (clock behind). |
+| `--only-year YYYY` | Only shift files whose current year matches — makes re-runs safe and supports partial recovery. |
+| `--scratch DIR` | Route the heavy per-file work through this fast local dir. Omit to work in place. |
+| `--dry-run` | Report what would change; write nothing. |
+
+### Notes
+
+- `--only-year` is the idempotency guard: with `--only-year 2025`, re-running
+  won't double-shift files already corrected to 2026.
+- Recomputing hashes is **mandatory**, not optional — rewriting EXIF changes the
+  bytes, so without the re-hash every corrected file would (correctly) fail the
+  Box hash check. The script handles this for you.
+- After it finishes, the staged data, inventory, manifests, and CSVs all agree;
+  run the app's Box upload as normal.
