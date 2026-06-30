@@ -103,6 +103,7 @@ from cassn.core.inventory import (
     write_session,
 )
 from cassn.core.inventory import (
+    already_copied_relpaths,
     count_expected_files,
     find_all_sessions as _find_all_sessions,
     sorted_walk,
@@ -1275,11 +1276,7 @@ class FieldDataWizard(QMainWindow):
         duplicate_names: list[str] = []
 
         # Resume support: skip files already in inventory for this device
-        already_copied = {
-            entry["original_filename"]
-            for entry in self.file_inventory
-            if entry["device_label"] == device_label
-        }
+        already_copied = already_copied_relpaths(self.file_inventory, device_label)
         prior_media_count = sum(
             1
             for entry in self.file_inventory
@@ -1350,8 +1347,12 @@ class FieldDataWizard(QMainWindow):
                 if file_type == "other":
                     continue
 
-                # Skip files already successfully copied in a prior session
-                if filename in already_copied:
+                # Skip files already copied in a prior session. Match on the path
+                # relative to the card root, not the bare filename, so two files
+                # that share a basename in different folders (e.g.
+                # 100RECNX/RCNX0001.JPG and 101RECNX/RCNX0001.JPG) aren't confused.
+                source_relpath = str(source_path.relative_to(source_dir))
+                if source_relpath in already_copied:
                     continue
 
                 # For images: read EXIF + Reconyx metadata from source before
@@ -1502,6 +1503,7 @@ class FieldDataWizard(QMainWindow):
                     file_hash_sha1=file_sha1,
                     recorded_datetime=recorded_datetime,
                     source_path=str(source_path),
+                    source_relpath=source_relpath,
                     plot_metadata=plot_metadata,
                     exif_data=exif_data,
                     config_data=config_data,

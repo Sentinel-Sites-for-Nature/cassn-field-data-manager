@@ -77,6 +77,22 @@ def count_expected_files(source_dir) -> int:
     )
 
 
+def already_copied_relpaths(file_inventory, device_label) -> set:
+    """Source-relative paths already inventoried for a device, for resume.
+
+    Matching on the card-relative path (not the bare filename) avoids skipping
+    a file that merely shares a basename with one in another folder — e.g.
+    ``100RECNX/RCNX0001.JPG`` vs ``101RECNX/RCNX0001.JPG`` — and is stable even
+    if the card remounts at a different location. Entries without a
+    ``source_relpath`` (pre-fix sessions) are ignored.
+    """
+    return {
+        entry["source_relpath"]
+        for entry in file_inventory
+        if entry.get("device_label") == device_label and entry.get("source_relpath")
+    }
+
+
 # ---------------------------------------------------------------------------
 # Naming convention
 # ---------------------------------------------------------------------------
@@ -124,6 +140,7 @@ def build_inventory_record(
     file_hash_sha1: str,
     recorded_datetime: str,
     source_path: str,
+    source_relpath: str = "",
     plot_metadata: dict,
     exif_data: dict,
     config_data: dict,
@@ -179,6 +196,7 @@ def build_inventory_record(
         'sequence_position': seq_pos if seq_pos is not None else '',
         'sequence_total': seq_total if seq_total is not None else '',
         'source_path': source_path,
+        'source_relpath': source_relpath,
         # AudioMoth fields (audio rows only; blank for images)
         # Identity: GUANO (wav_data) is authoritative, then CONFIG.TXT, then the
         # soundhub_config.json default applied downstream in metadata_csv.
