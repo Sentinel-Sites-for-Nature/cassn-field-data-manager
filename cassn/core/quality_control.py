@@ -70,6 +70,19 @@ def is_duplicate_hash(file_hash: str, seen_hashes: set) -> bool:
     return file_hash in seen_hashes
 
 
+def is_duplicate_media(file_hash: str, file_type: str, seen_hashes: set) -> bool:
+    """True if a file should be skipped as a session-wide duplicate.
+
+    Only media (image/audio) participate in duplicate detection. CONFIG/text
+    files are exempt: two AudioMoths left on identical default settings produce
+    byte-identical CONFIG.TXT files, and each device's settings record must be
+    kept rather than silently dropped.
+    """
+    if file_type == "config":
+        return False
+    return is_duplicate_hash(file_hash, seen_hashes)
+
+
 def check_expected_count(expected: int | None, actual: int) -> bool:
     """True if counts match (or ``expected`` is unknown)."""
     return expected is None or expected == actual

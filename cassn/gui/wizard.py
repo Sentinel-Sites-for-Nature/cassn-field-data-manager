@@ -110,7 +110,7 @@ from cassn.core.quality_control import (
     check_file_size_floor,
     check_recording_stop_reasons,
     check_sequence_integrity,
-    is_duplicate_hash,
+    is_duplicate_media,
     migrate_qc_sidecars,
     qc_path_for,
     validate_coordinates,
@@ -1531,8 +1531,11 @@ class FieldDataWizard(QMainWindow):
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
-                # Duplicate detection: skip files whose hash already exists in this session
-                if is_duplicate_hash(file_hash, self.seen_file_hashes):
+                # Duplicate detection: skip media files whose hash already exists in
+                # this session. CONFIG/text files are exempt — identical default
+                # settings across devices yield byte-identical CONFIG.TXT files, and
+                # each device's settings record must be kept (see is_duplicate_media).
+                if is_duplicate_media(file_hash, file_type, self.seen_file_hashes):
                     self.log(f"  Warning: duplicate file skipped — {new_filename} matches an already-inventoried file")
                     duplicate_count += 1
                     duplicate_names.append(new_filename)
@@ -1541,7 +1544,8 @@ class FieldDataWizard(QMainWindow):
                     dest_path.unlink(missing_ok=True)
                     continue
 
-                self.seen_file_hashes.add(file_hash)
+                if file_type != "config":
+                    self.seen_file_hashes.add(file_hash)
                 self.file_inventory.append(file_info)
                 files_copied += 1
 
