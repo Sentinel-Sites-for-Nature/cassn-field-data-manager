@@ -115,6 +115,7 @@ from cassn.core.quality_control import (
     check_expected_count,
     check_file_size_floor,
     check_recording_stop_reasons,
+    check_required_lookups,
     check_sequence_integrity,
     is_duplicate_media,
     migrate_qc_sidecars,
@@ -1245,6 +1246,35 @@ class FieldDataWizard(QMainWindow):
                         append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "pass",
                                          f"Expected {expected_file_count}, inventory has {total_for_device} "
                                          f"({accounted_drops} intentional drop(s) accounted for)")
+
+            # Required-lookup policy (see check_required_lookups): missing device
+            # identity or plot coordinates blocks (QC error); a missing ARU row
+            # warns. Values are read from the device's inventory records, which
+            # already hold the resolved lookup values.
+            if device_entries:
+                first_record = device_entries[0]
+                dev_type = first_record.get("device_type", "")
+                plot_num_val = first_record.get("plot_number", "")
+                site_value = self.metadata.get("site", "")
+                site_code = self.lookups.site_code_by_name.get(site_value, site_value)
+                aru_key = (
+                    site_code,
+                    int(plot_num_val) if str(plot_num_val).isdigit() else plot_num_val,
+                    dev_type,
+                )
+                for check, severity, message in check_required_lookups(
+                    device_label,
+                    is_audio=dev_type in AUDIO_DEVICE_TYPES,
+                    has_device_identity=any(e.get("device_id") for e in device_entries),
+                    has_coordinates=bool(
+                        first_record.get("latitude") and first_record.get("longitude")
+                    ),
+                    has_aru_row=aru_key in self.lookups.arus,
+                ):
+                    append_qc_report(
+                        self.current_deployment_folder, check, device_label, severity, message
+                    )
+                    self.log(f"  {'⚠' if severity == 'warning' else '✗'} {message}")
 
             # Run QC checks and log findings to qc_report.json
             self._run_device_qc_checks(device_entries, device_label)

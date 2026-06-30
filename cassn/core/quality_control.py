@@ -127,6 +127,46 @@ def check_expected_count(expected: int | None, actual: int) -> bool:
     return expected is None or expected == actual
 
 
+def check_required_lookups(
+    device_label,
+    *,
+    is_audio: bool,
+    has_device_identity: bool,
+    has_coordinates: bool,
+    has_aru_row: bool,
+) -> list:
+    """QC findings for missing lookup data, per the configured policy.
+
+    Blocking errors: a missing device identity (camera absent from cameras.csv,
+    or an AudioMoth serial that can't be read) and missing plot coordinates
+    (plot absent from plots.csv). Warning only: missing ARU install details
+    (recorder absent from ARUs.csv). Returns ``(check, severity, message)``
+    tuples; the caller appends them to the QC report.
+    """
+    findings = []
+    if not has_device_identity:
+        findings.append((
+            "lookup_device_identity",
+            "error",
+            f"{device_label}: AudioMoth serial could not be read"
+            if is_audio
+            else f"{device_label}: camera_id missing — camera not in cameras.csv",
+        ))
+    if not has_coordinates:
+        findings.append((
+            "lookup_plot_coordinates",
+            "error",
+            f"{device_label}: plot coordinates missing — plot not in plots.csv",
+        ))
+    if is_audio and not has_aru_row:
+        findings.append((
+            "lookup_aru_install",
+            "warning",
+            f"{device_label}: ARU install details missing — recorder not in ARUs.csv",
+        ))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Sidecar paths
 # ---------------------------------------------------------------------------

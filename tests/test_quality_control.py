@@ -1,6 +1,7 @@
 """Tests for quality-control helpers (cassn.core.quality_control)."""
 from cassn.core.quality_control import (
     build_box_verification_record,
+    check_required_lookups,
     is_duplicate_media,
 )
 
@@ -50,3 +51,52 @@ def test_box_verification_record_flags_issues():
     assert rec["hash_verification"]["issues"] == [
         {"type": "sha1_mismatch", "filename": "a.jpg"}
     ]
+
+
+def test_required_lookups_blocks_missing_camera_identity():
+    findings = check_required_lookups(
+        "p1_ML", is_audio=False,
+        has_device_identity=False, has_coordinates=True, has_aru_row=True,
+    )
+    assert findings[0][0] == "lookup_device_identity"
+    assert findings[0][1] == "error"
+    assert "cameras.csv" in findings[0][2]
+
+
+def test_required_lookups_blocks_missing_coordinates():
+    findings = check_required_lookups(
+        "p1_ML", is_audio=False,
+        has_device_identity=True, has_coordinates=False, has_aru_row=True,
+    )
+    assert findings == [(
+        "lookup_plot_coordinates",
+        "error",
+        "p1_ML: plot coordinates missing — plot not in plots.csv",
+    )]
+
+
+def test_required_lookups_warns_on_missing_aru_for_audio():
+    findings = check_required_lookups(
+        "p1_BD", is_audio=True,
+        has_device_identity=True, has_coordinates=True, has_aru_row=False,
+    )
+    assert len(findings) == 1
+    assert findings[0][0] == "lookup_aru_install"
+    assert findings[0][1] == "warning"
+
+
+def test_required_lookups_no_findings_when_all_present():
+    findings = check_required_lookups(
+        "p1_BD", is_audio=True,
+        has_device_identity=True, has_coordinates=True, has_aru_row=True,
+    )
+    assert findings == []
+
+
+def test_required_lookups_ignores_aru_for_cameras():
+    # Cameras have no ARU; a missing ARU row must not warn for an image device.
+    findings = check_required_lookups(
+        "p1_ML", is_audio=False,
+        has_device_identity=True, has_coordinates=True, has_aru_row=False,
+    )
+    assert findings == []
