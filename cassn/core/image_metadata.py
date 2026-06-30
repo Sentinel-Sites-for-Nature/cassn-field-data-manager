@@ -83,13 +83,21 @@ def extract_reconyx_sequence(raw_exif: dict):
 def parse_camera_recorded_datetime(exif_data: dict) -> str:
     """Return ISO 8601 datetime with UTC offset from Reconyx EXIF.
 
-    e.g. ``'2025-12-04T15:48:05-08:00'``. Empty string on failure.
+    e.g. ``'2025-12-04T15:48:05-08:00'``. When the camera recorded no
+    ``OffsetTimeOriginal``, the timestamp is assumed to be local Pacific
+    time (all CASSN cameras run on Pacific) rather than dropped. Empty
+    string on failure.
     """
     try:
         dt_str = exif_data.get("DateTimeOriginal") or exif_data.get("DateTime")
         offset_str = exif_data.get("OffsetTimeOriginal", "")
         if dt_str:
-            dt = datetime.strptime(f"{dt_str}{offset_str}", "%Y:%m:%d %H:%M:%S%z")
+            if offset_str:
+                dt = datetime.strptime(f"{dt_str}{offset_str}", "%Y:%m:%d %H:%M:%S%z")
+            else:
+                # Camera didn't stamp a zone — assume local Pacific time,
+                # mirroring the audio filename path in audio_metadata.py.
+                dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S").replace(tzinfo=PACIFIC_TZ)
             return dt.astimezone(PACIFIC_TZ).isoformat()
     except Exception:
         pass
