@@ -27,11 +27,32 @@ and :func:`build_inventory_record`.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from cassn.core.audio_metadata import hz_to_khz
 from cassn.core.quality_control import append_qc_report, qc_path_for
+
+
+# ---------------------------------------------------------------------------
+# Deterministic card walk
+# ---------------------------------------------------------------------------
+
+def sorted_walk(source_dir):
+    """Yield ``(root, dirs, files)`` like :func:`os.walk`, but with both
+    directories and files visited in sorted (alphabetical) order.
+
+    Plain ``os.walk`` returns entries in filesystem-dependent order. For
+    Reconyx cameras that spread a deployment's bursts across several
+    ``NNNRECNX`` folders, that makes the per-device event numbering depend on
+    disk order — i.e. non-reproducible. Sorting both lists makes the traversal
+    deterministic; sorting ``dirs`` in place also steers ``os.walk``'s descent.
+    """
+    for root, dirs, files in os.walk(source_dir):
+        dirs.sort()
+        files.sort()
+        yield root, dirs, files
 
 
 # ---------------------------------------------------------------------------

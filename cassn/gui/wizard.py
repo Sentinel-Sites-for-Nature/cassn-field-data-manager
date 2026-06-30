@@ -102,7 +102,7 @@ from cassn.core.inventory import (
     write_device_manifest,
     write_session,
 )
-from cassn.core.inventory import find_all_sessions as _find_all_sessions
+from cassn.core.inventory import find_all_sessions as _find_all_sessions, sorted_walk
 from cassn.core.quality_control import (
     append_qc_report,
     check_camera_serial,
@@ -1351,11 +1351,10 @@ class FieldDataWizard(QMainWindow):
             if config_files:
                 config_data = parse_audiomoth_config_file(config_files[0])
 
-        # Sort files alphabetically within each directory so RECONYX RCNX*.JPG
-        # bursts arrive in capture order (frame 1, 2, 3). os.walk returns
-        # files in filesystem-dependent order, which scrambles event numbering.
-        for root, dirs, files in os.walk(source_dir):
-            files.sort()
+        # Walk in deterministic order (sorted dirs + files) so RECONYX RCNX*.JPG
+        # bursts arrive in capture order and per-device event numbering is
+        # reproducible regardless of filesystem order (see inventory.sorted_walk).
+        for root, dirs, files in sorted_walk(source_dir):
             for filename in files:
                 if filename.startswith(".") or filename.startswith("_"):
                     continue
