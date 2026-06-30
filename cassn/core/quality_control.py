@@ -83,6 +83,45 @@ def is_duplicate_media(file_hash: str, file_type: str, seen_hashes: set) -> bool
     return is_duplicate_hash(file_hash, seen_hashes)
 
 
+def build_box_verification_record(
+    *,
+    hash_ok: bool,
+    hash_summary: str,
+    hash_issues: list,
+    box_summary: str,
+    box_issues: list,
+    verified_at: str | None = None,
+) -> dict:
+    """Assemble the post-upload Box verification artifact written to
+    ``qc/box_upload_verification.json``.
+
+    Records the result of the two checks the app already runs after upload —
+    the Box file-list reconciliation and the Box<->local SHA-1 comparison — as
+    a persisted, machine-readable artifact. The file was previously referenced
+    by the deployment-readiness check but never actually written.
+    """
+    box_missing = [i for i in box_issues if i.get("type") == "missing_from_box"]
+    box_extra = [i for i in box_issues if i.get("type") == "extra_on_box"]
+    verified = hash_ok and not box_missing and not box_extra and not hash_issues
+    return {
+        "verified_at": verified_at or datetime.now().isoformat(timespec="seconds"),
+        "verified": verified,
+        "box_file_list": {
+            "summary": box_summary,
+            "missing_from_box": [i.get("filename", "") for i in box_missing],
+            "extra_on_box": [i.get("filename", "") for i in box_extra],
+        },
+        "hash_verification": {
+            "ok": hash_ok,
+            "summary": hash_summary,
+            "issues": [
+                {"type": i.get("type", ""), "filename": i.get("filename", "")}
+                for i in hash_issues
+            ],
+        },
+    }
+
+
 def check_expected_count(expected: int | None, actual: int) -> bool:
     """True if counts match (or ``expected`` is unknown)."""
     return expected is None or expected == actual

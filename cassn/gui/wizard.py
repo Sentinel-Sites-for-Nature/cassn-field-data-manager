@@ -109,6 +109,7 @@ from cassn.core.inventory import (
 )
 from cassn.core.quality_control import (
     append_qc_report,
+    build_box_verification_record,
     check_camera_serial,
     check_expected_count,
     check_file_size_floor,
@@ -2090,6 +2091,22 @@ class FieldDataWizard(QMainWindow):
         box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
         has_box_warning = bool(box_extra)
         all_ok = hash_ok and not box_missing and not box_extra and not hash_issues
+
+        # Persist the verification result as an audit artifact (previously this
+        # file was referenced by the readiness check but never actually written).
+        try:
+            record = build_box_verification_record(
+                hash_ok=hash_ok,
+                hash_summary=hash_summary,
+                hash_issues=hash_issues,
+                box_summary=self._post_upload_box_summary or "",
+                box_issues=self._post_upload_box_issues,
+            )
+            qc_path_for(self.current_deployment_folder, "box_upload_verification.json").write_text(
+                json.dumps(record, indent=2)
+            )
+        except Exception:
+            pass  # never block the UI on writing the audit artifact
 
         self.upload_now_btn.setEnabled(self.box_authenticated)
         self.box_verify_btn.setEnabled(self.box_authenticated)
