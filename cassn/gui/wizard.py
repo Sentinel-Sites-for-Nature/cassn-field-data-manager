@@ -102,7 +102,11 @@ from cassn.core.inventory import (
     write_device_manifest,
     write_session,
 )
-from cassn.core.inventory import find_all_sessions as _find_all_sessions, sorted_walk
+from cassn.core.inventory import (
+    count_expected_files,
+    find_all_sessions as _find_all_sessions,
+    sorted_walk,
+)
 from cassn.core.quality_control import (
     append_qc_report,
     check_camera_serial,
@@ -1165,34 +1169,13 @@ class FieldDataWizard(QMainWindow):
         if not sd_path:
             return
 
-        # Auto-count valid media files in source (filters out .DS_Store, hidden files,
-        # and resource forks). Used silently as expected_file_count for post-copy
-        # comparison — catches files that were skipped during copy (hash mismatch,
-        # duplicate, etc.). No user prompt.
-        #
-        # For audio devices the inventory keeps .wav recordings plus the single
-        # CONFIG.TXT, so only count CONFIG.TXT among .txt files (a stray
-        # README/notes file on the card must not inflate the expected number).
-        # The CONFIG match mirrors the glob used to find configs below (~1287).
-        media_exts = {".jpg", ".jpeg"} if dev_code not in ("BD", "BT") else {".wav", ".txt"}
-
-        def _counts_toward_expected(f: Path) -> bool:
-            suffix = f.suffix.lower()
-            if suffix not in media_exts:
-                return False
-            if suffix == ".txt":
-                return "CONFIG" in f.name.upper()
-            return True
-
+        # Auto-count the files the copy loop will keep (anything classify_file()
+        # doesn't call "other"), used silently as expected_file_count for the
+        # post-copy comparison that catches files skipped during copy (hash
+        # mismatch, duplicate). count_expected_files keeps this rule identical to
+        # the copy loop, so the two only differ on genuine drops.
         try:
-            expected_file_count = sum(
-                1
-                for f in Path(sd_path).rglob("*")
-                if f.is_file()
-                and not f.name.startswith(".")
-                and not f.name.startswith("_")
-                and _counts_toward_expected(f)
-            )
+            expected_file_count = count_expected_files(sd_path)
         except Exception:
             expected_file_count = None
         if expected_file_count is not None:

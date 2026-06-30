@@ -1,7 +1,7 @@
-"""Tests for deterministic card traversal (cassn.core.inventory.sorted_walk)."""
+"""Tests for card-scan helpers (cassn.core.inventory)."""
 import os
 
-from cassn.core.inventory import sorted_walk
+from cassn.core.inventory import count_expected_files, sorted_walk
 
 
 def test_sorted_walk_orders_dirs_and_files(tmp_path):
@@ -24,3 +24,13 @@ def test_sorted_walk_orders_dirs_and_files(tmp_path):
         "101RECNX/RCNX0001.JPG", "101RECNX/RCNX0002.JPG",
         "102RECNX/RCNX0001.JPG", "102RECNX/RCNX0002.JPG",
     ]
+
+
+def test_count_expected_files_matches_classifier(tmp_path):
+    (tmp_path / "RCNX0001.JPG").write_bytes(b"x")   # image -> counted
+    (tmp_path / "RCNX0002.TIF").write_bytes(b"x")   # image (classifier keeps .tif) -> counted
+    (tmp_path / "REC.WAV").write_bytes(b"x")         # audio -> counted
+    (tmp_path / "CONFIG.TXT").write_bytes(b"x")      # config -> counted
+    (tmp_path / "notes.pdf").write_bytes(b"x")       # other -> NOT counted
+    (tmp_path / ".DS_Store").write_bytes(b"x")       # hidden -> NOT counted
+    assert count_expected_files(tmp_path) == 4

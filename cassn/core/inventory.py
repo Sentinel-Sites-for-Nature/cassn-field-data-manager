@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from cassn.core.audio_metadata import hz_to_khz
+from cassn.core.classification import classify_file
 from cassn.core.quality_control import append_qc_report, qc_path_for
 
 
@@ -53,6 +54,27 @@ def sorted_walk(source_dir):
         dirs.sort()
         files.sort()
         yield root, dirs, files
+
+
+def count_expected_files(source_dir) -> int:
+    """Count the files a card scan will keep: everything ``classify_file`` does
+    not call ``"other"``, skipping dotfiles and resource forks.
+
+    Kept identical to the wizard's copy loop so the post-copy "expected vs
+    inventory" check only differs on genuine drops (hash mismatch, duplicate).
+    The previous per-device extension list diverged from ``classify_file``
+    (e.g. it counted only ``.jpg``/``.jpeg`` for cameras, and only
+    ``CONFIG.TXT`` among ``.txt`` files), so the expected count and the kept
+    set could disagree on files that were perfectly fine.
+    """
+    return sum(
+        1
+        for f in Path(source_dir).rglob("*")
+        if f.is_file()
+        and not f.name.startswith(".")
+        and not f.name.startswith("_")
+        and classify_file(f.name) != "other"
+    )
 
 
 # ---------------------------------------------------------------------------
