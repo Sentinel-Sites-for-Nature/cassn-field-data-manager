@@ -422,3 +422,29 @@ def find_all_sessions(staging_root: Path) -> list:
 
     sessions.sort(key=lambda x: x["saved_at"], reverse=True)
     return sessions
+
+
+def find_all_sessions_multi(staging_roots) -> list:
+    """Scan several staging roots for ``session.json`` files, merged newest-first.
+
+    Delegates per-root scanning to :func:`find_all_sessions`, so parsing and
+    corruption handling are identical. Sessions that resolve to the same file
+    (e.g. when two configured roots overlap or one is a symlink of another) are
+    de-duplicated, keeping the first occurrence. A root that does not exist —
+    such as an unplugged external drive — contributes nothing rather than
+    raising, so a disconnected location is silently skipped.
+    """
+    merged: list[dict] = []
+    seen: set = set()
+    for root in staging_roots:
+        for sess in find_all_sessions(Path(root)):
+            try:
+                key = sess["path"].resolve()
+            except Exception:
+                key = sess["path"]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(sess)
+    merged.sort(key=lambda x: x["saved_at"], reverse=True)
+    return merged

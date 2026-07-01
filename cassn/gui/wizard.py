@@ -105,7 +105,7 @@ from cassn.core.inventory import (
 from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
-    find_all_sessions as _find_all_sessions,
+    find_all_sessions_multi as _find_all_sessions_multi,
     sorted_walk,
 )
 from cassn.core.quality_control import (
@@ -150,6 +150,10 @@ class FieldDataWizard(QMainWindow):
         self.metadata = {}
         self.devices = []
         self.staging_root = Path.home() / "Desktop" / "CASSN_field_data_staging"
+        # Every staging location the user has used, remembered across launches so
+        # the resume dialog can surface partial sessions from any of them (e.g. an
+        # SSD/Desktop copy and the external G-DRIVE), not just the active root.
+        self.known_staging_roots: list[str] = []
         self.current_deployment_folder = None
         self.file_inventory = []
         self.seen_file_hashes = set()  # session-wide duplicate detection
@@ -313,6 +317,10 @@ class FieldDataWizard(QMainWindow):
                     config = json.load(f)
                     if "staging_root" in config:
                         self.staging_root = Path(config["staging_root"])
+                    if isinstance(config.get("known_staging_roots"), list):
+                        self.known_staging_roots = [
+                            str(p) for p in config["known_staging_roots"]
+                        ]
         except Exception:
             pass
 
@@ -328,6 +336,10 @@ class FieldDataWizard(QMainWindow):
                 except Exception:
                     config = {}
             config["staging_root"] = str(self.staging_root)
+            # Remember the active root among the known locations so a later launch
+            # can still scan it for partial sessions even after the default changes.
+            self._remember_staging_root(self.staging_root)
+            config["known_staging_roots"] = list(self.known_staging_roots)
             with open(self.config_file, "w") as f:
                 json.dump(config, f, indent=2)
         except Exception:
@@ -364,9 +376,48 @@ class FieldDataWizard(QMainWindow):
 
         write_session(self.current_deployment_folder, session)
 
+    def _remember_staging_root(self, root) -> None:
+        """Record ``root`` in the known-staging-roots list (de-duplicated, order-stable)."""
+        s = str(root)
+        if s not in self.known_staging_roots:
+            self.known_staging_roots.append(s)
+
+    def staging_roots(self) -> list:
+        """Candidate staging locations to scan for resumable sessions.
+
+        Includes the active ``staging_root``, the built-in Desktop default, and
+        every location the user has staged to before (remembered in config), so a
+        partial session is found whether it lives on the Desktop/SSD or the
+        external G-DRIVE. Deduplicated by resolved path, order-stable, and limited
+        to paths that currently exist (a disconnected drive is skipped silently).
+        """
+        candidates = [
+            self.staging_root,
+            Path.home() / "Desktop" / "CASSN_field_data_staging",
+        ]
+        candidates += [Path(p) for p in self.known_staging_roots]
+
+        roots: list = []
+        seen: set = set()
+        for c in candidates:
+            try:
+                key = c.expanduser().resolve()
+            except Exception:
+                key = c
+            if key in seen:
+                continue
+            seen.add(key)
+            if c.exists():
+                roots.append(c)
+        return roots
+
     def find_all_sessions(self) -> list:
-        """Scan staging_root for all session.json files (delegates to core.inventory)."""
-        return _find_all_sessions(self.staging_root)
+        """Scan every known staging location for session.json files.
+
+        Delegates to core.inventory's multi-root scanner so the resume dialog
+        surfaces partial sessions from the Desktop/SSD and the G-DRIVE alike.
+        """
+        return _find_all_sessions_multi(self.staging_roots())
 
     def offer_resume_session(self, sessions: list):
         """Show a selection dialog listing all deployments in staging. Lets user open any of them
@@ -1030,6 +1081,7 @@ class FieldDataWizard(QMainWindow):
         )
         if directory:
             self.staging_root = Path(directory)
+            self._remember_staging_root(self.staging_root)
             self.staging_label.setText(str(self.staging_root))
 
     def validate_and_next(self):
@@ -2431,9 +2483,10 @@ class FieldDataWizard(QMainWindow):
 
         sessions = self.find_all_sessions()
         if not sessions:
+            scanned = "\n".join(str(r) for r in self.staging_roots())
             QMessageBox.information(
                 self, "No Deployments Found",
-                f"No deployments with session.json found under:\n{self.staging_root}"
+                f"No deployments with session.json found under:\n{scanned}"
             )
             return
 
