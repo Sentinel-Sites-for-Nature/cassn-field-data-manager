@@ -107,6 +107,7 @@ from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
     find_all_sessions_multi as _find_all_sessions_multi,
+    reconcile_device_dir,
     sorted_walk,
 )
 from cassn.core.quality_control import (
@@ -1369,6 +1370,16 @@ class FieldDataWizard(QMainWindow):
         small_file_thresholds: Counter[str] = Counter()
         hash_mismatch_names: list[str] = []
         duplicate_names: list[str] = []
+
+        # Reconcile disk against the persisted inventory before resuming: a crash
+        # between the 30s session flushes can leave files staged on disk that
+        # aren't in file_inventory. Left in place, their source would be re-copied
+        # under fresh event numbers, stranding the first copies as orphans and
+        # gapping the event sequence. Deleting them makes the inventory
+        # authoritative so the re-copy below stays contiguous.
+        orphans = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
+        if orphans:
+            self.log(f"  Removed {len(orphans)} orphaned file(s) from {device_label} left by a prior interrupted copy.")
 
         # Resume support: skip files already in inventory for this device
         already_copied = already_copied_relpaths(self.file_inventory, device_label)

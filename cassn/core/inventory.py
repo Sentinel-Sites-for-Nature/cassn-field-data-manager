@@ -93,6 +93,52 @@ def already_copied_relpaths(file_inventory, device_label) -> set:
     }
 
 
+def reconcile_device_dir(device_dir, file_inventory, device_label) -> list[str]:
+    """Delete staged files not backed by an inventory record, before a resume.
+
+    ``session.json`` is only flushed on a wall-clock interval, so a crash or
+    quit can leave files physically copied into ``device_dir`` that never made
+    it into the persisted ``file_inventory``. On the next resume those files
+    are unrecognized: the copy loop re-copies their source under fresh event
+    numbers and strands the first copies as orphans (duplicate content, and
+    gaps in the app-assigned event sequence).
+
+    Reconciling makes the inventory authoritative: any file in ``device_dir``
+    whose name is not a ``new_filename`` recorded for ``device_label`` is an
+    orphan and is removed. The un-recorded source files are then re-copied
+    cleanly by the caller, so numbering stays contiguous. The device manifest
+    sidecar and dotfiles are always exempt.
+
+    Returns the list of removed filenames (empty when nothing was orphaned).
+    """
+    device_dir = Path(device_dir)
+    if not device_dir.is_dir():
+        return []
+
+    expected = {
+        entry["new_filename"]
+        for entry in file_inventory
+        if entry.get("device_label") == device_label and entry.get("new_filename")
+    }
+    manifest_name = f"{device_label}_manifest.json"
+
+    removed: list[str] = []
+    for path in sorted(device_dir.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.startswith(".") or name == manifest_name or name in expected:
+            continue
+        try:
+            path.unlink()
+            removed.append(name)
+        except OSError:
+            # A file we can't delete is left in place rather than aborting the
+            # resume; the post-copy count check will still surface a mismatch.
+            pass
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # Naming convention
 # ---------------------------------------------------------------------------

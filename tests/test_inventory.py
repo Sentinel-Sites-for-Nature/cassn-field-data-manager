@@ -4,6 +4,7 @@ import os
 from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
+    reconcile_device_dir,
     sorted_walk,
 )
 
@@ -60,3 +61,52 @@ def test_already_copied_relpaths_ignores_entries_without_relpath():
         {"device_label": "p1_ML"},  # pre-fix entry, no source_relpath
     ]
     assert already_copied_relpaths(inv, "p1_ML") == {"a/x.JPG"}
+
+
+def test_reconcile_device_dir_removes_only_orphans(tmp_path):
+    dev = tmp_path / "p2_ML"
+    dev.mkdir()
+    # Two files the inventory knows about (from the last persisted save)...
+    (dev / "UC_S_plot2_ML_20260609_00001_1.jpg").write_bytes(b"x")
+    (dev / "UC_S_plot2_ML_20260609_00001_2.jpg").write_bytes(b"x")
+    # ...and two staged but never recorded before the crash (the orphans).
+    (dev / "UC_S_plot2_ML_20260609_00002_1.jpg").write_bytes(b"x")
+    (dev / "UC_S_plot2_ML_20260609_00002_2.jpg").write_bytes(b"x")
+    # A manifest sidecar and a dotfile that must never be touched.
+    (dev / "p2_ML_manifest.json").write_bytes(b"{}")
+    (dev / ".DS_Store").write_bytes(b"x")
+
+    inv = [
+        {"device_label": "p2_ML", "new_filename": "UC_S_plot2_ML_20260609_00001_1.jpg"},
+        {"device_label": "p2_ML", "new_filename": "UC_S_plot2_ML_20260609_00001_2.jpg"},
+        {"device_label": "p1_ML", "new_filename": "other_device_file.jpg"},  # different device
+    ]
+
+    removed = reconcile_device_dir(dev, inv, "p2_ML")
+
+    assert sorted(removed) == [
+        "UC_S_plot2_ML_20260609_00002_1.jpg",
+        "UC_S_plot2_ML_20260609_00002_2.jpg",
+    ]
+    survivors = {p.name for p in dev.iterdir()}
+    assert survivors == {
+        "UC_S_plot2_ML_20260609_00001_1.jpg",
+        "UC_S_plot2_ML_20260609_00001_2.jpg",
+        "p2_ML_manifest.json",
+        ".DS_Store",
+    }
+
+
+def test_reconcile_device_dir_noops_when_clean(tmp_path):
+    dev = tmp_path / "p2_ML"
+    dev.mkdir()
+    (dev / "UC_S_plot2_ML_20260609_00001_1.jpg").write_bytes(b"x")
+    inv = [{"device_label": "p2_ML", "new_filename": "UC_S_plot2_ML_20260609_00001_1.jpg"}]
+
+    assert reconcile_device_dir(dev, inv, "p2_ML") == []
+    assert (dev / "UC_S_plot2_ML_20260609_00001_1.jpg").exists()
+
+
+def test_reconcile_device_dir_missing_dir_is_safe(tmp_path):
+    # First-ever copy: the device folder may not exist yet.
+    assert reconcile_device_dir(tmp_path / "nope", [], "p2_ML") == []
