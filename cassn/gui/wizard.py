@@ -22,6 +22,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,6 +130,14 @@ from cassn.export.wildlife_insights import generate_wi_deployments_from_image_cs
 from cassn.lookups import LookupTables
 
 
+# How often, at most, to persist session.json from inside the copy loop. The save
+# rewrites the whole cumulative file_inventory, so its cost grows with everything
+# ingested so far; a fixed file-count cadence made that quadratic (see save_session).
+# A wall-clock interval decouples save frequency from inventory size. Each device
+# also forces a save when it completes, so nothing past this interval is ever lost.
+SESSION_SAVE_INTERVAL_SEC = 30.0
+
+
 class FieldDataWizard(QMainWindow):
     """Three-tab wizard for staging, renaming, and uploading a field deployment.
 
@@ -157,6 +166,7 @@ class FieldDataWizard(QMainWindow):
         self.current_deployment_folder = None
         self.file_inventory = []
         self.seen_file_hashes = set()  # session-wide duplicate detection
+        self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
         self.provenance_thread = None
         self.box_verify_thread = None
@@ -375,6 +385,9 @@ class FieldDataWizard(QMainWindow):
         }
 
         write_session(self.current_deployment_folder, session)
+        # Any write resets the interval, so a boundary save (e.g. device complete)
+        # keeps the copy loop from immediately re-saving on its next tick.
+        self._last_session_save = time.monotonic()
 
     def _remember_staging_root(self, root) -> None:
         """Record ``root`` in the known-staging-roots list (de-duplicated, order-stable)."""
@@ -1623,7 +1636,11 @@ class FieldDataWizard(QMainWindow):
                 elif files_copied % 10 == 0:
                     self.log(f"  ...{files_copied} files processed")
 
-                if files_copied % 10 == 0:
+                # Persist on a wall-clock interval, not every N files: save_session
+                # rewrites the whole cumulative inventory, so a per-file cadence made
+                # ingest quadratic. The device-complete save (in the caller) always
+                # flushes the tail, bounding crash rework to this interval.
+                if time.monotonic() - self._last_session_save >= SESSION_SAVE_INTERVAL_SEC:
                     self.save_session()
 
         expected_floor = (

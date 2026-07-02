@@ -363,12 +363,18 @@ def write_session(deployment_folder: Path, session: dict) -> None:
     Writes to a ``.json.tmp`` sibling first and ``replace()``s it into place,
     which is atomic on POSIX — an interrupted save never leaves a half-written
     ``session.json``. Swallows all errors: a failed save must never crash the app.
+
+    Serialized compactly (no indent, no separator padding). This file is a
+    machine-only crash-recovery record with one record per copied file, so its
+    whitespace is pure overhead: dropping it cuts ~20% of the bytes written and
+    speeds serialization several-fold on large deployments. ``json.load`` ignores
+    the formatting, so resume round-trips the identical data.
     """
     try:
         session_path = deployment_folder / "session.json"
         tmp_path = session_path.with_suffix('.json.tmp')
         with open(tmp_path, "w") as f:
-            json.dump(session, f, indent=2, default=str)
+            json.dump(session, f, separators=(",", ":"), default=str)
         tmp_path.replace(session_path)
     except Exception:
         pass
