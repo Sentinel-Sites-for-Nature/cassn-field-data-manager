@@ -16,6 +16,7 @@ threads. Only the duplication and the import-time side effects are gone.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import platform
