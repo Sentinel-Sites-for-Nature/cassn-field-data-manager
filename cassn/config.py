@@ -186,6 +186,10 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "study-area bounding box. Catches unset (0,0) coordinates and values baked into the "
         "lookup table that land outside the expected region."
     ),
+    "wi_image_split": (
+        "Before the first Box upload, camera folders above the Wildlife Insights "
+        "15,000-image limit are split into verified, burst-preserving numbered parts."
+    ),
     "box_upload": (
         "After Box upload, the deployment folder is recursively listed and reconciled against "
         "the pre-upload manifest. Reports any uploaded file that doesn't appear on Box."

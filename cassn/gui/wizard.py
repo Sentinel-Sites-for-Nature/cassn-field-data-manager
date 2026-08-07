@@ -61,12 +61,14 @@ from PySide6.QtWidgets import (
 )
 
 from cassn.box.auth import BOX_AVAILABLE, BoxConfig, get_box_client
+from cassn.box.status import has_box_upload_history
 from cassn.box.threads import (
     BoxUploadThread,
     BoxVerifyThread,
     FixityCheckThread,
     ProvenanceUploadThread,
 )
+from cassn.gui.wi_split_thread import WISplitThread
 from cassn.config import (
     APP_TITLE,
     AUDIO_DEVICE_TYPES,
@@ -169,6 +171,7 @@ class FieldDataWizard(QMainWindow):
         self.seen_file_hashes = set()  # session-wide duplicate detection
         self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
+        self.wi_split_thread = None
         self.provenance_thread = None
         self.box_verify_thread = None
         self.fixity_thread = None
@@ -896,7 +899,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(summary_group)
 
         # Box upload progress (hidden by default)
-        self.upload_group = QGroupBox("Box Upload Progress")
+        self.upload_group = QGroupBox("WI Preparation & Box Upload Progress")
         upload_layout = QVBoxLayout()
 
         self.upload_progress_bar = QProgressBar()
@@ -963,8 +966,8 @@ class FieldDataWizard(QMainWindow):
         self.new_btn = QPushButton("Start New Deployment")
         self.new_btn.clicked.connect(self.start_new_deployment)
 
-        exit_btn = QPushButton("Exit")
-        exit_btn.clicked.connect(self.close)
+        self.exit_btn = QPushButton("Exit")
+        self.exit_btn.clicked.connect(self.close)
 
         # "Re-run QC Checks" group — the same Box-verification steps that run
         # automatically after an upload, exposed for manual re-runs.
@@ -980,7 +983,7 @@ class FieldDataWizard(QMainWindow):
         button_layout.addWidget(qc_group)
         button_layout.addWidget(self.new_btn)
         button_layout.addStretch()
-        button_layout.addWidget(exit_btn)
+        button_layout.addWidget(self.exit_btn)
         layout.addLayout(button_layout)
 
     # =========================================================================
@@ -1964,24 +1967,122 @@ class FieldDataWizard(QMainWindow):
     # ------------------------------------------------------------------
 
     def upload_to_box(self):
-        """Upload deployment folder to Box"""
+        """Prepare new data for WI, then upload the deployment folder to Box."""
         if not self.box_authenticated:
             QMessageBox.warning(self, "Box Not Connected", "Please authenticate with Box first.")
             return
+        if not self.current_deployment_folder:
+            QMessageBox.information(self, "No Data", "No deployment data to upload.")
+            return
+        if self.wi_split_thread and self.wi_split_thread.isRunning():
+            return
+        if self.upload_thread and self.upload_thread.isRunning():
+            return
 
         self.upload_group.show()
-        self.upload_status_label.setText("Starting upload to Box...")
         self.upload_progress_bar.setValue(0)
+        self.upload_status_label.setStyleSheet("")
 
-        # Disable buttons during upload, show the cancel button
+        # Disable lifecycle buttons throughout both preparation and upload.
         self.open_btn.setEnabled(False)
+        self.switch_deployment_btn.setEnabled(False)
         self.upload_now_btn.setEnabled(False)
         self.new_btn.setEnabled(False)
+        self.exit_btn.setEnabled(False)
+        self.cancel_upload_btn.setEnabled(True)
+        self.cancel_upload_btn.show()
+
+        if has_box_upload_history(
+            self.current_deployment_folder,
+            current_upload_complete=self.box_upload_complete,
+        ):
+            self.log(
+                "Prior Box upload activity detected; preserving the existing local "
+                "folder layout and starting Box upload."
+            )
+            self._start_box_upload_thread()
+            return
+
+        self.upload_status_label.setText("Planning Wildlife Insights image folders…")
+        self.cancel_upload_btn.setText("Cancel Preparation")
+        self.wi_split_thread = WISplitThread(
+            self.current_deployment_folder,
+            self.file_inventory,
+        )
+        self.wi_split_thread.progress.connect(self._on_wi_split_progress)
+        self.wi_split_thread.completed.connect(self._on_wi_split_completed)
+        self.wi_split_thread.start()
+
+    def _on_wi_split_progress(self, current: int, total: int, path: str):
+        """Show visible progress while local camera folders are prepared."""
+        if total <= 0:
+            self.upload_progress_bar.setRange(0, 0)
+            self.upload_status_label.setText(path or "Planning WI image folders…")
+            return
+
+        self.upload_progress_bar.setRange(0, 100)
+        percent = int((current / total) * 100)
+        self.upload_progress_bar.setValue(percent)
+        if path:
+            self.upload_status_label.setText(
+                f"Preparing WI folders: {current}/{total} ({percent}%) — {path}"
+            )
+        else:
+            self.upload_status_label.setText(
+                f"Preparing WI folders: {current}/{total} ({percent}%)"
+            )
+
+    def _on_wi_split_completed(self, success: bool, cancelled: bool, message: str):
+        """Persist preparation state and gate the Box upload on its result."""
+        self.upload_progress_bar.setRange(0, 100)
+        self.save_session()
+        self.log(message)
+
+        if success:
+            append_qc_report(
+                self.current_deployment_folder,
+                "wi_image_split",
+                "",
+                "pass",
+                message,
+            )
+            self._start_box_upload_thread()
+            return
+
+        append_qc_report(
+            self.current_deployment_folder,
+            "wi_image_split",
+            "",
+            "warning" if cancelled else "error",
+            message,
+        )
+        self.open_btn.setEnabled(True)
+        self.switch_deployment_btn.setEnabled(True)
+        self.upload_now_btn.setEnabled(self.box_authenticated)
+        self.new_btn.setEnabled(True)
+        self.exit_btn.setEnabled(True)
+        self.cancel_upload_btn.hide()
+        self.upload_status_label.setText(f"{'⚠' if cancelled else '✗'} {message}")
+        self.upload_status_label.setStyleSheet(
+            "color: orange; font-weight: bold;"
+            if cancelled
+            else "color: red; font-weight: bold;"
+        )
+        if cancelled:
+            QMessageBox.information(self, "WI Preparation Cancelled", message)
+        else:
+            QMessageBox.warning(self, "WI Preparation Failed", message)
+
+    def _start_box_upload_thread(self):
+        """Launch the existing uploader after preparation has cleared its gate."""
+        self.upload_progress_bar.setRange(0, 100)
+        self.upload_progress_bar.setValue(0)
+        self.upload_status_label.setText("Starting upload to Box…")
+        self.upload_status_label.setStyleSheet("")
         self.cancel_upload_btn.setEnabled(True)
         self.cancel_upload_btn.setText("Cancel Upload")
         self.cancel_upload_btn.show()
 
-        # Start upload thread
         self.upload_thread = BoxUploadThread(
             self.current_deployment_folder,
             self.metadata,
@@ -1994,7 +2095,15 @@ class FieldDataWizard(QMainWindow):
         self.upload_thread.start()
 
     def cancel_upload(self):
-        """Cooperatively cancel the running Box upload."""
+        """Cooperatively cancel WI preparation or the running Box upload."""
+        if self.wi_split_thread and self.wi_split_thread.isRunning():
+            self.wi_split_thread.cancel()
+            self.cancel_upload_btn.setText("Cancelling…")
+            self.cancel_upload_btn.setEnabled(False)
+            self.upload_status_label.setText(
+                "Cancellation requested — finishing the current file move…"
+            )
+            return
         if self.upload_thread and self.upload_thread.isRunning():
             self.upload_thread.cancel()
             self.cancel_upload_btn.setText("Cancelling…")
@@ -2019,6 +2128,8 @@ class FieldDataWizard(QMainWindow):
         """Handle upload completion"""
         # Re-enable buttons, hide the cancel button
         self.open_btn.setEnabled(True)
+        self.switch_deployment_btn.setEnabled(True)
+        self.exit_btn.setEnabled(True)
         self.cancel_upload_btn.hide()
 
         if success:
@@ -2670,6 +2781,15 @@ class FieldDataWizard(QMainWindow):
 
     def closeEvent(self, event):
         """Override close to show pre-departure checklist and write summary when a session is active."""
+        if self.wi_split_thread and self.wi_split_thread.isRunning():
+            QMessageBox.information(
+                self,
+                "WI Preparation In Progress",
+                "Cancel Wildlife Insights image preparation and wait for it to stop "
+                "before closing the application.",
+            )
+            event.ignore()
+            return
         if self.current_deployment_folder:
             if not self.show_pre_departure_checklist():
                 event.ignore()

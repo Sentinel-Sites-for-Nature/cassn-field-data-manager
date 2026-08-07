@@ -60,8 +60,8 @@ burst larger than the limit is a blocking error.
 2. **Completed:** Retire per-device manifest generation and readiness checks.
 3. **Completed:** Make inventory paths and Box verification support flat and
    split layouts.
-4. Integrate automatic, cancellable splitting into the GUI between QC and Box
-   upload.
+4. **Completed:** Integrate automatic, cancellable splitting into the GUI
+   between QC and Box upload.
 5. Complete end-to-end tests and update user-facing workflow documentation.
 
 Each item is reviewed and committed independently on `main`. Unrelated AWS POC,

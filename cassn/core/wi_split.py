@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cassn.config import IMAGE_EXTENSIONS
+from cassn.core.inventory import set_inventory_storage_relpath
 
 WI_UPLOAD_LIMIT = 15_000
 DEFAULT_DEVICE_SUFFIXES = ("_ML", "_SA")
@@ -416,17 +417,20 @@ def apply_device_split(
     dry_run=True,
     log=None,
     is_cancelled=None,
+    progress=None,
 ) -> dict:
     """Execute a plan: create part subfolders and place each image.
 
     Only files not already sitting in their planned part are touched, so this is
     idempotent and safe to re-run after an interruption. ``is_cancelled`` is an
     optional callback checked between individual moves; cancellation returns a
-    partial, resumable result. Copy mode is rejected because it would violate
-    the unique-image and no-loose-images split contract.
+    partial, resumable result. ``progress`` receives ``(placed, pending, path)``
+    after each atomic move. Copy mode is rejected because it would violate the
+    unique-image and no-loose-images split contract.
     """
     log = log or (lambda *_: None)
     is_cancelled = is_cancelled or (lambda: False)
+    progress = progress or (lambda *_: None)
     result = {
         "device": str(plan.device_dir),
         "created": [],
@@ -440,6 +444,8 @@ def apply_device_split(
     if not plan.needs_split:
         result["skipped"] = True
         return result
+
+    pending_total = plan.pending_moves()
 
     # Preflight the complete plan before changing anything. A stale plan or an
     # existing destination is a hard failure, never a reason to skip silently.
@@ -519,6 +525,7 @@ def apply_device_split(
                 raise SplitCollisionError(f"Destination appeared during split: {dst}")
             shutil.move(str(src), str(dst))
             result["placed"] += 1
+            progress(result["placed"], pending_total, dst)
         log(f"    {part.name}/  <- {len(part.files)} images")
 
     verification = verify_device_split(plan)
@@ -528,6 +535,152 @@ def apply_device_split(
             f"Split verification failed for {plan.device_dir}: "
             + "; ".join(verification.errors)
         )
+    return result
+
+
+def sync_inventory_storage_paths(deployment_folder, plan: DevicePlan, file_inventory) -> int:
+    """Make image inventory paths match one device's current physical layout.
+
+    This is deliberately called after successful, cancelled, and failed split
+    attempts. A cancelled operation may have completed some atomic moves, so
+    persisting those actual locations is what makes the next attempt resumable.
+    Returns the number of image inventory entries synchronized.
+    """
+    deployment_folder = Path(deployment_folder)
+    locations = collect_inventory(plan.device_dir)
+    entries_by_name: dict[str, dict] = {}
+    for entry in file_inventory:
+        if entry.get("device_label") != plan.device_name:
+            continue
+        if entry.get("file_type") != "image":
+            continue
+        filename = entry.get("new_filename", "")
+        if not filename:
+            continue
+        if filename in entries_by_name:
+            raise SplitError(
+                f"Duplicate image inventory entry for {plan.device_name}/{filename}"
+            )
+        entries_by_name[filename] = entry
+
+    physical_names = set(locations)
+    inventory_names = set(entries_by_name)
+    missing_inventory = physical_names - inventory_names
+    missing_files = inventory_names - physical_names
+    if missing_inventory or missing_files:
+        raise SplitError(
+            f"Image inventory does not match {plan.device_name}: "
+            f"{len(missing_inventory)} uninventoried file(s), "
+            f"{len(missing_files)} inventoried file(s) missing"
+        )
+
+    for filename, path in locations.items():
+        try:
+            relative_path = path.relative_to(deployment_folder).as_posix()
+        except ValueError as exc:
+            raise SplitError(
+                f"Image path is outside deployment folder: {path}"
+            ) from exc
+        set_inventory_storage_relpath(entries_by_name[filename], relative_path)
+    return len(entries_by_name)
+
+
+def prepare_deployment_for_wi(
+    deployment_folder,
+    file_inventory,
+    *,
+    limit=WI_UPLOAD_LIMIT,
+    suffixes=DEFAULT_DEVICE_SUFFIXES,
+    keep_bursts=True,
+    log=None,
+    progress=None,
+    is_cancelled=None,
+) -> dict:
+    """Prepare all camera folders for the first Box upload.
+
+    Planning, same-volume moves, structural verification, and inventory-path
+    synchronization are one resumable workflow. Cancellation is checked between
+    devices and individual moves. It never rolls back completed moves; instead,
+    their paths are synchronized into ``file_inventory`` so a later call can
+    continue safely.
+    """
+    deployment_folder = Path(deployment_folder)
+    raw_data_dir = deployment_folder / "raw_data"
+    log = log or (lambda *_: None)
+    progress = progress or (lambda *_: None)
+    is_cancelled = is_cancelled or (lambda: False)
+    result = {
+        "devices_scanned": 0,
+        "devices_split": 0,
+        "parts": 0,
+        "images_moved": 0,
+        "total_moves": 0,
+        "cancelled": False,
+    }
+    if not raw_data_dir.is_dir():
+        return result
+
+    plans: list[DevicePlan] = []
+    progress(0, 0, "Planning Wildlife Insights image folders…")
+    for device_dir in find_target_devices(raw_data_dir, suffixes):
+        if is_cancelled():
+            result["cancelled"] = True
+            return result
+        plan = plan_device(device_dir, limit=limit, keep_bursts=keep_bursts)
+        if plan.warnings:
+            raise SplitError(f"{plan.device_name}: {'; '.join(plan.warnings)}")
+        plans.append(plan)
+
+    result["devices_scanned"] = len(plans)
+    result["devices_split"] = sum(plan.needs_split for plan in plans)
+    result["parts"] = sum(len(plan.parts) for plan in plans if plan.needs_split)
+    result["total_moves"] = sum(plan.pending_moves() for plan in plans)
+    progress(0, result["total_moves"], "WI image-folder plan complete")
+
+    completed = 0
+    for plan in plans:
+        if is_cancelled():
+            result["cancelled"] = True
+            break
+
+        if not plan.needs_split:
+            sync_inventory_storage_paths(deployment_folder, plan, file_inventory)
+            continue
+
+        device_base = completed
+
+        def _on_device_progress(device_done, _device_total, path):
+            progress(
+                device_base + device_done,
+                result["total_moves"],
+                Path(path).relative_to(deployment_folder).as_posix(),
+            )
+
+        try:
+            split_result = apply_device_split(
+                plan,
+                move=True,
+                dry_run=False,
+                log=log,
+                is_cancelled=is_cancelled,
+                progress=_on_device_progress,
+            )
+        except Exception:
+            # Moves completed before an error remain valid; reflect their actual
+            # locations in session state before surfacing the blocking failure.
+            sync_inventory_storage_paths(deployment_folder, plan, file_inventory)
+            raise
+
+        sync_inventory_storage_paths(deployment_folder, plan, file_inventory)
+        completed += split_result["placed"]
+        result["images_moved"] = completed
+        if split_result["cancelled"] or is_cancelled():
+            result["cancelled"] = True
+            break
+
+    if is_cancelled():
+        result["cancelled"] = True
+    progress(completed, result["total_moves"], "")
     return result
 
 

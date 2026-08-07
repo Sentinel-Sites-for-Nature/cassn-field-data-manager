@@ -4,6 +4,8 @@ These pin the split contract: parts never exceed the limit, bursts are never
 cut, part folders don't re-match the device suffix, and a split round-trips
 cleanly back to the original flat folder.
 """
+from pathlib import PurePosixPath
+
 import pytest
 
 from cassn.core.wi_split import (
@@ -19,6 +21,8 @@ from cassn.core.wi_split import (
     list_device_images,
     plan_device,
     plan_parts,
+    prepare_deployment_for_wi,
+    sync_inventory_storage_paths,
     undo_device_split,
     verify_device_split,
 )
@@ -260,3 +264,96 @@ def test_find_target_devices_prunes_and_skips_parts(tmp_path):
     (raw / "p1_ML" / "p1_ML_1").mkdir()  # a part folder, must not be a target
     found = {p.name for p in find_target_devices(tmp_path)}
     assert found == {"p1_ML", "p1_SA"}
+
+
+def _deployment_inventory(deployment, device_name, names):
+    device_dir = deployment / "raw_data" / device_name
+    device_dir.mkdir(parents=True)
+    inventory = []
+    for name in names:
+        (device_dir / name).write_bytes(name.encode())
+        inventory.append({
+            "device_label": device_name,
+            "new_filename": name,
+            "file_type": "image",
+        })
+    return device_dir, inventory
+
+
+def test_prepare_deployment_splits_and_synchronizes_inventory_paths(tmp_path):
+    names = _burst_names(n_events=4, frames=3)
+    device_dir, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+
+    result = prepare_deployment_for_wi(tmp_path, inventory, limit=6)
+
+    assert not result["cancelled"]
+    assert result["devices_split"] == 1
+    assert result["parts"] == 2
+    assert result["images_moved"] == 12
+    assert list_device_images(device_dir) == []
+    for entry in inventory:
+        relative_path = entry["storage_relpath"]
+        assert relative_path.startswith("raw_data/p1_ML/p1_ML_")
+        assert tmp_path.joinpath(*PurePosixPath(relative_path).parts).is_file()
+
+
+def test_prepare_deployment_cancel_persists_partial_paths_and_resumes(tmp_path):
+    names = _burst_names(n_events=4, frames=3)
+    _device_dir, inventory = _deployment_inventory(tmp_path, "p1_SA", names)
+    cancelled = False
+
+    def stop_after_two(current, _total, _path):
+        nonlocal cancelled
+        if current == 2:
+            cancelled = True
+
+    partial = prepare_deployment_for_wi(
+        tmp_path,
+        inventory,
+        limit=6,
+        progress=stop_after_two,
+        is_cancelled=lambda: cancelled,
+    )
+
+    assert partial["cancelled"]
+    assert partial["images_moved"] == 2
+    for entry in inventory:
+        relative_path = entry["storage_relpath"]
+        assert tmp_path.joinpath(*PurePosixPath(relative_path).parts).is_file()
+
+    completed = prepare_deployment_for_wi(tmp_path, inventory, limit=6)
+    assert not completed["cancelled"]
+    assert completed["images_moved"] == 10
+    assert plan_device(tmp_path / "raw_data" / "p1_SA", limit=6).fully_split
+
+
+def test_prepare_honors_cancellation_requested_on_final_move(tmp_path):
+    names = _burst_names(n_events=2, frames=3)
+    _device_dir, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+    cancelled = False
+
+    def stop_on_final_move(current, total, _path):
+        nonlocal cancelled
+        if total > 0 and current == total:
+            cancelled = True
+
+    result = prepare_deployment_for_wi(
+        tmp_path,
+        inventory,
+        limit=3,
+        progress=stop_on_final_move,
+        is_cancelled=lambda: cancelled,
+    )
+
+    assert result["images_moved"] == result["total_moves"] == 6
+    assert result["cancelled"]
+
+
+def test_sync_inventory_rejects_uninventoried_image(tmp_path):
+    names = _burst_names(n_events=1, frames=3)
+    device_dir, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+    plan = plan_device(device_dir, limit=10)
+    inventory.pop()
+
+    with pytest.raises(SplitError, match="1 uninventoried file"):
+        sync_inventory_storage_paths(tmp_path, plan, inventory)
