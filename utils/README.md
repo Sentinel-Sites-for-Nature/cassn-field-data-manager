@@ -417,10 +417,12 @@ The reusable logic lives in `cassn/core/wi_split.py`; this file is just the CLI.
 
 ### When to use
 
-As a **terminal WI-prep step, after Box upload and QC are done** for the
-deployment — splitting nests the images one level deeper than the manifest / QC
-steps expect. Audio (`BD`/`BT`) is never touched. Point the WI uploader at each
-`<device>_N` subfolder in turn.
+The application now performs this preparation automatically before the first
+Box upload for new deployments. Use this CLI for a dry-run preview, a controlled
+retroactive split, recovery/undo, or a small-limit engine rehearsal. It does not
+update `session.json`; normal app-driven uploads should use the automatic GUI
+workflow so nested inventory paths stay synchronized. Audio (`BD`/`BT`) is never
+touched. Point the WI uploader at each `<device>_N` subfolder in turn.
 
 ### Run
 
@@ -463,5 +465,6 @@ python utils/split_for_wi.py \
   stop with an error rather than overwriting or silently skipping a file.
 - **Safe against re-matching.** Part folders (`p1_ML_1`) never end in `_ML` /
   `_SA`, so re-scans can't recurse into prior output.
-- On **Box**, the moves sync as moves; expect Box Drive to churn through the
-  re-sync. Run it while the deployment isn't being uploaded.
+- **Do not run during upload.** For a historical deployment, make an explicit
+  backup and ensure no Box upload or Box Drive synchronization is active before
+  applying a retroactive split.

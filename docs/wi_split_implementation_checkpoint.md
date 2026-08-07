@@ -62,7 +62,9 @@ burst larger than the limit is a blocking error.
    split layouts.
 4. **Completed:** Integrate automatic, cancellable splitting into the GUI
    between QC and Box upload.
-5. Complete end-to-end tests and update user-facing workflow documentation.
+5. **Completed:** Add end-to-end automated coverage and update user-facing
+   workflow documentation. Live Box acceptance remains a release smoke test;
+   see `docs/wi_split_acceptance_test.md`.
 
 Each item is reviewed and committed independently on `main`. Unrelated AWS POC,
 audit-output, and temporary files are excluded from this work.

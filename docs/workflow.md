@@ -23,7 +23,11 @@ flowchart TD
     S --> T["Validate plot coordinates (study-area bounds)"]
     T --> U["Regenerate metadata CSVs and Wildlife Insights exports"]
     U --> V{"Box upload selected?"}
-    V -->|Yes| W["Upload deployment folder to Box"]
+    V -->|Yes| V1{"Prior Box upload history?"}
+    V1 -->|No| V2["Plan WI image batches and split oversized camera folders"]
+    V2 --> V3["Verify structure and save nested inventory paths"]
+    V3 --> W["Upload deployment folder to Box"]
+    V1 -->|Yes| W
     W --> X["Skip existing raw files, upload missing raw files, version mutable metadata files"]
     X --> Y["Reconcile Box folder against local manifest"]
     Y --> Z["Stamp Box upload provenance into metadata CSVs"]
@@ -62,7 +66,14 @@ flowchart TD
    - The review tab summarizes deployment, devices, files, output location, and next steps.
 
 6. **Box upload path**
+   - Before the first Box upload, the app scans ML/SA camera folders. Folders above 15,000 images are split into numbered subfolders without cutting trigger bursts.
+   - Preparation runs in the background with visible progress. Cancellation saves completed moves and blocks Box; a later upload resumes the same deterministic plan.
+   - The resulting flat or nested layout is structurally verified and its deployment-relative paths are saved to session inventory before upload starts.
+   - If a Box upload manifest, verification artifact, or upload provenance already exists, the app preserves the deployment's current folder layout instead of reorganizing historical data.
    - The app creates or reuses the Box folder path `year / reserve / deployment`.
    - Existing raw-data files are skipped; mutable metadata sidecars are uploaded as new versions.
    - The app writes and checks a Box upload manifest, stamps upload provenance into metadata CSVs, then automatically runs post-upload file-list and Box-to-local hash verification.
    - If Box upload is not selected, the workflow stops at the local staging outputs.
+
+For a Box-connected release check, follow the
+[Wildlife Insights split acceptance test](wi_split_acceptance_test.md).

@@ -22,6 +22,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Multi-Format File Support**: Images (JPG, PNG, TIF, RAW), audio (WAV, MP3, FLAC)
 - **Box-Synced Lookup Tables**: Site, plot, camera, and ARU metadata are synced from your organization's Box `app_config` folder on launch and cached locally, so every install runs against the same authoritative tables.
 - **Wildlife Insights Export**: Generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, using camera metadata from `cameras.csv` and `wi_config.json`.
+- **Wildlife Insights Image Batching**: Before the first Box upload, camera folders above 15,000 images are automatically organized into verified, burst-preserving numbered parts. The operation is visible, cancellable, and resumable.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
 - **Session Persistence**: Interrupted downloads resume automatically. Previously copied files are skipped and sequence/event numbering continues correctly.
 
@@ -163,6 +164,7 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 #### Step 3: Review & Finalize
 - Review deployment summary
 - View file counts and sizes by device
+- Before the first Box upload, oversized camera folders are automatically prepared in Wildlife Insights batches of at most 15,000 images
 - Files automatically upload to Box (if enabled)
 - Re-run Box verification checks on demand from the "Re-run QC Checks" group
 - Open staging folder to verify
@@ -204,12 +206,15 @@ ORG_SITE_YYYYMMDD/
 │   ├── wildlife_insights_ML_deployments.csv
 │   └── wildlife_insights_SA_deployments.csv
 └── raw_data/
-    ├── plot1_ML/                       # Plot 1, Medium-Large camera
-    │   ├── UC_Bodega_plot1_ML_20260303_00001_1.jpg   # Trigger event 1, photo 1
-    │   ├── UC_Bodega_plot1_ML_20260303_00001_2.jpg   # Trigger event 1, photo 2
-    │   ├── UC_Bodega_plot1_ML_20260303_00002_1.jpg   # Trigger event 2, photo 1
+    ├── p1_ML/                          # Plot 1, Medium-Large camera
+    │   ├── UC_Bodega_plot1_ML_20260303_00001_1.jpg   # Flat when ≤15,000 images
     │   └── ...
-    ├── plot1_BD/                       # Plot 1, Bird recorder
+    ├── p2_ML/                          # Oversized camera folder (>15,000 images)
+    │   ├── p2_ML_1/                    # Numbered WI batch, ≤15,000 images
+    │   │   └── ...
+    │   └── p2_ML_2/                    # Trigger bursts are never split between batches
+    │       └── ...
+    ├── p1_BD/                          # Plot 1, Bird recorder
     │   ├── UC_Bodega_plot1_BD_20260303_00001.wav
     │   └── ...
     └── ...
@@ -220,6 +225,18 @@ ORG_SITE_YYYYMMDD/
 At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires `cameras.csv` and `wi_config.json` in the synced lookup tables.
 
 In Wildlife Insights deployment CSVs, latitude and longitude are written with exactly eight digits after the decimal point. Shorter values are padded with trailing zeroes and longer values are rounded to eight places, satisfying Wildlife Insights' requirement of four to eight decimal places without modifying the source lookup values.
+
+Immediately before a deployment's first Box upload, the app scans ML and SA
+camera folders. Folders with at most 15,000 images stay flat. Larger folders are
+moved into `<device>_1`, `<device>_2`, and subsequent numbered subfolders, with
+each trigger burst kept together and every part held at or below 15,000 images.
+The app verifies the resulting structure and updates the session inventory before
+starting Box. Cancellation or a structural error prevents Box upload; clicking
+upload again resumes completed file moves. A deployment with prior Box-upload
+history is never reorganized automatically.
+
+See [the real-data acceptance checklist](docs/wi_split_acceptance_test.md) when
+validating this workflow against a Box-connected deployment.
 
 ## Metadata Schema
 
@@ -356,6 +373,7 @@ to interpret it.
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `coordinate_validation` | Plot coordinates (from `plots.csv`) must be non-null and fall within the California study-area bounding box. Catches unset (0,0) coordinates and values baked into the lookup table that land outside the expected region. | Automatic before CSV generation | Log panel + session-level entry in `qc_report.json` |
 | `lookup_snapshot` | Copies the lookup/config tables in use into `qc/lookup_snapshot/` (with a manifest) so regenerated metadata can be tied to the exact site, plot, camera, ARU, SoundHub, and WI configuration used. | Automatic at metadata generation | `qc/lookup_snapshot/` + session-level entry in `qc_report.json` |
+| `wi_image_split` | Enforces the Wildlife Insights 15,000-image folder limit before the first Box upload. Oversized ML/SA folders are split without cutting trigger bursts, structurally verified, and synchronized back to session inventory. | Automatic immediately before the first Box upload | Preparation progress panel + log panel + session-level entry in `qc_report.json` |
 | (pre-upload manifest) | Before Box upload starts, writes `qc/box_upload_manifest.json` listing every uploadable file with its SHA-256 and SHA-1 when available. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
 | `box_upload` | After upload, recursively lists the Box deployment folder and reconciles against the pre-upload manifest. Each file gets up to 3 retries (single-file failures don't abort the whole batch). | Automatic, after every Box upload | Upload progress panel + session-level entry in `qc_report.json` |
 | `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup uses the complete deployment-relative path, so both flat (`raw_data/device/file`) and WI-split (`raw_data/device/device_N/file`) layouts compare correctly without filename collisions. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
@@ -377,9 +395,9 @@ Not every check applies to every file type:
 | `sequence_gap` (RECONYX bursts) | ✓ | — | — |
 | `temporal_plausibility` | ✓ | ✓ | — |
 
-Session-level checks (`coordinate_validation`, `lookup_snapshot`, `box_upload`,
-`box_verify`, `file_hash_verification_run`, `session_health`, `pre_departure`)
-cover all files regardless of type.
+Session-level checks (`coordinate_validation`, `lookup_snapshot`,
+`wi_image_split`, `box_upload`, `box_verify`, `file_hash_verification_run`,
+`session_health`, `pre_departure`) cover all files regardless of type.
 
 ### Sidecar files written to the deployment folder
 
@@ -403,6 +421,7 @@ redundant sidecar; existing files are preserved for compatibility.
 A few cross-cutting behaviors that aren't single QC checks but support them:
 
 - **Resume mid-deployment.** Every 10 files, `session.json` is rewritten with the latest inventory. If the SD card disconnects mid-copy or the app crashes, "Open Deployment" finds the in-progress session, restores state, skips already-copied files (matched by original filename + hash), cleans up partial writes, and continues.
+- **Resume WI preparation.** Each image move is atomic. If preparation is cancelled, completed moves remain in place and their exact nested paths are saved in `session.json`; clicking upload again derives the same plan and moves only the remaining images. Box upload does not begin until structural verification passes.
 - **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.
 - **Filename collision safety.** File reconciliation and fixity checks key by the complete deployment-relative storage path, not filename alone. This distinguishes both devices and numbered WI split folders. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.
 - **Migration of legacy reports.** When a `qc_report.json` from before the `current_state`/`history` schema is opened, it's migrated automatically — old entries become `history`, and `current_state` is computed fresh.
