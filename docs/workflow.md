@@ -13,7 +13,7 @@ flowchart TD
     K --> L["Auto-count expected media files"]
     L --> M["Copy, rename, and hash files into raw_data/device folders"]
     M --> N["Extract camera, AudioMoth, plot, device, and timing metadata"]
-    N --> O["Update session inventory and device manifest"]
+    N --> O["Update session inventory"]
     O --> P["Write image/audio metadata CSVs and deployment_event_record.json"]
     P --> Q["Snapshot lookup/config files into qc/lookup_snapshot"]
     Q --> R0["Run device QC checks"]
@@ -52,7 +52,7 @@ flowchart TD
 
 4. **Inventory, metadata, and QC**
    - Each copied file becomes one inventory record in the session.
-   - The app writes per-device manifests, `image_file_metadata.csv`, `audio_file_metadata.csv`, and `deployment_event_record.json`.
+   - The app writes `image_file_metadata.csv`, `audio_file_metadata.csv`, and `deployment_event_record.json` from the session inventory.
    - The app snapshots the current lookup/config files into `qc/lookup_snapshot/` so regenerated metadata can be tied to the exact configuration used.
    - QC checks record warnings/errors in `qc/qc_report.json`.
 

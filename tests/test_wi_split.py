@@ -102,7 +102,7 @@ def test_plan_device_and_roundtrip(tmp_path):
     names = _burst_names(n_events=20, frames=3)  # 60 images
     for n in names:
         (dev / n).write_text("x")
-    (dev / "p1_ML_manifest.json").write_text("{}")  # sidecar must be left alone
+    (dev / "p1_ML_manifest.json").write_text("{}")  # legacy file must be left alone
 
     plan = plan_device(dev, limit=21, keep_bursts=True)
     assert plan.needs_split
@@ -112,7 +112,7 @@ def test_plan_device_and_roundtrip(tmp_path):
     result = apply_device_split(plan, move=True, dry_run=False)
     assert result["verification"].ok
     assert list_device_images(dev) == []  # all images moved down
-    assert (dev / "p1_ML_manifest.json").exists()  # sidecar untouched
+    assert (dev / "p1_ML_manifest.json").exists()  # legacy file untouched
     moved = sum(len(list((dev / p.name).glob("*.jpg"))) for p in plan.parts)
     assert moved == 60
 

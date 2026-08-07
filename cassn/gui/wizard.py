@@ -101,7 +101,6 @@ from cassn.core.inventory import (
     build_inventory_record,
     build_renamed_filename,
     generate_session_summary,
-    write_device_manifest,
     write_session,
 )
 from cassn.core.inventory import (
@@ -1273,7 +1272,6 @@ class FieldDataWizard(QMainWindow):
             selected.setText(3, str(total_for_device))
             self.save_session()
 
-            write_device_manifest(device_label, device_folder, device_entries)
             try:
                 write_metadata_outputs(
                     self.current_deployment_folder,
@@ -2553,23 +2551,7 @@ class FieldDataWizard(QMainWindow):
             "note": f"{pending_count} device(s) still pending" if not all_done else "",
         })
 
-        # 2. Device manifests written
-        raw_data_dir = self.current_deployment_folder / "raw_data"
-        manifest_ok = True
-        missing_manifests = []
-        if raw_data_dir.is_dir():
-            for device_dir in [d for d in raw_data_dir.iterdir() if d.is_dir()]:
-                expected_manifest = device_dir / f"{device_dir.name}_manifest.json"
-                if not expected_manifest.exists():
-                    manifest_ok = False
-                    missing_manifests.append(device_dir.name)
-        items.append({
-            "label": "Device manifests written",
-            "ok": manifest_ok,
-            "note": f"Missing: {', '.join(missing_manifests)}" if missing_manifests else "",
-        })
-
-        # 3. Hash verification passed. Auto-satisfied by a successful automatic
+        # 2. Hash verification passed. Auto-satisfied by a successful automatic
         # post-upload hash verify: the automatic verify writes its result to
         # qc_report.json under "file_hash_verification_run", so a passing entry
         # there means a hash verification ran AND passed with no errors — no need
@@ -2594,7 +2576,7 @@ class FieldDataWizard(QMainWindow):
             "note": "Run an upload (auto-verifies) or click 'Verify Box ↔ Local Hashes'" if not hash_verified else "",
         })
 
-        # 4. Box upload verified
+        # 3. Box upload verified
         verification_file = qc_path_for(self.current_deployment_folder, "box_upload_verification.json")
         upload_manifest = qc_path_for(self.current_deployment_folder, "box_upload_manifest.json")
         box_ok = self.box_upload_complete or verification_file.exists() or upload_manifest.exists()
@@ -2604,7 +2586,7 @@ class FieldDataWizard(QMainWindow):
             "note": "No upload recorded for this session" if not box_ok else "",
         })
 
-        # 5. No QC errors in qc_report.json
+        # 4. No QC errors in qc_report.json
         qc_ok = True
         qc_error_count = 0
         qc_path = qc_path_for(self.current_deployment_folder, "qc_report.json")

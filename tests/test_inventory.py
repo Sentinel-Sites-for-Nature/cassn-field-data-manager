@@ -1,9 +1,11 @@
 """Tests for card-scan helpers (cassn.core.inventory)."""
+import json
 import os
 
 from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
+    refresh_legacy_device_manifest,
     reconcile_device_dir,
     sorted_walk,
 )
@@ -72,7 +74,7 @@ def test_reconcile_device_dir_removes_only_orphans(tmp_path):
     # ...and two staged but never recorded before the crash (the orphans).
     (dev / "UC_S_plot2_ML_20260609_00002_1.jpg").write_bytes(b"x")
     (dev / "UC_S_plot2_ML_20260609_00002_2.jpg").write_bytes(b"x")
-    # A manifest sidecar and a dotfile that must never be touched.
+    # A retired legacy manifest and a dotfile that must never be touched.
     (dev / "p2_ML_manifest.json").write_bytes(b"{}")
     (dev / ".DS_Store").write_bytes(b"x")
 
@@ -110,3 +112,35 @@ def test_reconcile_device_dir_noops_when_clean(tmp_path):
 def test_reconcile_device_dir_missing_dir_is_safe(tmp_path):
     # First-ever copy: the device folder may not exist yet.
     assert reconcile_device_dir(tmp_path / "nope", [], "p2_ML") == []
+
+
+def test_refresh_legacy_manifest_does_not_create_new_file(tmp_path):
+    dev = tmp_path / "p1_ML"
+    dev.mkdir()
+
+    assert not refresh_legacy_device_manifest("p1_ML", dev, [])
+    assert not (dev / "p1_ML_manifest.json").exists()
+
+
+def test_refresh_legacy_manifest_updates_existing_file(tmp_path):
+    dev = tmp_path / "p1_ML"
+    dev.mkdir()
+    manifest_path = dev / "p1_ML_manifest.json"
+    manifest_path.write_text("{}")
+    entries = [{
+        "new_filename": "image.jpg",
+        "file_size_bytes": 123,
+        "file_hash_sha256": "sha256-value",
+        "file_hash_sha1": "sha1-value",
+    }]
+
+    assert refresh_legacy_device_manifest("p1_ML", dev, entries)
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["device_label"] == "p1_ML"
+    assert manifest["file_count"] == 1
+    assert manifest["files"] == [{
+        "filename": "image.jpg",
+        "size_bytes": 123,
+        "sha256": "sha256-value",
+        "sha1": "sha1-value",
+    }]

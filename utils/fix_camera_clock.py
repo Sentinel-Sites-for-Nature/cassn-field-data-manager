@@ -12,10 +12,11 @@ deployment's QC/fixity records consistent, in one pass per device:
      changed, so the old hashes are stale).
   3. Re-read recorded_datetime from the corrected EXIF.
   4. Patch the deployment's session.json file_inventory.
-  5. Rewrite the device manifest(s) and regenerate the metadata CSVs.
+  5. Refresh any existing legacy device manifest and regenerate metadata CSVs.
 
-After this, the staged data, inventory, manifests, and CSVs all agree, so the
-app's Box upload + automatic hash verification work unchanged.
+After this, the staged data, inventory, metadata CSVs, and any legacy manifest
+still present all agree, so Box upload and automatic hash verification work
+unchanged. The utility never creates a new per-device manifest.
 
 The offset is fully general (years/months/days/hours/minutes/seconds, add or
 subtract), not hardcoded to one year. Use --dry-run first.
@@ -30,7 +31,8 @@ I/O. Pass ``--scratch <fast_dir>`` (e.g. an internal SSD) and the tool, per
 device, COPIES the device folder to that scratch dir (one sequential read the
 HDD is good at), does the heavy work there (fast on an SSD), and copies the
 corrected files back only if they changed. Then it patches session.json,
-rewrites manifests, and regenerates the CSVs exactly as the in-place run does.
+refreshes an existing legacy manifest, and regenerates the CSVs exactly as the
+in-place run does.
 The scratch dir is machine-agnostic: any fast local path with room for one
 device folder at a time. Omit the flag to work in place.
 
@@ -69,7 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from cassn.config import LOCAL_DATA_DIR
 from cassn.core.hashing import sha256_sha1
 from cassn.core.image_metadata import extract_exif_data, parse_camera_recorded_datetime
-from cassn.core.inventory import write_device_manifest
+from cassn.core.inventory import refresh_legacy_device_manifest
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.lookups import LookupTables
 
@@ -189,7 +191,15 @@ def main() -> int:
                   f"{' -if year==' + str(args.only_year) if args.only_year else ''} <dir>")
             if scratch_root:
                 print(f"  would route the work through scratch dir: {scratch_root / dev}")
-            print(f"  would re-hash/re-date/refresh-size {len(dev_entries)} entries + rewrite manifest")
+            legacy_note = (
+                " + refresh existing legacy manifest"
+                if (dev_dir / f"{dev}_manifest.json").exists()
+                else ""
+            )
+            print(
+                f"  would re-hash/re-date/refresh-size {len(dev_entries)} entries"
+                f"{legacy_note}"
+            )
             continue
 
         t0 = time.time()
@@ -223,9 +233,15 @@ def main() -> int:
                 print("  no EXIF change (guard skipped all) — no copy-back needed")
             shutil.rmtree(work_dir, ignore_errors=True)
 
-        # 4. device manifest (always written against the canonical device folder)
-        write_device_manifest(dev, dev_dir, dev_entries)
-        print(f"  rewrote {dev}_manifest.json   |   done in {time.time() - t0:.0f}s")
+        # 4. Keep a historical manifest consistent, but never create a new one.
+        legacy_manifest = dev_dir / f"{dev}_manifest.json"
+        had_legacy_manifest = legacy_manifest.exists()
+        refreshed = refresh_legacy_device_manifest(dev, dev_dir, dev_entries)
+        if refreshed:
+            print(f"  refreshed legacy {dev}_manifest.json")
+        elif had_legacy_manifest:
+            print(f"  ! could not refresh legacy {dev}_manifest.json")
+        print(f"  device complete   |   done in {time.time() - t0:.0f}s")
 
     if args.dry_run:
         print("\nDry run complete — no files written.")
@@ -236,7 +252,7 @@ def main() -> int:
     print(f"\nSaved session.json ({total_updated} entries updated).")
     lookups = LookupTables.load(LOCAL_DATA_DIR)
     write_metadata_outputs(dep, session["metadata"], inv, session["devices"], lookups, log=print)
-    print("\nDone. Staged data, inventory, manifests, and CSVs are back in sync.")
+    print("\nDone. Staged data, inventory, and CSVs are back in sync.")
     return 0
 
 

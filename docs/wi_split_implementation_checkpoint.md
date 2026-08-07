@@ -56,8 +56,8 @@ burst larger than the limit is a blocking error.
 
 ## Implementation sequence
 
-1. Finalize and harden the reusable core splitting engine.
-2. Retire per-device manifest generation and readiness checks.
+1. **Completed:** Finalize and harden the reusable core splitting engine.
+2. **Completed:** Retire per-device manifest generation and readiness checks.
 3. Make inventory paths and Box verification support flat and split layouts.
 4. Integrate automatic, cancellable splitting into the GUI between QC and Box
    upload.

@@ -212,8 +212,8 @@ class BoxStorage:
         """Skip macOS/Finder junk and internal app files from Box uploads.
 
         Excludes dotfiles/AppleDouble files, the local ``session.json``, and
-        per-device ``*_manifest.json`` fixity sidecars that live under
-        ``raw_data/``.
+        retired per-device ``*_manifest.json`` sidecars that may still exist in
+        historical ``raw_data/`` folders.
         """
         name = file_path.name
         if name.startswith(".") or name.startswith("._") or name == "session.json":

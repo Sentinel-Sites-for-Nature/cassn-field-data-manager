@@ -309,7 +309,8 @@ Per device, it:
    are stale).
 3. Re-reads `recorded_datetime` from the corrected EXIF.
 4. Patches the deployment's `session.json` file inventory.
-5. Rewrites the device manifest(s) and regenerates the metadata CSVs.
+5. Refreshes an existing legacy device manifest, if present, and regenerates
+   the metadata CSVs. It never creates a new per-device manifest.
 
 The offset is fully general — any combination of
 years/months/days/hours/minutes/seconds, added or subtracted — so it handles a
@@ -387,8 +388,8 @@ python utils/fix_camera_clock.py \
 - Recomputing hashes is **mandatory**, not optional — rewriting EXIF changes the
   bytes, so without the re-hash every corrected file would (correctly) fail the
   Box hash check. The script handles this for you.
-- After it finishes, the staged data, inventory, manifests, and CSVs all agree;
-  run the app's Box upload as normal.
+- After it finishes, the staged data, inventory, CSVs, and any legacy manifest
+  still present all agree; run the app's Box upload as normal.
 
 ---
 
@@ -409,8 +410,8 @@ Per device it:
 3. **Moves** each image into its part folder (no duplicate storage), then checks
    filenames and part counts without rereading image contents. Each same-volume
    file move is atomic; the complete operation is resumable rather than
-   transactional. The `<device>_manifest.json` fixity sidecar is left untouched
-   in the device root.
+   transactional. A retired legacy `<device>_manifest.json`, if present, is left
+   untouched in the device root.
 
 The reusable logic lives in `cassn/core/wi_split.py`; this file is just the CLI.
 

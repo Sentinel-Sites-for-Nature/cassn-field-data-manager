@@ -216,7 +216,7 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
     ),
     "pre_departure": (
         "Aggregate readiness check before closing or switching deployments: all devices "
-        "complete, manifests written, fixity check run, Box upload done, no QC errors."
+        "complete, fixity check run, Box upload done, no QC errors."
     ),
     "lookup_snapshot": (
         "Lookup/config snapshot: copies the currently loaded lookup tables into "

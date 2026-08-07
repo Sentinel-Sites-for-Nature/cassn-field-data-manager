@@ -208,7 +208,6 @@ ORG_SITE_YYYYMMDD/
     │   ├── UC_Bodega_plot1_ML_20260303_00001_1.jpg   # Trigger event 1, photo 1
     │   ├── UC_Bodega_plot1_ML_20260303_00001_2.jpg   # Trigger event 1, photo 2
     │   ├── UC_Bodega_plot1_ML_20260303_00002_1.jpg   # Trigger event 2, photo 1
-    │   ├── plot1_ML_manifest.json      # Per-device file list + SHA-256 (local-only)
     │   └── ...
     ├── plot1_BD/                       # Plot 1, Bird recorder
     │   ├── UC_Bodega_plot1_BD_20260303_00001.wav
@@ -362,7 +361,7 @@ to interpret it.
 | `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup is path-aware (`device_label/filename`) so identically-named files in different device folders compare correctly. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
 | `box_verify` | Calls the Box API, recursively lists the deployment folder, reconciles against local inventory. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box Upload") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json` |
 | `session_health` | At app launch, every `session.json` in the staging root is parsed. Truncated or malformed files are surfaced in the Open Deployment dialog as "⚠ CORRUPTED" rather than being silently hidden. | Automatic at app launch and "Open Different Deployment…" | Resume dialog entry + per-deployment `qc_report.json` |
-| `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, per-device manifests written, file-hash verification run, Box upload done, no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
+| `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, file-hash verification run, Box upload done, and no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
 | (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `qc/deployment_summary.txt` in deployment folder |
 
 ### Per-device check coverage
@@ -394,7 +393,10 @@ folder (all upload to Box with the rest of the data, except as noted):
 | `qc/box_upload_verification.json` | Box verify step | yes | reconciliation report from the Box-verify check |
 | `qc/deployment_summary.txt` | session-close summary | yes | human-readable rollup of the deployment |
 | `qc/lookup_snapshot/` | metadata generation | yes | copy of the lookup/config tables used, with a manifest |
-| `raw_data/<device>/<device>_manifest.json` | per-device completion | **no** (local-only fixity sidecar) | per-device file list with SHA-256, written before SD card is ejected |
+
+Historical deployments may contain a local-only
+`raw_data/<device>/<device>_manifest.json`. New ingestions no longer create this
+redundant sidecar; existing files are preserved for compatibility.
 
 ### Resilience features
 

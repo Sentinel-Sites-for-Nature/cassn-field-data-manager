@@ -1,9 +1,9 @@
 """
-The file inventory: naming, per-file records, device manifests, session state.
+The file inventory: naming, per-file records, session state, and summaries.
 
 The wizard walks each SD card and, for every kept file, records one dict in its
-``file_inventory`` list. That list is the spine of the whole app — every CSV,
-manifest, and QC check reads from it. This module owns the parts of that
+``file_inventory`` list. That list is the spine of the whole app — every CSV
+and QC check reads from it. This module owns the parts of that
 process that are pure given their inputs, so they can be tested without a GUI or
 a physical card:
 
@@ -12,8 +12,8 @@ a physical card:
 * :func:`build_inventory_record` — assembles one inventory dict from the four
   metadata sources (EXIF, Reconyx/ExifTool, CONFIG.TXT, WAV comment) plus plot
   and SoundHub lookups, applying the exact source-precedence the original used.
-* :func:`write_device_manifest` — the tamper-evident fixity sidecar written
-  before a card is ejected.
+* :func:`refresh_legacy_device_manifest` — refreshes an existing, retired
+  per-device sidecar for compatibility with historical deployments.
 * :func:`generate_session_summary` — the human-readable deployment digest.
 * :func:`write_session` / :func:`find_all_sessions` — crash-safe session.json
   persistence and the staging-wide scan used to resume or reopen deployments.
@@ -106,8 +106,8 @@ def reconcile_device_dir(device_dir, file_inventory, device_label) -> list[str]:
     Reconciling makes the inventory authoritative: any file in ``device_dir``
     whose name is not a ``new_filename`` recorded for ``device_label`` is an
     orphan and is removed. The un-recorded source files are then re-copied
-    cleanly by the caller, so numbering stays contiguous. The device manifest
-    sidecar and dotfiles are always exempt.
+    cleanly by the caller, so numbering stays contiguous. Retired legacy device
+    manifest sidecars and dotfiles are always exempt.
 
     Returns the list of removed filenames (empty when nothing was orphaned).
     """
@@ -281,16 +281,25 @@ def build_inventory_record(
 
 
 # ---------------------------------------------------------------------------
-# Device manifest
+# Retired legacy device manifest
 # ---------------------------------------------------------------------------
 
-def write_device_manifest(device_label: str, device_dir: Path, entries: list) -> None:
-    """Write a fixity manifest sidecar for a completed device.
+def refresh_legacy_device_manifest(
+    device_label: str,
+    device_dir: Path,
+    entries: list,
+) -> bool:
+    """Refresh an existing retired per-device manifest; never create one.
 
-    Records the file count plus ``{filename, size_bytes, sha256, sha1}`` for
-    every file. Written before the SD card is ejected — the last chance for a
-    tamper-evident record.
+    New ingestions use the session inventory and Box upload manifest instead.
+    This compatibility helper keeps a historical manifest internally consistent
+    when a maintenance utility changes file bytes. Returns ``True`` only when an
+    existing manifest was successfully rewritten.
     """
+    manifest_path = Path(device_dir) / f"{device_label}_manifest.json"
+    if not manifest_path.exists():
+        return False
+
     manifest = {
         "device_label": device_label,
         "generated": datetime.now().isoformat(),
@@ -305,12 +314,13 @@ def write_device_manifest(device_label: str, device_dir: Path, entries: list) ->
             for e in entries
         ],
     }
-    manifest_path = device_dir / f"{device_label}_manifest.json"
     try:
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
+        return True
     except Exception as exc:
-        print(f"Warning: could not write manifest for {device_label}: {exc}")
+        print(f"Warning: could not refresh legacy manifest for {device_label}: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
