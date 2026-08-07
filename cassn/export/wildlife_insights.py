@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +40,35 @@ WI_COLUMNS = [
     "orientation_other", "recorded_by", "plot_treatment", "plot_treatment_description",
     "detection_distance",
 ]
+
+WI_COORDINATE_QUANTUM = Decimal("0.00000001")
+
+
+def format_wi_coordinate(value: object) -> str:
+    """Return a coordinate with exactly eight digits after the decimal.
+
+    Wildlife Insights accepts between four and eight decimal places. Using a
+    fixed eight preserves all accepted precision and pads shorter coordinates
+    deterministically. Blank and non-numeric values are returned unchanged so
+    the existing QC checks can report them instead of masking bad source data.
+    """
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    try:
+        coordinate = Decimal(raw)
+        if not coordinate.is_finite():
+            return raw
+        rounded = coordinate.quantize(WI_COORDINATE_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return raw
+
+    # Avoid producing a surprising signed zero after rounding a tiny negative.
+    if rounded == 0:
+        rounded = abs(rounded)
+    return format(rounded, ".8f")
 
 
 def deployment_event_name(start_date: str, end_date: str) -> str:
@@ -135,8 +165,8 @@ def build_wi_rows(
             "subproject_name": subproject_name,
             "subproject_design": "",
             "placename": f"{site}_plot{plot_num}",
-            "longitude": coords.get("longitude", ""),
-            "latitude": coords.get("latitude", ""),
+            "longitude": format_wi_coordinate(coords.get("longitude", "")),
+            "latitude": format_wi_coordinate(coords.get("latitude", "")),
             "start_date": f"{start} 00:00:00" if start else "",
             "end_date": f"{end} 23:59:59" if end else "",
             "event_name": event_name,
@@ -193,8 +223,8 @@ def reshape_image_metadata_to_wi(image_csv_path: Path) -> dict[str, list[dict]]:
                 "subproject_name":         row.get('subproject', ''),
                 "subproject_design":       row.get('subproject_design', ''),
                 "placename":               row.get('placename', ''),
-                "longitude":               row.get('longitude', ''),
-                "latitude":                row.get('latitude', ''),
+                "longitude":               format_wi_coordinate(row.get('longitude', '')),
+                "latitude":                format_wi_coordinate(row.get('latitude', '')),
                 "start_date":              row.get('start_date', ''),
                 "end_date":                row.get('end_date', ''),
                 "event_name":              row.get('event_name', ''),

@@ -24,6 +24,7 @@ import io
 import json
 import sys
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from box_sdk_gen import BoxClient, BoxOAuth, OAuthConfig
@@ -43,6 +44,27 @@ WI_COLUMNS = [
     "orientation_other", "recorded_by", "plot_treatment", "plot_treatment_description",
     "detection_distance",
 ]
+
+WI_COORDINATE_QUANTUM = Decimal("0.00000001")
+
+
+def format_wi_coordinate(value: object) -> str:
+    """Format a coordinate to the eight decimal places accepted by WI."""
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    try:
+        coordinate = Decimal(raw)
+        if not coordinate.is_finite():
+            return raw
+        rounded = coordinate.quantize(WI_COORDINATE_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return raw
+    if rounded == 0:
+        rounded = abs(rounded)
+    return format(rounded, ".8f")
 
 
 def log(message: str) -> None:
@@ -298,8 +320,8 @@ def build_wi_rows(
             "subproject_name": subproject_name,
             "subproject_design": "",
             "placename": f"{site}_plot{plot_num}",
-            "longitude": coords.get("longitude", ""),
-            "latitude": coords.get("latitude", ""),
+            "longitude": format_wi_coordinate(coords.get("longitude", "")),
+            "latitude": format_wi_coordinate(coords.get("latitude", "")),
             "start_date": f"{start} 00:00:00" if start else "",
             "end_date": f"{end} 23:59:59" if end else "",
             "event_name": event_name,
