@@ -389,3 +389,72 @@ python utils/fix_camera_clock.py \
   Box hash check. The script handles this for you.
 - After it finishes, the staged data, inventory, manifests, and CSVs all agree;
   run the app's Box upload as normal.
+
+---
+
+## `split_for_wi.py`
+
+Splits oversized **camera** device folders into Wildlife-Insights-sized batches.
+WI accepts at most **15,000 images per upload**, but a `pN_ML` / `pN_SA` folder
+often holds far more. This tool scans a root, finds every camera folder over the
+limit, and divides its images into `<device>_1`, `<device>_2` … subfolders —
+each at or under the limit — so each subfolder is one WI upload.
+
+Per device it:
+
+1. Reads the folder's full image inventory (loose files **plus** anything already
+   in `<device>_N` parts, so it can resume a half-finished run).
+2. Plans parts of ≤ 15,000, never cutting a trigger burst (`…_00001_1/_2/_3`
+   stay together, so each part lands at or just under the limit).
+3. **Moves** each image into its part folder (atomic same-volume rename, no
+   duplicate storage). The `<device>_manifest.json` fixity sidecar is left
+   untouched in the device root.
+
+The reusable logic lives in `cassn/core/wi_split.py`; this file is just the CLI.
+
+### When to use
+
+As a **terminal WI-prep step, after Box upload and QC are done** for the
+deployment — splitting nests the images one level deeper than the manifest / QC
+steps expect. Audio (`BD`/`BT`) is never touched. Point the WI uploader at each
+`<device>_N` subfolder in turn.
+
+### Run
+
+```bash
+# Preview only — writes nothing (default):
+python utils/split_for_wi.py --root "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging"
+
+# Perform the split on one deployment:
+python utils/split_for_wi.py \
+  --root ".../UC_JepsonPrairie_20260423" --apply
+
+# Put everything back:
+python utils/split_for_wi.py \
+  --root ".../UC_JepsonPrairie_20260423" --undo
+```
+
+### Options
+
+| Flag | Meaning |
+| --- | --- |
+| `--root` | Folder to scan: a season, a single deployment, or the staging drive. Required. |
+| `--limit N` | Max images per part (default `15000`). |
+| `--suffixes` | Device-folder suffixes to target (default `_ML _SA`). |
+| `--apply` | Perform the split. **Default is a dry-run report.** |
+| `--undo` | Reverse a previous split under `--root`. |
+| `--no-keep-bursts` | Allow a part boundary to fall inside a trigger burst. |
+| `--yes` | Skip the confirmation prompt on `--apply` / `--undo`. |
+
+### Notes
+
+- **Idempotent / resumable.** Re-running `--apply` only moves images not yet in
+  their planned part, so an interrupted run (crash, quit, disk sleep) is finished
+  by simply running it again; a completed split is a no-op. A big move on a
+  spinning HDD can take a while — that's disk speed, not a hang.
+- **Reversible.** `--undo` moves every part's images back up and removes the
+  emptied part folders. A round-trip restores the folder exactly.
+- **Safe against re-matching.** Part folders (`p1_ML_1`) never end in `_ML` /
+  `_SA`, so re-scans can't recurse into prior output.
+- On **Box**, the moves sync as moves; expect Box Drive to churn through the
+  re-sync. Run it while the deployment isn't being uploaded.
