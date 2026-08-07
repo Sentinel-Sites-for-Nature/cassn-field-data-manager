@@ -4,7 +4,14 @@ These pin the split contract: parts never exceed the limit, bursts are never
 cut, part folders don't re-match the device suffix, and a split round-trips
 cleanly back to the original flat folder.
 """
+import pytest
+
 from cassn.core.wi_split import (
+    DuplicateImageError,
+    InvalidLimitError,
+    OversizedBurstError,
+    SplitCollisionError,
+    SplitError,
     apply_device_split,
     event_key,
     find_target_devices,
@@ -13,6 +20,7 @@ from cassn.core.wi_split import (
     plan_device,
     plan_parts,
     undo_device_split,
+    verify_device_split,
 )
 
 
@@ -70,6 +78,24 @@ def test_plan_parts_no_split_when_under_limit():
     assert plan_parts(names, limit=15000) == [names]
 
 
+def test_plan_parts_no_split_at_exact_limit():
+    names = _burst_names(n_events=5)
+    assert len(names) == 15
+    assert plan_parts(names, limit=15) == [names]
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_plan_parts_rejects_invalid_limit(limit):
+    with pytest.raises(InvalidLimitError, match="positive integer"):
+        plan_parts(["image.jpg"], limit=limit)
+
+
+def test_plan_parts_rejects_single_burst_larger_than_limit():
+    names = _burst_names(n_events=1, frames=4)
+    with pytest.raises(OversizedBurstError, match="contains 4 images"):
+        plan_parts(names, limit=3, keep_bursts=True)
+
+
 def test_plan_device_and_roundtrip(tmp_path):
     dev = tmp_path / "p1_ML"
     dev.mkdir()
@@ -83,7 +109,8 @@ def test_plan_device_and_roundtrip(tmp_path):
     assert len(plan.parts) == 3  # 60 images / 21, on burst (3) boundaries -> 21,21,18
     assert plan.pending_moves() == 60
 
-    apply_device_split(plan, move=True, dry_run=False)
+    result = apply_device_split(plan, move=True, dry_run=False)
+    assert result["verification"].ok
     assert list_device_images(dev) == []  # all images moved down
     assert (dev / "p1_ML_manifest.json").exists()  # sidecar untouched
     moved = sum(len(list((dev / p.name).glob("*.jpg"))) for p in plan.parts)
@@ -122,6 +149,107 @@ def test_apply_is_resumable_after_partial_move(tmp_path):
     assert plan_device(dev, limit=21).fully_split
     placed = sum(len(list((dev / p.name).glob("*.jpg"))) for p in resumed.parts)
     assert placed == 60
+
+
+def test_plan_rejects_duplicate_filename_across_root_and_part(tmp_path):
+    dev = tmp_path / "p1_ML"
+    part = dev / "p1_ML_1"
+    part.mkdir(parents=True)
+    (dev / "duplicate.jpg").write_text("root")
+    (part / "duplicate.jpg").write_text("part")
+
+    with pytest.raises(DuplicateImageError, match="duplicate.jpg"):
+        plan_device(dev, limit=1)
+
+
+def test_apply_rejects_destination_created_after_plan(tmp_path):
+    dev = tmp_path / "p1_ML"
+    dev.mkdir()
+    names = _burst_names(n_events=2, frames=3)
+    for name in names:
+        (dev / name).write_text("source")
+    plan = plan_device(dev, limit=3)
+
+    first_destination = dev / plan.parts[0].name / plan.parts[0].files[0]
+    first_destination.parent.mkdir()
+    first_destination.write_text("collision")
+
+    with pytest.raises(SplitCollisionError, match="Duplicate image filename"):
+        apply_device_split(plan, dry_run=False)
+    assert (dev / plan.parts[0].files[0]).read_text() == "source"
+    assert first_destination.read_text() == "collision"
+
+
+def test_apply_rejects_source_removed_after_plan(tmp_path):
+    dev = tmp_path / "p1_SA"
+    dev.mkdir()
+    names = _burst_names(n_events=2, frames=3)
+    for name in names:
+        (dev / name).write_text("x")
+    plan = plan_device(dev, limit=3)
+    (dev / names[0]).unlink()
+
+    with pytest.raises(SplitCollisionError, match="planned image.s. missing"):
+        apply_device_split(plan, dry_run=False)
+
+
+def test_apply_rejects_copy_mode(tmp_path):
+    dev = tmp_path / "p1_ML"
+    dev.mkdir()
+    for name in _burst_names(n_events=2, frames=3):
+        (dev / name).write_text("x")
+    plan = plan_device(dev, limit=3)
+
+    with pytest.raises(SplitError, match="Copy mode is not supported"):
+        apply_device_split(plan, move=False, dry_run=False)
+
+
+def test_cancelled_apply_is_resumable_and_verifies_after_resume(tmp_path):
+    dev = tmp_path / "p1_ML"
+    dev.mkdir()
+    names = _burst_names(n_events=10, frames=3)
+    for name in names:
+        (dev / name).write_text("x")
+    plan = plan_device(dev, limit=9)
+
+    checks = 0
+
+    def cancel_after_several_moves():
+        nonlocal checks
+        checks += 1
+        return checks > 7
+
+    partial = apply_device_split(
+        plan,
+        dry_run=False,
+        is_cancelled=cancel_after_several_moves,
+    )
+    assert partial["cancelled"]
+    assert 0 < partial["placed"] < len(names)
+    assert partial["verification"] is None
+
+    resumed = plan_device(dev, limit=9)
+    completed = apply_device_split(resumed, dry_run=False)
+    assert completed["verification"].ok
+    assert plan_device(dev, limit=9).fully_split
+
+
+def test_structural_verification_detects_loose_image(tmp_path):
+    dev = tmp_path / "p1_SA"
+    dev.mkdir()
+    names = _burst_names(n_events=2, frames=3)
+    for name in names:
+        (dev / name).write_text("x")
+    plan = plan_device(dev, limit=3)
+    apply_device_split(plan, dry_run=False)
+
+    misplaced = dev / plan.parts[0].name / plan.parts[0].files[0]
+    misplaced.rename(dev / misplaced.name)
+    verification = verify_device_split(plan)
+
+    assert not verification.ok
+    assert any("remain loose" in error for error in verification.errors)
+    assert any("differs from plan" in error for error in verification.errors)
 
 
 def test_find_target_devices_prunes_and_skips_parts(tmp_path):

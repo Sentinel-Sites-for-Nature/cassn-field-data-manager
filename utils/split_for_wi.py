@@ -41,6 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cassn.core.wi_split import (  # noqa: E402
     DEFAULT_DEVICE_SUFFIXES,
+    InvalidLimitError,
+    SplitError,
     WI_UPLOAD_LIMIT,
     apply_device_split,
     find_target_devices,
@@ -86,6 +88,10 @@ def _report_split(plans, limit) -> tuple[int, int]:
 
 
 def cmd_split(args) -> int:
+    if args.limit <= 0:
+        raise InvalidLimitError(
+            f"Image limit must be a positive integer; got {args.limit!r}"
+        )
     suffixes = normalize_suffixes(args.suffixes)
     devices = find_target_devices(args.root, suffixes)
     if not devices:
@@ -124,7 +130,7 @@ def cmd_split(args) -> int:
         print(f"{plan.device_dir}")
         res = apply_device_split(plan, move=True, dry_run=False, log=print)
         placed += res["placed"]
-    print(f"\nDone. Moved {placed:,} images into new part folders.")
+    print(f"\nDone. Moved and verified {placed:,} images into new part folders.")
     return 0
 
 
@@ -189,7 +195,11 @@ def main() -> int:
         print("Choose one of --apply or --undo, not both.")
         return 2
 
-    return cmd_undo(args) if args.undo else cmd_split(args)
+    try:
+        return cmd_undo(args) if args.undo else cmd_split(args)
+    except SplitError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

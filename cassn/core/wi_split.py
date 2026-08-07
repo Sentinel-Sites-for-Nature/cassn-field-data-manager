@@ -12,14 +12,12 @@ Design choices that keep the operation safe and reversible:
 * **Bursts stay together.** A Reconyx-style trigger writes several frames that
   share an event key (``..._00001_1``, ``..._00001_2``, ``..._00001_3``). A part
   boundary never cuts through one, so every WI upload holds whole trigger
-  events. Parts land at or under the limit, never over (barring the impossible
-  case of a single event larger than the limit, which is surfaced as a warning).
+  events. Parts land at or under the limit, never over. A malformed single event
+  larger than the limit is a blocking error.
 * **Move, don't copy.** Images are relocated into ``<device>_1``, ``<device>_2``
-  ... subfolders of the device dir. No duplicate storage, and the same-volume
-  rename is atomic, so a part folder is either fully populated or not created.
-* **Manifest untouched.** The ``<device>_manifest.json`` fixity sidecar stays in
-  the device dir. Splitting is meant as a terminal WI-prep step, run after Box
-  upload and QC, so the device's fixity record is left exactly as written.
+  ... subfolders of the device dir. Each same-volume file move is atomic, but
+  the complete operation is intentionally resumable rather than transactional.
+  Non-image sidecars are left untouched.
 * **Reversible.** :func:`undo_device_split` moves every part's images back up and
   removes the emptied subfolders.
 * **Idempotent and resumable.** The plan is built over the *full* inventory —
@@ -48,6 +46,36 @@ DEFAULT_DEVICE_SUFFIXES = ("_ML", "_SA")
 # trailing number groups so a single-frame name (no frame index) is not
 # over-grouped — it falls back to its own event.
 _EVENT_KEY_RE = re.compile(r"^(?P<key>.*_\d+)_\d{1,3}$")
+
+
+class SplitError(RuntimeError):
+    """Base class for a WI split that cannot proceed safely."""
+
+
+class InvalidLimitError(SplitError):
+    """Raised when the requested part size is not a positive integer."""
+
+
+class DuplicateImageError(SplitError):
+    """Raised when one filename appears in more than one device location."""
+
+
+class OversizedBurstError(SplitError):
+    """Raised when preserving one trigger burst would violate the part limit."""
+
+
+class SplitCollisionError(SplitError):
+    """Raised when the filesystem changed or a destination would be overwritten."""
+
+
+class SplitVerificationError(SplitError):
+    """Raised when the post-move folder structure does not match its plan."""
+
+
+def _validate_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise InvalidLimitError(f"Image limit must be a positive integer; got {limit!r}")
+    return limit
 
 
 def normalize_suffixes(suffixes) -> tuple[str, ...]:
@@ -84,6 +112,15 @@ def _is_image(p: Path) -> bool:
     return p.is_file() and not p.name.startswith(".") and p.suffix.lower() in IMAGE_EXTENSIONS
 
 
+def _is_image_entry(entry: os.DirEntry) -> bool:
+    """Check a scandir entry without issuing a separate stat when possible."""
+    return (
+        not entry.name.startswith(".")
+        and Path(entry.name).suffix.lower() in IMAGE_EXTENSIONS
+        and entry.is_file(follow_symlinks=False)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -113,36 +150,77 @@ def find_target_devices(root, suffixes=DEFAULT_DEVICE_SUFFIXES) -> list[Path]:
 
 def list_device_images(device_dir) -> list[str]:
     """Image filenames sitting loose in the device root (non-recursive), sorted."""
-    return sorted(p.name for p in Path(device_dir).iterdir() if _is_image(p))
+    with os.scandir(device_dir) as entries:
+        return sorted(entry.name for entry in entries if _is_image_entry(entry))
 
 
 def list_part_dirs(device_dir) -> list[str]:
     """Names of existing ``<device>_<n>`` part subfolders, sorted numerically."""
     device_dir = Path(device_dir)
     name = device_dir.name
-    parts = [
-        p.name
-        for p in device_dir.iterdir()
-        if p.is_dir() and is_part_dir_name(p.name, name)
-    ]
+    with os.scandir(device_dir) as entries:
+        parts = [
+            entry.name
+            for entry in entries
+            if (
+                is_part_dir_name(entry.name, name)
+                and entry.is_dir(follow_symlinks=False)
+            )
+        ]
     return sorted(parts, key=lambda n: int(n.rsplit("_", 1)[1]))
 
 
-def collect_inventory(device_dir) -> dict[str, Path]:
-    """Map every device image (loose or already in a part) to its current path.
+def _scan_inventory(device_dir) -> tuple[dict[str, Path], set[str], dict[str, set[str]]]:
+    """Return image locations, loose filenames, and per-part filenames.
 
-    A filename found inside a part folder wins over a loose copy of the same
-    name, but with atomic moves a file only ever exists in one place.
+    Duplicate basenames are rejected instead of being silently collapsed. WI
+    uses basenames as image identities during this operation, so continuing
+    with two different paths for one name could hide or overwrite data.
     """
     device_dir = Path(device_dir)
     loc: dict[str, Path] = {}
-    for p in device_dir.iterdir():
-        if _is_image(p):
-            loc[p.name] = p
-    for part_name in list_part_dirs(device_dir):
-        for p in (device_dir / part_name).iterdir():
-            if _is_image(p):
-                loc[p.name] = p
+    loose: set[str] = set()
+    part_files: dict[str, set[str]] = {}
+    part_dirs: list[Path] = []
+
+    def record(name: str, path: Path, *, part_name: str | None = None) -> None:
+        previous = loc.get(name)
+        if previous is not None:
+            raise DuplicateImageError(
+                f"Duplicate image filename {name!r}: {previous} and {path}"
+            )
+        loc[name] = path
+        if part_name is None:
+            loose.add(name)
+        else:
+            part_files[part_name].add(name)
+
+    # scandir streams entries and normally gets their type from the directory
+    # listing itself. That avoids Path.iterdir/os.listdir materializing a huge
+    # Box folder and then issuing a separate stat for every image.
+    with os.scandir(device_dir) as entries:
+        for entry in entries:
+            if _is_image_entry(entry):
+                record(entry.name, Path(entry.path))
+            elif (
+                is_part_dir_name(entry.name, device_dir.name)
+                and entry.is_dir(follow_symlinks=False)
+            ):
+                part_dir = Path(entry.path)
+                part_dirs.append(part_dir)
+                part_files[entry.name] = set()
+
+    for part_dir in sorted(part_dirs, key=lambda p: int(p.name.rsplit("_", 1)[1])):
+        with os.scandir(part_dir) as entries:
+            for entry in entries:
+                if _is_image_entry(entry):
+                    record(entry.name, Path(entry.path), part_name=part_dir.name)
+    return loc, loose, part_files
+
+
+def collect_inventory(device_dir) -> dict[str, Path]:
+    """Map every uniquely named device image to its current path."""
+    loc, _loose, _part_files = _scan_inventory(device_dir)
     return loc
 
 
@@ -160,6 +238,7 @@ class Part:
 class DevicePlan:
     device_dir: Path
     filenames: list[str]                 # full inventory (loose + in parts), sorted
+    limit: int = WI_UPLOAD_LIMIT
     loc: dict[str, Path] = field(default_factory=dict)
     parts: list[Part] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -198,6 +277,7 @@ def plan_parts(images, limit=WI_UPLOAD_LIMIT, keep_bursts=True) -> list[list[str
     in the same part. Returns a single part (the whole list) when no split is
     needed.
     """
+    limit = _validate_limit(limit)
     images = list(images)
     if len(images) <= limit:
         return [images]
@@ -218,6 +298,11 @@ def plan_parts(images, limit=WI_UPLOAD_LIMIT, keep_bursts=True) -> list[list[str
     parts: list[list[str]] = []
     cur: list[str] = []
     for g in groups:
+        if len(g) > limit:
+            raise OversizedBurstError(
+                f"Trigger event {event_key(g[0])!r} contains {len(g)} images, "
+                f"exceeding the {limit}-image limit"
+            )
         if cur and len(cur) + len(g) > limit:
             parts.append(cur)
             cur = []
@@ -229,13 +314,14 @@ def plan_parts(images, limit=WI_UPLOAD_LIMIT, keep_bursts=True) -> list[list[str
 
 def plan_device(device_dir, limit=WI_UPLOAD_LIMIT, keep_bursts=True) -> DevicePlan:
     """Build a :class:`DevicePlan` from the device's full image inventory."""
+    limit = _validate_limit(limit)
     device_dir = Path(device_dir)
     loc = collect_inventory(device_dir)
     filenames = sorted(loc)
-    plan = DevicePlan(device_dir=device_dir, filenames=filenames, loc=loc)
+    plan = DevicePlan(device_dir=device_dir, filenames=filenames, limit=limit, loc=loc)
 
     if len(filenames) <= limit:
-        if list_part_dirs(device_dir):
+        if any(path.parent != device_dir for path in loc.values()):
             plan.warnings.append(
                 "part folders present but total images are within the limit — an "
                 "odd state (limit changed?); run --undo to flatten, then re-split."
@@ -244,11 +330,6 @@ def plan_device(device_dir, limit=WI_UPLOAD_LIMIT, keep_bursts=True) -> DevicePl
 
     for i, files in enumerate(plan_parts(filenames, limit, keep_bursts), start=1):
         part = Part(name=f"{device_dir.name}_{i}", files=files)
-        if len(files) > limit:
-            plan.warnings.append(
-                f"{part.name} holds {len(files)} images (> limit {limit}): a single "
-                f"trigger event exceeds the limit and cannot be split further."
-            )
         plan.parts.append(part)
     return plan
 
@@ -266,19 +347,149 @@ def plan_root(root, limit=WI_UPLOAD_LIMIT, suffixes=DEFAULT_DEVICE_SUFFIXES,
 # Execution
 # ---------------------------------------------------------------------------
 
-def apply_device_split(plan: DevicePlan, move=True, dry_run=True, log=None) -> dict:
+@dataclass
+class SplitVerification:
+    """Result of the inexpensive filename/count verification after a split."""
+
+    device_dir: Path
+    image_count: int
+    part_counts: dict[str, int]
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def verify_device_split(plan: DevicePlan) -> SplitVerification:
+    """Verify that ``plan`` is fully realized without reading image contents."""
+    loc, loose, part_files = _scan_inventory(plan.device_dir)
+    expected_parts = {part.name: set(part.files) for part in plan.parts}
+    result = SplitVerification(
+        device_dir=plan.device_dir,
+        image_count=len(loc),
+        part_counts={name: len(files) for name, files in sorted(part_files.items())},
+    )
+
+    if loose:
+        result.errors.append(f"{len(loose)} image(s) remain loose in the device folder")
+
+    actual_names = set(loc)
+    expected_names = set(plan.filenames)
+    missing_names = expected_names - actual_names
+    unexpected_names = actual_names - expected_names
+    if missing_names:
+        result.errors.append(f"{len(missing_names)} planned image(s) are missing")
+    if unexpected_names:
+        result.errors.append(f"{len(unexpected_names)} unexpected image(s) were found")
+
+    missing_parts = set(expected_parts) - set(part_files)
+    unexpected_parts = set(part_files) - set(expected_parts)
+    if missing_parts:
+        result.errors.append(
+            "Missing part folder(s): " + ", ".join(sorted(missing_parts))
+        )
+    if unexpected_parts:
+        result.errors.append(
+            "Unexpected part folder(s): " + ", ".join(sorted(unexpected_parts))
+        )
+
+    for part_name, expected_files in expected_parts.items():
+        actual_files = part_files.get(part_name, set())
+        if len(actual_files) > plan.limit:
+            result.errors.append(
+                f"{part_name} contains {len(actual_files)} images, exceeding limit {plan.limit}"
+            )
+        missing = expected_files - actual_files
+        extra = actual_files - expected_files
+        if missing or extra:
+            result.errors.append(
+                f"{part_name} differs from plan: {len(missing)} missing, {len(extra)} unexpected"
+            )
+
+    return result
+
+
+def apply_device_split(
+    plan: DevicePlan,
+    move=True,
+    dry_run=True,
+    log=None,
+    is_cancelled=None,
+) -> dict:
     """Execute a plan: create part subfolders and place each image.
 
     Only files not already sitting in their planned part are touched, so this is
-    idempotent and safe to re-run after an interruption. Moving uses an atomic
-    same-volume rename; ``move=False`` copies instead (preserving mtimes),
-    leaving the originals loose in the device root.
+    idempotent and safe to re-run after an interruption. ``is_cancelled`` is an
+    optional callback checked between individual moves; cancellation returns a
+    partial, resumable result. Copy mode is rejected because it would violate
+    the unique-image and no-loose-images split contract.
     """
     log = log or (lambda *_: None)
-    result = {"device": str(plan.device_dir), "created": [], "placed": 0, "skipped": False}
+    is_cancelled = is_cancelled or (lambda: False)
+    result = {
+        "device": str(plan.device_dir),
+        "created": [],
+        "placed": 0,
+        "skipped": False,
+        "cancelled": False,
+        "verification": None,
+    }
+    if not move:
+        raise SplitError("Copy mode is not supported; WI splitting must move images")
     if not plan.needs_split:
         result["skipped"] = True
         return result
+
+    # Preflight the complete plan before changing anything. A stale plan or an
+    # existing destination is a hard failure, never a reason to skip silently.
+    try:
+        current_loc, _loose, current_parts = _scan_inventory(plan.device_dir)
+    except DuplicateImageError as exc:
+        raise SplitCollisionError(str(exc)) from exc
+    expected_names = set(plan.filenames)
+    current_names = set(current_loc)
+    missing_names = expected_names - current_names
+    unexpected_names = current_names - expected_names
+    if missing_names or unexpected_names:
+        raise SplitCollisionError(
+            "Filesystem changed after planning: "
+            f"{len(missing_names)} planned image(s) missing, "
+            f"{len(unexpected_names)} unexpected image(s) present"
+        )
+    moved_since_plan = [
+        name for name in plan.filenames if current_loc[name] != plan.loc.get(name)
+    ]
+    if moved_since_plan:
+        raise SplitCollisionError(
+            f"Filesystem changed after planning: {len(moved_since_plan)} image(s) moved; "
+            "build a fresh plan before resuming"
+        )
+    expected_part_names = {part.name for part in plan.parts}
+    unexpected_part_names = set(current_parts) - expected_part_names
+    if unexpected_part_names:
+        raise SplitCollisionError(
+            "Unexpected existing part folder(s): "
+            + ", ".join(sorted(unexpected_part_names))
+        )
+
+    for part in plan.parts:
+        part_dir = plan.device_dir / part.name
+        if part_dir.exists() and not part_dir.is_dir():
+            raise SplitCollisionError(f"Part destination is not a directory: {part_dir}")
+        for fn in part.files:
+            src = plan.loc.get(fn)
+            dst = part_dir / fn
+            if src == dst:
+                if not dst.is_file():
+                    raise SplitCollisionError(f"Planned image is missing: {dst}")
+                continue
+            if src is None or not src.is_file():
+                raise SplitCollisionError(f"Planned source image is missing: {src or fn}")
+            if dst.exists():
+                raise SplitCollisionError(
+                    f"Refusing to overwrite existing destination {dst} with {src}"
+                )
 
     for part in plan.parts:
         part_dir = plan.device_dir / part.name
@@ -288,20 +499,35 @@ def apply_device_split(plan: DevicePlan, move=True, dry_run=True, log=None) -> d
             note = f" ({already} already placed)" if already else ""
             log(f"    {part.name}/  <- {len(part.files)} images ({len(todo)} to move){note}")
             continue
+        if is_cancelled():
+            result["cancelled"] = True
+            return result
         if todo and not part_dir.exists():
             part_dir.mkdir()
             result["created"].append(part.name)
         for fn in todo:
+            if is_cancelled():
+                result["cancelled"] = True
+                return result
             src = plan.loc.get(fn)
             dst = part_dir / fn
-            if dst.exists() or src is None or not src.exists():
-                continue
-            if move:
-                shutil.move(str(src), str(dst))
-            else:
-                shutil.copy2(str(src), str(dst))
+            # Recheck immediately before the move in case the filesystem changed
+            # after preflight. Never overwrite or silently skip a conflict.
+            if src is None or not src.is_file():
+                raise SplitCollisionError(f"Source disappeared during split: {src or fn}")
+            if dst.exists():
+                raise SplitCollisionError(f"Destination appeared during split: {dst}")
+            shutil.move(str(src), str(dst))
             result["placed"] += 1
         log(f"    {part.name}/  <- {len(part.files)} images")
+
+    verification = verify_device_split(plan)
+    result["verification"] = verification
+    if not verification.ok:
+        raise SplitVerificationError(
+            f"Split verification failed for {plan.device_dir}: "
+            + "; ".join(verification.errors)
+        )
     return result
 
 

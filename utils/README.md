@@ -406,9 +406,11 @@ Per device it:
    in `<device>_N` parts, so it can resume a half-finished run).
 2. Plans parts of ≤ 15,000, never cutting a trigger burst (`…_00001_1/_2/_3`
    stay together, so each part lands at or just under the limit).
-3. **Moves** each image into its part folder (atomic same-volume rename, no
-   duplicate storage). The `<device>_manifest.json` fixity sidecar is left
-   untouched in the device root.
+3. **Moves** each image into its part folder (no duplicate storage), then checks
+   filenames and part counts without rereading image contents. Each same-volume
+   file move is atomic; the complete operation is resumable rather than
+   transactional. The `<device>_manifest.json` fixity sidecar is left untouched
+   in the device root.
 
 The reusable logic lives in `cassn/core/wi_split.py`; this file is just the CLI.
 
@@ -454,6 +456,10 @@ python utils/split_for_wi.py \
   spinning HDD can take a while — that's disk speed, not a hang.
 - **Reversible.** `--undo` moves every part's images back up and removes the
   emptied part folders. A round-trip restores the folder exactly.
+- **Verified.** A completed split is accepted only when every planned filename
+  appears exactly once, no image remains loose, and every part respects the
+  configured limit. Invalid limits, duplicate names, and destination collisions
+  stop with an error rather than overwriting or silently skipping a file.
 - **Safe against re-matching.** Part folders (`p1_ML_1`) never end in `_ML` /
   `_SA`, so re-scans can't recurse into prior output.
 - On **Box**, the moves sync as moves; expect Box Drive to churn through the
