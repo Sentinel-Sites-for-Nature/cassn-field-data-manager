@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -32,214 +31,14 @@ from PySide6.QtCore import QThread, Signal
 
 from cassn.box.auth import BoxConfig, get_box_client
 from cassn.box.client import BoxStorage
+from cassn.box.verification import is_orphan_on_box, verify_box_hashes
 from cassn.core.classification import sanitize_box_folder_name
-from cassn.core.hashing import sha1 as compute_file_sha1
+from cassn.core.inventory import index_inventory_by_storage_relpath
 from cassn.core.quality_control import append_qc_report, qc_path_for
 
 # Box API field projection for the verify/fixity walks: enough to navigate and
 # to read each file's server-side SHA-1 without pulling full item payloads.
 _SHA1_FIELDS = ["id", "type", "name", "sha1"]
-
-# Files that legitimately live on Box but are not in the local file_inventory
-# (metadata/QC sidecars). Used to exclude them from orphan ("extra on Box")
-# detection so they aren't flagged as unexpected.
-_EXPECTED_METADATA = {
-    "image_file_metadata.csv",
-    "audio_file_metadata.csv",
-    "deployment_event_record.json",
-    "qc/qc_report.json",
-    "qc/box_upload_manifest.json",
-    "qc/box_upload_verification.json",
-    "qc/deployment_summary.txt",
-}
-
-
-def _is_orphan_on_box(path: str) -> bool:
-    """True if a Box-only path is an unexpected file (not an allowed sidecar)."""
-    return (
-        path not in _EXPECTED_METADATA
-        and not path.startswith("qc/lookup_snapshot/")
-        and not Path(path).name.startswith("wildlife_insights_")
-        and not Path(path).name.endswith("_manifest.json")
-    )
-
-
-def verify_box_hashes(
-    storage: BoxStorage,
-    deploy_id: str,
-    deploy_name: str,
-    file_inventory: list,
-    deployment_folder: Path,
-    *,
-    detect_orphans: bool = False,
-    hash_retry: int = 0,
-    hash_retry_delay: float = 2.5,
-    progress=None,
-    is_cancelled=None,
-) -> tuple[bool, str, list]:
-    """Compare local raw_data bytes against Box via SHA-1, the shared core of the
-    manual fixity check and the automatic post-upload verification.
-
-    Recursively reads every Box file's server-side SHA-1, walks local
-    ``raw_data/``, and reports hash mismatches, files missing from Box, and Box
-    files whose SHA-1 the API has not yet computed. When ``detect_orphans`` is
-    set it also flags Box-only files that are not in the local inventory (after
-    the metadata-sidecar allowlist).
-
-    Box can lag computing a file's SHA-1 right after upload; ``hash_retry`` (with
-    ``hash_retry_delay`` seconds between tries) re-fetches the Box listing for the
-    still-unavailable files before reporting them as unavailable.
-
-    ``progress`` (``checked, total, filename``) and ``is_cancelled`` (``-> bool``)
-    are optional callbacks so a QThread can drive a progress bar and cancel.
-
-    Returns ``(ok, summary, issues)`` matching the FixityCheckThread contract.
-    """
-
-    def _cancelled() -> bool:
-        return bool(is_cancelled and is_cancelled())
-
-    def _emit(checked, total, filename):
-        if progress:
-            progress(checked, total, filename)
-
-    # 1) Recursively collect every Box file's SHA-1, keyed by (parent_folder, filename).
-    # This mirrors the local layout raw_data/<device_label>/<filename>.
-    box_hashes: dict[tuple[str, str], str] = {}
-    box_paths: set[str] = set()  # relative paths, for orphan detection
-    _emit(0, 0, "Listing Box folder contents…")
-
-    def _collect():
-        box_hashes.clear()
-        box_paths.clear()
-
-        def _walk(folder_id, parent_name, prefix: tuple):
-            if _cancelled():
-                return
-            for it in storage.iter_folder_items(folder_id, fields=_SHA1_FIELDS):
-                if it.type == "file":
-                    sha1 = getattr(it, "sha_1", None) or getattr(it, "sha1", None) or ""
-                    box_hashes[(parent_name, it.name)] = sha1.lower()
-                    box_paths.add(str(Path(*prefix, it.name)) if prefix else it.name)
-                elif it.type == "folder":
-                    _walk(it.id, it.name, (*prefix, it.name))
-
-        _walk(deploy_id, deploy_name, ())
-
-    _collect()
-    if _cancelled():
-        return False, "Verification cancelled.", []
-
-    # 2) Walk local raw_data/ and verify each file's bytes against Box.
-    raw_data_dir = deployment_folder / "raw_data"
-    if not raw_data_dir.is_dir():
-        return False, "raw_data/ directory not found.", []
-
-    files_to_check = [
-        f for f in raw_data_dir.rglob("*") if f.is_file() and BoxStorage.should_upload_file(f)
-    ]
-    inventory_sha1_by_key = {
-        (e.get("device_label", ""), e.get("new_filename", "")): e.get("file_hash_sha1", "")
-        for e in file_inventory
-        if e.get("device_label") and e.get("new_filename")
-    }
-    inventory_entry_by_key = {
-        (e.get("device_label", ""), e.get("new_filename", "")): e
-        for e in file_inventory
-        if e.get("device_label") and e.get("new_filename")
-    }
-    total = len(files_to_check)
-    mismatches = []  # local SHA-1 != Box SHA-1
-    missing_from_box = []  # local file has no counterpart on Box
-    box_hash_unavailable = []  # Box file found, but API has not returned a SHA-1
-    checked = 0
-
-    for fp in files_to_check:
-        if _cancelled():
-            return False, f"Verification cancelled after {checked}/{total} files.", []
-        _emit(checked, total, fp.name)
-        key = (fp.parent.name, fp.name)
-        box_sha1 = box_hashes.get(key)
-        if box_sha1 is None:
-            missing_from_box.append(f"{fp.parent.name}/{fp.name}")
-        elif not box_sha1:
-            box_hash_unavailable.append(f"{fp.parent.name}/{fp.name}")
-        else:
-            local_sha1 = inventory_sha1_by_key.get(key)
-            if not local_sha1:
-                local_sha1 = compute_file_sha1(fp)
-                entry = inventory_entry_by_key.get(key)
-                if entry is not None:
-                    entry["file_hash_sha1"] = local_sha1
-            if local_sha1.lower() != box_sha1:
-                mismatches.append(
-                    {
-                        "filename": f"{fp.parent.name}/{fp.name}",
-                        "local_sha1": local_sha1,
-                        "box_sha1": box_sha1,
-                    }
-                )
-        checked += 1
-
-    # 3) Retry on box_hash_unavailable: Box may still be computing a freshly
-    # uploaded file's SHA-1. Re-fetch the listing after a short delay and
-    # re-resolve only the still-unavailable files before reporting them.
-    attempt = 0
-    while box_hash_unavailable and attempt < hash_retry and not _cancelled():
-        attempt += 1
-        time.sleep(hash_retry_delay)
-        _emit(checked, total, f"Re-checking {len(box_hash_unavailable)} Box hash(es) (retry {attempt})…")
-        _collect()
-        still_unavailable = []
-        for rel in box_hash_unavailable:
-            parent_name, name = rel.split("/", 1)
-            key = (parent_name, name)
-            box_sha1 = box_hashes.get(key)
-            if not box_sha1:
-                still_unavailable.append(rel)
-                continue
-            local_sha1 = inventory_sha1_by_key.get(key)
-            if not local_sha1:
-                fp = raw_data_dir / parent_name / name
-                local_sha1 = compute_file_sha1(fp) if fp.is_file() else ""
-                entry = inventory_entry_by_key.get(key)
-                if entry is not None and local_sha1:
-                    entry["file_hash_sha1"] = local_sha1
-            if local_sha1 and local_sha1.lower() != box_sha1:
-                mismatches.append(
-                    {"filename": rel, "local_sha1": local_sha1, "box_sha1": box_sha1}
-                )
-        box_hash_unavailable = still_unavailable
-
-    _emit(checked, total, "")
-
-    # 4) Optional orphan detection (extra-on-Box files not in local inventory).
-    orphans: list[str] = []
-    if detect_orphans:
-        local_paths = {
-            str(Path("raw_data", e["device_label"], e["new_filename"]))
-            for e in file_inventory
-            if e.get("device_label") and e.get("new_filename")
-        }
-        orphans = sorted(p for p in (box_paths - local_paths) if _is_orphan_on_box(p))
-
-    # 5) Compose result.
-    all_ok = not mismatches and not missing_from_box and not box_hash_unavailable and not orphans
-    summary = (
-        f"End-to-end hash verification: {checked} local file(s) checked against Box. "
-        f"{len(mismatches)} hash mismatch(es), {len(missing_from_box)} file(s) missing from Box, "
-        f"{len(box_hash_unavailable)} Box hash(es) unavailable."
-    )
-    if detect_orphans:
-        summary += f" {len(orphans)} unexpected file(s) on Box."
-    issues = (
-        [{"type": "mismatch", "filename": m["filename"]} for m in mismatches]
-        + [{"type": "missing", "filename": n} for n in missing_from_box]
-        + [{"type": "box_hash_unavailable", "filename": n} for n in box_hash_unavailable]
-        + [{"type": "extra_on_box", "filename": n} for n in orphans]
-    )
-    return all_ok, summary, issues
-
 
 def _box_retry_delay(exc, attempt: int, *, base: float = 1.0, cap: float = 30.0) -> float:
     """Seconds to wait before the next upload retry.
@@ -368,26 +167,22 @@ class BoxUploadThread(QThread):
             skipped = 0
             versioned = 0
 
-            # Build hash lookups from file_inventory (name → sha256 / sha1)
-            hash_lookup = {
-                e.get("new_filename", ""): e.get("file_hash_sha256", "")
-                for e in self.file_inventory
-            }
-            sha1_lookup = {
-                e.get("new_filename", ""): e.get("file_hash_sha1", "")
-                for e in self.file_inventory
-            }
+            # Full paths keep hashes unambiguous across flat and split layouts.
+            inventory_entry_by_path = index_inventory_by_storage_relpath(
+                self.file_inventory
+            )
 
             # Write pre-upload manifest
-            manifest_entries = [
-                {
-                    "relative_path": str(fp.relative_to(self.deployment_folder)),
+            manifest_entries = []
+            for fp in uploadable_files:
+                relative_path = fp.relative_to(self.deployment_folder).as_posix()
+                entry = inventory_entry_by_path.get(relative_path, {})
+                manifest_entries.append({
+                    "relative_path": relative_path,
                     "filename": fp.name,
-                    "sha256": hash_lookup.get(fp.name, ""),
-                    "sha1": sha1_lookup.get(fp.name, ""),
-                }
-                for fp in uploadable_files
-            ]
+                    "sha256": entry.get("file_hash_sha256", ""),
+                    "sha1": entry.get("file_hash_sha1", ""),
+                })
             manifest_data = {
                 "generated": datetime.now().isoformat(),
                 "deployment": self.deployment_folder.name,
@@ -442,28 +237,36 @@ class BoxUploadThread(QThread):
                 backoff wait wakes immediately if the user cancels.
                 """
                 if self._cancel_event.is_set():
-                    return ("cancelled", str(file_path.relative_to(self.deployment_folder)), None)
+                    return (
+                        "cancelled",
+                        file_path.relative_to(self.deployment_folder).as_posix(),
+                        None,
+                    )
                 rel_path = file_path.relative_to(self.deployment_folder)
                 last_err = None
                 max_attempts = 3
                 for attempt in range(1, max_attempts + 1):
                     if self._cancel_event.is_set():
-                        return ("cancelled", str(rel_path), None)
+                        return ("cancelled", rel_path.as_posix(), None)
                     try:
                         action = storage.upload_file_with_path(file_path, deploy_id, rel_path)
-                        return ("ok", str(rel_path), f"{action}: {rel_path}")
+                        return ("ok", rel_path.as_posix(), f"{action}: {rel_path}")
                     except Exception as e:
                         # A 409 "already exists" means the file is on Box — typically a
                         # prior attempt landed it but its ack was lost. Treat as success
                         # (the post-upload SHA-1 check verifies the bytes), not a failure.
                         if _is_already_exists(e):
-                            return ("ok", str(rel_path), f"uploaded: {rel_path}")
+                            return ("ok", rel_path.as_posix(), f"uploaded: {rel_path}")
                         last_err = e
                         if attempt < max_attempts:
                             # Event.wait() doubles as an interruptible sleep.
                             if self._cancel_event.wait(_box_retry_delay(e, attempt)):
-                                return ("cancelled", str(rel_path), None)
-                return ("fail", str(rel_path), str(last_err)[:200] if last_err else "unknown error")
+                                return ("cancelled", rel_path.as_posix(), None)
+                return (
+                    "fail",
+                    rel_path.as_posix(),
+                    str(last_err)[:200] if last_err else "unknown error",
+                )
 
             with ThreadPoolExecutor(max_workers=self.UPLOAD_WORKERS) as ex:
                 futures = {ex.submit(_upload_one, fp): fp for fp in uploadable_files}
@@ -472,7 +275,9 @@ class BoxUploadThread(QThread):
                         status, rel_path, payload = fut.result()
                     except Exception as e:
                         # Defensive: shouldn't happen since _upload_one catches its own
-                        rel_path = str(futures[fut].relative_to(self.deployment_folder))
+                        rel_path = futures[fut].relative_to(
+                            self.deployment_folder
+                        ).as_posix()
                         status, payload = "fail", str(e)[:200]
 
                     with self._state_lock:
@@ -639,15 +444,11 @@ class BoxVerifyThread(QThread):
 
             box_paths = storage.collect_file_paths(deploy_id, fields=_SHA1_FIELDS)
 
-            local_paths = {
-                str(Path("raw_data", e["device_label"], e["new_filename"]))
-                for e in self.file_inventory
-                if e.get("device_label") and e.get("new_filename")
-            }
+            local_paths = set(index_inventory_by_storage_relpath(self.file_inventory))
             missing = local_paths - box_paths
             # Orphan ("extra on Box") detection, after the metadata-sidecar allowlist
             # shared with the automatic post-upload verify.
-            extra = {path for path in (box_paths - local_paths) if _is_orphan_on_box(path)}
+            extra = {path for path in (box_paths - local_paths) if is_orphan_on_box(path)}
 
             issues = [
                 {"type": "missing_from_box", "filename": n} for n in sorted(missing)

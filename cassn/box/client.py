@@ -24,7 +24,7 @@ only the duplication is gone.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from cassn.config import CHUNKED_UPLOAD_THRESHOLD
 from cassn.core.classification import sanitize_box_folder_name
@@ -124,8 +124,8 @@ class BoxStorage:
     def collect_file_paths(self, folder_id, *, fields: list[str] | None = None) -> set[str]:
         """Recursively collect every file's path under ``folder_id``.
 
-        Paths are relative to ``folder_id`` and rendered with
-        :class:`pathlib.Path` (``"sub/dir/file.wav"``), matching the manifest's
+        Paths are relative to ``folder_id`` and always use POSIX separators
+        (``"sub/dir/file.wav"``), matching the portable inventory and manifest
         ``relative_path`` format used for reconciliation.
         """
         paths: set[str] = set()
@@ -133,7 +133,7 @@ class BoxStorage:
         def _walk(fid, prefix: tuple) -> None:
             for item in self.iter_folder_items(fid, fields=fields):
                 if item.type == "file":
-                    paths.add(str(Path(*prefix, item.name)) if prefix else item.name)
+                    paths.add(PurePosixPath(*prefix, item.name).as_posix())
                 elif item.type == "folder":
                     _walk(item.id, (*prefix, item.name))
 

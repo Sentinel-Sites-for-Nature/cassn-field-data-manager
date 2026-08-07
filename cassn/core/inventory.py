@@ -29,11 +29,90 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from cassn.core.audio_metadata import hz_to_khz
 from cassn.core.classification import classify_file
 from cassn.core.quality_control import append_qc_report, qc_path_for
+
+
+# ---------------------------------------------------------------------------
+# Staged storage paths
+# ---------------------------------------------------------------------------
+
+def _canonical_storage_relpath(value) -> str:
+    """Normalize and validate a deployment-relative inventory path."""
+    raw = str(value or "").strip().replace("\\", "/")
+    path = PurePosixPath(raw)
+    if (
+        not raw
+        or path.is_absolute()
+        or ".." in path.parts
+        or not path.parts
+        or path.parts[0] != "raw_data"
+    ):
+        raise ValueError(f"Invalid storage_relpath: {value!r}")
+    return path.as_posix()
+
+
+def default_storage_relpath(device_label, filename) -> str:
+    """Return the historical flat path for one inventory identity."""
+    device_label = str(device_label or "").strip()
+    filename = str(filename or "").strip()
+    if not device_label or not filename:
+        return ""
+    return _canonical_storage_relpath(
+        PurePosixPath("raw_data", device_label, filename).as_posix()
+    )
+
+
+def inventory_storage_relpath(entry: dict) -> str:
+    """Return one entry's physical path with legacy flat fallback.
+
+    Sessions written before split-aware storage do not contain
+    ``storage_relpath``. They continue to resolve as
+    ``raw_data/<device_label>/<new_filename>``.
+    """
+    device_label = str(entry.get("device_label", "") or "").strip()
+    filename = str(entry.get("new_filename", "") or "").strip()
+    stored = entry.get("storage_relpath", "")
+    if not stored:
+        return default_storage_relpath(device_label, filename)
+
+    relative_path = _canonical_storage_relpath(stored)
+    parts = PurePosixPath(relative_path).parts
+    if filename and parts[-1] != filename:
+        raise ValueError(
+            f"storage_relpath filename {parts[-1]!r} does not match {filename!r}"
+        )
+    if device_label and (len(parts) < 3 or parts[1] != device_label):
+        stored_device = parts[1] if len(parts) > 1 else ""
+        raise ValueError(
+            f"storage_relpath device {stored_device!r} does not match {device_label!r}"
+        )
+    return relative_path
+
+
+def set_inventory_storage_relpath(entry: dict, relative_path) -> str:
+    """Validate, store, and return a new physical path for an inventory entry."""
+    candidate = dict(entry)
+    candidate["storage_relpath"] = str(relative_path)
+    normalized = inventory_storage_relpath(candidate)
+    entry["storage_relpath"] = normalized
+    return normalized
+
+
+def index_inventory_by_storage_relpath(file_inventory) -> dict[str, dict]:
+    """Index complete inventory entries by canonical deployment-relative path."""
+    indexed: dict[str, dict] = {}
+    for entry in file_inventory:
+        relative_path = inventory_storage_relpath(entry)
+        if not relative_path:
+            continue
+        if relative_path in indexed:
+            raise ValueError(f"Duplicate inventory storage path: {relative_path}")
+        indexed[relative_path] = entry
+    return indexed
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +296,9 @@ def build_inventory_record(
     return {
         'original_filename': original_filename,
         'new_filename': new_filename,
+        # Physical path relative to the deployment folder. This begins flat and
+        # is updated when an oversized camera folder is split for WI upload.
+        'storage_relpath': default_storage_relpath(device_label, new_filename),
         'plot_number': plot_num,
         'plot_label': plot_label,
         'device_type': dev_code,

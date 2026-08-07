@@ -2,11 +2,17 @@
 import json
 import os
 
+import pytest
+
 from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
+    default_storage_relpath,
+    index_inventory_by_storage_relpath,
+    inventory_storage_relpath,
     refresh_legacy_device_manifest,
     reconcile_device_dir,
+    set_inventory_storage_relpath,
     sorted_walk,
 )
 
@@ -63,6 +69,68 @@ def test_already_copied_relpaths_ignores_entries_without_relpath():
         {"device_label": "p1_ML"},  # pre-fix entry, no source_relpath
     ]
     assert already_copied_relpaths(inv, "p1_ML") == {"a/x.JPG"}
+
+
+def test_inventory_storage_relpath_falls_back_for_legacy_entries():
+    entry = {"device_label": "p1_ML", "new_filename": "image.jpg"}
+
+    assert default_storage_relpath("p1_ML", "image.jpg") == (
+        "raw_data/p1_ML/image.jpg"
+    )
+    assert inventory_storage_relpath(entry) == "raw_data/p1_ML/image.jpg"
+
+
+def test_inventory_storage_relpath_supports_nested_split_paths():
+    entry = {
+        "device_label": "p1_ML",
+        "new_filename": "image.jpg",
+        "storage_relpath": r"raw_data\p1_ML\p1_ML_2\image.jpg",
+    }
+
+    assert inventory_storage_relpath(entry) == (
+        "raw_data/p1_ML/p1_ML_2/image.jpg"
+    )
+    assert set_inventory_storage_relpath(
+        entry, "raw_data/p1_ML/p1_ML_3/image.jpg"
+    ) == "raw_data/p1_ML/p1_ML_3/image.jpg"
+    assert entry["storage_relpath"] == "raw_data/p1_ML/p1_ML_3/image.jpg"
+
+
+@pytest.mark.parametrize(
+    "storage_relpath",
+    [
+        "/raw_data/p1_ML/image.jpg",
+        "raw_data/p1_ML/../p2_ML/image.jpg",
+        "elsewhere/p1_ML/image.jpg",
+        "raw_data/p2_ML/image.jpg",
+        "raw_data/p1_ML/not-image.jpg",
+    ],
+)
+def test_inventory_storage_relpath_rejects_invalid_or_inconsistent_paths(
+    storage_relpath,
+):
+    entry = {
+        "device_label": "p1_ML",
+        "new_filename": "image.jpg",
+        "storage_relpath": storage_relpath,
+    }
+
+    with pytest.raises(ValueError):
+        inventory_storage_relpath(entry)
+
+
+def test_index_inventory_by_storage_relpath_rejects_collisions():
+    entries = [
+        {"device_label": "p1_ML", "new_filename": "image.jpg"},
+        {
+            "device_label": "p1_ML",
+            "new_filename": "image.jpg",
+            "storage_relpath": "raw_data/p1_ML/image.jpg",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Duplicate inventory storage path"):
+        index_inventory_by_storage_relpath(entries)
 
 
 def test_reconcile_device_dir_removes_only_orphans(tmp_path):
