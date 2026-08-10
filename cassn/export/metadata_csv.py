@@ -32,17 +32,14 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     """Build ``(image_rows, audio_rows)`` from the file inventory and lookups.
 
     ``lookups`` is a :class:`cassn.lookups.LookupTables`; this reads its
-    ``reserves`` (site full name), ``arus`` (per-plot install info),
-    ``soundhub_config`` (ARU defaults), ``cameras`` (WI per-camera metadata) and
-    ``wi_config`` (WI project defaults).
+    ``reserves`` (site full name), event-scoped ``arus`` / ``cameras`` views
+    derived from device-level deployments, ``soundhub_config`` (ARU defaults),
+    and ``wi_config`` (WI project defaults).
     """
     org = metadata.get('organization', '')
     site = metadata.get('site', '')
-    start = metadata.get('deployment_start', '')
     end = metadata.get('deployment_end', '')
     observer = metadata.get('observer', '')
-    end_nodash = end.replace('-', '')
-
     # Site full name and code from reserves (list of (site_code, site_name))
     site_full_name = ''
     site_code = site  # fallback
@@ -51,9 +48,10 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             site_full_name = sn
             break
 
-    deployment_event_id = f"{org}_{site}_{end_nodash}"
+    deployment_event_id = metadata.get("deployment_event_id", "")
+    if not deployment_event_id:
+        raise ValueError("No Survey123 deployment_event_id is active")
     subproject = subproject_for(site, end)
-    event_name = deployment_event_name(start, end)
     now_iso = datetime.now(timezone.utc).isoformat()
 
     soundhub_config = lookups.soundhub_config
@@ -86,12 +84,30 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         except (TypeError, ValueError):
             plot_num_int = None
 
-        deployment_id = f"{org}_{site}_plot{plot_num}_{dev_type}_{end_nodash}"
         placename = f"{site}_plot{plot_num}"
 
-        # SoundHub physical lookup from ARUs.csv — keyed by (site, plot, device).
-        aru_key = (site_code, plot_num_int, dev_type)
-        aru_row = lookups.arus.get(aru_key, {})
+        # Event-scoped placement lookup from the new device-level
+        # deployments.csv. The compatibility views are populated only after a
+        # Survey123 round has been selected.
+        placement_key = (site_code, plot_num_int, dev_type)
+        if dev_type in {"ML", "SA"}:
+            placement_row = lookups.cameras.get(placement_key, {})
+            aru_row = {}
+        else:
+            placement_row = lookups.arus.get(placement_key, {})
+            aru_row = placement_row
+        deployment_id = placement_row.get("deployment_id", "")
+        if not deployment_id:
+            raise ValueError(
+                f"No Survey123 deployment row for {site_code} plot {plot_num} {dev_type}"
+            )
+        placement_start = placement_row.get("deployment_start_date", "")
+        placement_end = placement_row.get("deployment_end_date", "")
+        if not placement_start or not placement_end:
+            raise ValueError(
+                f"Incomplete Survey123 placement interval for "
+                f"{site_code} plot {plot_num} {dev_type}"
+            )
 
         # SoundHub config lookup (keyed by device type suffix)
         aru_container = soundhub_config.get(f'ARU_container_{dev_type}', '')
@@ -111,7 +127,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'subproject':         subproject,
             'subproject_design':  '',
             'placename':          placename,
-            'event_name':         event_name,
+            'event_name':         deployment_event_name(placement_start, placement_end),
             'event_description':  '',
             'plot_number':        plot_num,
             'device_type':        dev_type,
@@ -137,8 +153,8 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             cam_key = (site, plot_num_int, dev_type) if plot_num_int else None
             cam = lookups.cameras.get(cam_key, {}) if cam_key else {}
             row = {**base,
-                'start_date':    f"{start} 00:00:00" if start else '',
-                'end_date':      f"{end} 23:59:59"   if end   else '',
+                'start_date':    f"{placement_start} 00:00:00",
+                'end_date':      f"{placement_end} 23:59:59",
                 'recorded_by':   observer,
                 'camera_id':     entry.get('camera_id', ''),
                 'camera_serial_exif': entry.get('camera_serial_exif', ''),
@@ -177,8 +193,8 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
 
         else:  # audio or config
             # Actual recording range: CONFIG.TXT dates first, else the device's
-            # earliest/latest recorded-file date. (date_installed below stays the
-            # GUI deployment-event start date.)
+            # earliest/latest recorded-file date. ``date_installed`` below uses
+            # this device placement's Survey123 start date.
             dev_min, dev_max = dev_date_range.get(entry.get('device_label', ''), ('', ''))
             row = {**base,
                 'deployment_start_date': entry.get('deployment_start_date') or dev_min,
@@ -192,7 +208,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'filter_type_khz':       entry.get('filter_type_khz', ''),
                 'battery_voltage':       entry.get('battery_voltage', ''),
                 'temperature_c':         entry.get('temperature_c', ''),
-                'date_installed':        start,
+                'date_installed':        placement_start,
                 'deployment_start_time': entry.get('deployment_start_time', '') or soundhub_config.get(f'deployment_start_time_{dev_type}', ''),
                 'deployment_end_time':   entry.get('deployment_end_time', '')   or soundhub_config.get(f'deployment_end_time_{dev_type}', ''),
                 'frequency':             entry.get('frequency', '') or soundhub_config.get('frequency', ''),

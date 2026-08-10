@@ -130,7 +130,7 @@ from cassn.core.quality_control import (
 )
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
-from cassn.lookups import LookupTables
+from cassn.lookups import BOX_MANAGED_FILENAMES, LookupSchemaError, LookupTables
 
 
 # How often, at most, to persist session.json from inside the copy loop. The save
@@ -187,7 +187,8 @@ class FieldDataWizard(QMainWindow):
         # Check Box authentication
         self.box_authenticated = self.check_box_auth()
 
-        # Sync lookup tables from Box app_config folder (falls back to cache if offline)
+        # Sync only authoritative/static lookups from Box. Survey123 device
+        # inventory and placement history are installed separately and strict.
         self.sync_lookup_tables()
 
         # Build UI
@@ -253,7 +254,7 @@ class FieldDataWizard(QMainWindow):
             synced = []
 
             for item in items.entries:
-                if item.type != "file":
+                if item.type != "file" or item.name not in BOX_MANAGED_FILENAMES:
                     continue
                 local_path = LOCAL_DATA_DIR / item.name
                 content = client.downloads.download_file(item.id)
@@ -278,6 +279,14 @@ class FieldDataWizard(QMainWindow):
             except Exception:
                 pass
 
+        except LookupSchemaError as e:
+            QMessageBox.critical(
+                self,
+                "Survey123 Lookups Missing or Invalid",
+                f"The new device lookup system could not be loaded:\n\n{e}\n\n"
+                "The app will not fall back to cameras.csv or ARUs.csv.",
+            )
+            raise
         except Exception as e:
             print(f"Could not sync lookup tables from Box: {e}")
             self._handle_sync_failure(timestamp_path)
@@ -523,6 +532,28 @@ class FieldDataWizard(QMainWindow):
 
         self.site_code_edit.setText(self.metadata.get("site", ""))
 
+        # Restore the exact new-system round. Older saved sessions did not store
+        # the round ID, so map their dates to a Survey123 round without consulting
+        # legacy device files.
+        round_id = self.metadata.get("deployment_round_id", "")
+        event_id = self.metadata.get("deployment_event_id", "")
+        for combo_index in range(self.deploy_event_combo.count()):
+            event = self.deploy_event_combo.itemData(combo_index)
+            if not event:
+                continue
+            same_round = round_id and event["deployment_round_id"] == round_id
+            same_event = event_id and event["deployment_event_id"] == event_id
+            same_dates = (
+                event["deployment_start"] == self.metadata.get("deployment_start", "")
+                and event["deployment_end"] == self.metadata.get("deployment_end", "")
+            )
+            if same_round or same_event or same_dates:
+                self.deploy_event_combo.setCurrentIndex(combo_index)
+                self.on_deploy_event_changed(combo_index)
+                self.metadata["deployment_round_id"] = event["deployment_round_id"]
+                self.metadata["deployment_event_id"] = event["deployment_event_id"]
+                break
+
         start = QDate.fromString(self.metadata.get("deployment_start", ""), "yyyy-MM-dd")
         if start.isValid():
             self.deploy_start_date.setDate(start)
@@ -656,15 +687,28 @@ class FieldDataWizard(QMainWindow):
         self.site_code_edit.setReadOnly(True)
         form_layout.addRow("Site Code:", self.site_code_edit)
 
-        # Deployment-event picker — auto-fills the dates below from deployments.csv
-        # (populated per site). The date fields stay editable for manual override.
+        # Survey123 deployment-round picker. Device availability and placement
+        # metadata are scoped to this selection; there is no legacy/manual
+        # device-lookup fallback.
         self.deploy_event_combo = QComboBox()
         self.deploy_event_combo.setToolTip(
-            "Pick a known deployment event to auto-fill the start/end dates, "
-            "or choose manual entry to type them."
+            "Pick the Survey123 card-return round. The device grid and metadata "
+            "will use only placements in that round."
         )
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
-        form_layout.addRow("Deployment Event:", self.deploy_event_combo)
+        form_layout.addRow("Returned-Card Round:", self.deploy_event_combo)
+
+        # Open placements are useful field context, but they are not actionable
+        # downloads and must never supply an invented retrieval/end date.
+        self.current_deployment_status_label = QLabel("None recorded")
+        self.current_deployment_status_label.setWordWrap(True)
+        self.current_deployment_status_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self.current_deployment_status_label.setToolTip(
+            "Read-only Survey123 inventory for devices that remain in the field."
+        )
+        form_layout.addRow("Currently Deployed (read only):", self.current_deployment_status_label)
 
         # Deployment dates
         self.deploy_start_date = QDateEdit()
@@ -995,32 +1039,51 @@ class FieldDataWizard(QMainWindow):
         for code, name in self.lookups.reserves:
             if name == text:
                 self.site_code_edit.setText(code)
-                self.update_plot_labels(code)
                 self._populate_deploy_events(code)
                 return
         self.site_code_edit.setText("")
         self._populate_deploy_events("")
 
     def _populate_deploy_events(self, site_code):
-        """Fill the deployment-event picker for the selected site from deployments.csv."""
+        """Show returned-card rounds separately from read-only open placements."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("— Enter dates manually —", None)
-        for ev in self.lookups.deployments.get(site_code, []):
+        events = self.lookups.returned_rounds(site_code)
+        for ev in events:
             start, end = ev["deployment_start"], ev["deployment_end"]
-            label = f"{start} → {end}" if end else f"{start} → (still deployed)"
+            count = ev["device_count"]
+            label = f"{start} → {end}  ({count} devices)"
             combo.addItem(label, ev)
+        if not events:
+            combo.addItem("— No returned-card rounds —", None)
         combo.setCurrentIndex(0)
         combo.blockSignals(False)
+
+        current = self.lookups.current_rounds(site_code)
+        if current:
+            self.current_deployment_status_label.setText(
+                "\n".join(
+                    f"Since {event['deployment_start']}: "
+                    f"{event['device_count']} device"
+                    f"{'s' if event['device_count'] != 1 else ''} in the field"
+                    for event in current
+                )
+            )
+        else:
+            self.current_deployment_status_label.setText("None recorded")
+        self.on_deploy_event_changed(0)
 
     def on_deploy_event_changed(self, index):
         """Auto-fill the deployment start/end date pickers from the chosen event."""
         ev = self.deploy_event_combo.itemData(index)
         if not ev:
-            return  # manual entry — leave the date pickers untouched
+            self.lookups.clear_active_deployment_round()
+            self._rebuild_plot_grid(self.site_code_edit.text() or None)
+            return
+        self.lookups.activate_deployment_round(ev["deployment_round_id"])
         start = QDate.fromString(ev["deployment_start"], "yyyy-MM-dd")
         if start.isValid():
             self.deploy_start_date.setDate(start)
@@ -1028,6 +1091,7 @@ class FieldDataWizard(QMainWindow):
             end = QDate.fromString(ev["deployment_end"], "yyyy-MM-dd")
             if end.isValid():
                 self.deploy_end_date.setDate(end)
+        self._rebuild_plot_grid(self.site_code_edit.text() or None)
 
     def on_observer_changed(self, text):
         """Show/hide other observer entry"""
@@ -1057,11 +1121,8 @@ class FieldDataWizard(QMainWindow):
 
         # Determine plot numbers to show
         plot_names_for_reserve = self.lookups.plot_names.get(reserve_code, {}) if reserve_code else {}
-        if plot_names_for_reserve:
-            plot_numbers = sorted(plot_names_for_reserve.keys())
-        else:
-            # Fallback: generic 1–4 grid for unknown reserves or initial seed
-            plot_numbers = [1, 2, 3, 4]
+        plot_numbers = sorted(plot_names_for_reserve.keys())
+        available = self.lookups.available_device_keys()
 
         # Build a row per plot. row_idx maps to grid row (header is row 0).
         for row_idx, plot_num in enumerate(plot_numbers, start=1):
@@ -1075,6 +1136,11 @@ class FieldDataWizard(QMainWindow):
             col = 1
             for dev_code in DEVICE_TYPES.keys():
                 cb = QCheckBox()
+                is_available = (reserve_code, plot_num, dev_code) in available
+                cb.setEnabled(is_available)
+                cb.setChecked(is_available)
+                if not is_available:
+                    cb.setToolTip("No Survey123 device placement in the selected round")
                 self.device_checkboxes[plot_num][dev_code] = cb
                 self.grid_layout.addWidget(cb, row_idx, col, Qt.AlignCenter)
                 col += 1
@@ -1083,7 +1149,9 @@ class FieldDataWizard(QMainWindow):
         """Select all device checkboxes"""
         for plot_num in self.device_checkboxes:
             for dev_code in DEVICE_TYPES.keys():
-                self.device_checkboxes[plot_num][dev_code].setChecked(True)
+                checkbox = self.device_checkboxes[plot_num][dev_code]
+                if checkbox.isEnabled():
+                    checkbox.setChecked(True)
 
     def clear_all_devices(self):
         """Clear all device checkboxes"""
@@ -1121,6 +1189,16 @@ class FieldDataWizard(QMainWindow):
             QMessageBox.warning(self, "Missing Information", "Please enter a name for 'Other' option.")
             return
 
+        selected_event = self.deploy_event_combo.currentData()
+        if not selected_event:
+            QMessageBox.warning(
+                self,
+                "Missing Deployment Round",
+                "This site has no selectable Survey123 deployment round. "
+                "The app will not use the old camera or ARU lookup files.",
+            )
+            return
+
         # Store metadata
         reserve_name = self.reserve_combo.currentText()
         reserve_code = self.site_code_edit.text()
@@ -1129,6 +1207,8 @@ class FieldDataWizard(QMainWindow):
             "organization": self.org_combo.currentText(),
             "reserve_name": reserve_name,
             "site": reserve_code,
+            "deployment_round_id": selected_event["deployment_round_id"],
+            "deployment_event_id": selected_event["deployment_event_id"],
             "deployment_start": self.deploy_start_date.date().toString("yyyy-MM-dd"),
             "deployment_end": self.deploy_end_date.date().toString("yyyy-MM-dd"),
             "observer": self.observer_other_edit.text() if observer == "Other" else observer,
@@ -1167,7 +1247,7 @@ class FieldDataWizard(QMainWindow):
 
     def create_deployment_folder(self):
         """Create deployment folder in staging location based on deployment end date"""
-        folder_name = f"{self.metadata['organization']}_{self.metadata['site']}_{self.metadata['deployment_end'].replace('-', '')}"
+        folder_name = self.metadata["deployment_event_id"]
 
         self.current_deployment_folder = self.staging_root / folder_name
         self.current_deployment_folder.mkdir(parents=True, exist_ok=True)
@@ -1419,7 +1499,9 @@ class FieldDataWizard(QMainWindow):
 
         # Resolve physical device identifier
         if dev_code in AUDIO_DEVICE_TYPES:
-            device_id = parse_audiomoth_device_id(source_dir)
+            aru_key = (site, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
+            deployment_device_id = self.lookups.arus.get(aru_key, {}).get("device_id", "")
+            device_id = parse_audiomoth_device_id(source_dir) or deployment_device_id
             if not device_id:
                 self.log(f"  Warning: could not find AudioMoth Device ID in {source_dir}")
         else:
@@ -1427,7 +1509,10 @@ class FieldDataWizard(QMainWindow):
             cam_meta = self.lookups.cameras.get(cam_key, {})
             device_id = cam_meta.get("camera_id", "")
             if not device_id:
-                self.log(f"  Warning: camera_id missing for {site} plot {plot_num} {dev_code} — update cameras.csv")
+                self.log(
+                    f"  Warning: camera_id missing for {site} plot {plot_num} "
+                    f"{dev_code} in the selected Survey123 deployment round"
+                )
 
         # CONFIG.TXT — parse once per device folder (audio only; fast, critical for schedule fields)
         config_data = {}
@@ -1740,17 +1825,13 @@ class FieldDataWizard(QMainWindow):
             "collection list as Pending and can be processed normally."
         ))
 
-        # Plot picker — show all known plots for this reserve, plus an option to type a new one
+        # Plot picker — authoritative plots only. Device placement must also
+        # exist in the selected Survey123 round (validated below).
         plot_row = QHBoxLayout()
         plot_row.addWidget(QLabel("Plot:"))
         plot_combo = QComboBox()
-        plot_combo.setEditable(True)
-        if plot_names_for_reserve:
-            for num in sorted(plot_names_for_reserve.keys()):
-                plot_combo.addItem(f"{num} — {plot_names_for_reserve[num]}", userData=num)
-        else:
-            for num in (1, 2, 3, 4):
-                plot_combo.addItem(str(num), userData=num)
+        for num in sorted(plot_names_for_reserve.keys()):
+            plot_combo.addItem(f"{num} — {plot_names_for_reserve[num]}", userData=num)
         plot_row.addWidget(plot_combo, stretch=1)
         layout.addLayout(plot_row)
 
@@ -1796,6 +1877,14 @@ class FieldDataWizard(QMainWindow):
 
         dev_code = dev_combo.currentData()
         device_label = f"p{plot_num}_{dev_code}"
+
+        if (reserve_code, plot_num, dev_code) not in self.lookups.available_device_keys():
+            QMessageBox.warning(
+                self,
+                "Device Not in Deployment Round",
+                f"{device_label} has no placement in the selected Survey123 round.",
+            )
+            return
 
         # Reject duplicates
         if any(existing[3] == device_label for existing in self.devices):

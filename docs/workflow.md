@@ -3,10 +3,11 @@
 ```mermaid
 flowchart TD
     A["Launch app"] --> B["Load config from ~/.cassn_config"]
-    B --> D["Authenticate with Box and sync latest lookup tables"]
-    D --> F["Offer to reopen an existing session"]
+    B --> D["Sync authoritative sites, plots, and config defaults from Box"]
+    D --> E["Strictly load Survey123 devices.csv and device-level deployments.csv"]
+    E --> F["Offer to reopen an existing session"]
     F --> G["Enter deployment metadata"]
-    G --> H["Select organization, reserve, dates, observer, devices, and staging folder"]
+    G --> H["Select returned-card round; view current field inventory read-only"]
     H --> I["Create deployment folder and session.json"]
     I --> J["Choose a device row"]
     J --> K["Select SD card folder"]
@@ -41,12 +42,15 @@ flowchart TD
 ## Conceptual Stages
 
 1. **Startup and lookup tables**
-   - On launch the app reads `~/.cassn_config/config.json` and syncs sites, plots, camera, ARU, SoundHub, Wildlife Insights, and program config files from the Box `app_config` folder into `~/.cassn_config/lookup_tables/`.
-   - If Box is unreachable, the locally cached tables are reused after a confirmation prompt.
+   - On launch the app reads `~/.cassn_config/config.json` and syncs authoritative sites, plots, SoundHub, Wildlife Insights, and program config files from Box.
+   - The app then strictly loads Survey123-derived `devices.csv` and device-level `deployments.csv`. Box startup sync cannot overwrite them, and legacy camera/ARU files are not fallbacks.
+   - If Box is unreachable, cached static files may be reused after confirmation; the two Survey123 files must still pass schema validation.
 
 2. **Deployment setup**
-   - The user selects organization, reserve, deployment dates, observer, devices, and staging location.
-   - The app creates one deployment folder named like `UC_SITE_YYYYMMDD` and saves resumable state in `session.json`.
+   - The user selects organization, reserve, returned-card round, observer, and staging location.
+   - The round supplies the deployment window and enables only the historical device placements returned in that field visit. The user may uncheck devices that are not being downloaded in the current session.
+   - Open/current placements are displayed separately as read-only field inventory and cannot be selected as a card-download event.
+   - The app creates the deployment-event folder and saves its round/event IDs in resumable `session.json` state.
 
 3. **Per-device SD card processing**
    - The user processes one device at a time.

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -242,6 +244,153 @@ def load_deployments(csv_path: Path) -> dict:
     return result
 
 
+class LookupSchemaError(ValueError):
+    """A required lookup exists but does not implement the active schema."""
+
+
+DEVICE_REQUIRED_FIELDS = frozenset({
+    "device_record_id",
+    "device_id",
+    "device_type",
+})
+
+DEVICE_DEPLOYMENT_REQUIRED_FIELDS = frozenset({
+    "deployment_id",
+    "deployment_event_id",
+    "site_code",
+    "plot_number",
+    "device_type",
+    "device_id",
+    "deployment_start_date",
+    "deployment_end_date",
+})
+
+
+def _load_required_csv(csv_path: Path, required_fields: frozenset[str]) -> list[dict]:
+    """Read and validate a required new-system CSV without legacy fallback."""
+    if not csv_path.exists():
+        raise LookupSchemaError(f"Required lookup file is missing: {csv_path}")
+
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fields = set(reader.fieldnames or [])
+        missing = sorted(required_fields - fields)
+        if missing:
+            raise LookupSchemaError(
+                f"{csv_path.name} uses the wrong schema; missing columns: "
+                + ", ".join(missing)
+            )
+        rows = [
+            {key: (value or "").strip() for key, value in row.items()}
+            for row in reader
+        ]
+
+    if not rows:
+        raise LookupSchemaError(f"Required lookup file has no data rows: {csv_path}")
+    return rows
+
+
+def load_devices(csv_path: Path) -> list[dict]:
+    """Load the Survey123-derived physical-device inventory."""
+    return _load_required_csv(csv_path, DEVICE_REQUIRED_FIELDS)
+
+
+def load_device_deployments(csv_path: Path) -> list[dict]:
+    """Load Survey123-derived device-placement intervals."""
+    rows = _load_required_csv(csv_path, DEVICE_DEPLOYMENT_REQUIRED_FIELDS)
+    for row_number, row in enumerate(rows, start=2):
+        try:
+            int(row["plot_number"])
+            date.fromisoformat(row["deployment_start_date"])
+        except (TypeError, ValueError) as exc:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has an invalid plot or start date"
+            ) from exc
+        if row["deployment_end_date"]:
+            try:
+                date.fromisoformat(row["deployment_end_date"])
+            except ValueError as exc:
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} has an invalid end date"
+                ) from exc
+    return rows
+
+
+def build_deployment_rounds(
+    rows: list[dict], *, max_visit_gap_days: int = 2
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """Build selectable SD-card download rounds from device intervals.
+
+    Closed placements are grouped by nearby *retrieval* dates: those are the
+    cards physically coming back from a reserve together, even when cameras and
+    ARUs were installed on different dates. Open placements are grouped by
+    nearby deployment dates so the currently deployed inventory remains
+    inspectable without merging a later redeployment into an older card set.
+    """
+    by_site: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_site[row["site_code"]].append(row)
+
+    events_by_site: dict[str, list[dict]] = {}
+    rows_by_round: dict[str, list[dict]] = {}
+    gap = timedelta(days=max_visit_gap_days)
+
+    def cluster_rows(cluster_rows: list[dict], field_name: str) -> list[list[dict]]:
+        ordered_days = sorted({date.fromisoformat(r[field_name]) for r in cluster_rows})
+        day_clusters: list[list[date]] = []
+        for day in ordered_days:
+            if not day_clusters or day - day_clusters[-1][-1] > gap:
+                day_clusters.append([day])
+            else:
+                day_clusters[-1].append(day)
+        return [
+            [r for r in cluster_rows if date.fromisoformat(r[field_name]) in days]
+            for days in (set(cluster) for cluster in day_clusters)
+        ]
+
+    for site_code, site_rows in by_site.items():
+        closed_rows = [row for row in site_rows if row["deployment_end_date"]]
+        open_rows = [row for row in site_rows if not row["deployment_end_date"]]
+        round_groups = cluster_rows(closed_rows, "deployment_end_date")
+        round_groups += cluster_rows(open_rows, "deployment_start_date")
+        site_events: list[dict] = []
+        for round_rows in round_groups:
+            start = min(r["deployment_start_date"] for r in round_rows)
+            end_dates = [r["deployment_end_date"] for r in round_rows if r["deployment_end_date"]]
+            end = max(end_dates) if end_dates else ""
+            round_id = f"{site_code}:{'closed-' + end if end else 'open-' + start}"
+            source_ids = [r["deployment_event_id"] for r in round_rows if r["deployment_event_id"]]
+            source_event_id = Counter(source_ids).most_common(1)[0][0] if source_ids else ""
+            metadata_event_id = (
+                f"UC_{site_code}_{end.replace('-', '')}"
+                if end
+                else source_event_id or f"OPEN_{site_code}_{start.replace('-', '')}"
+            )
+            event = {
+                "deployment_round_id": round_id,
+                "deployment_event_id": metadata_event_id,
+                "source_deployment_event_id": source_event_id,
+                "deployment_start": start,
+                "deployment_end": end,
+                "device_count": len(round_rows),
+            }
+            site_events.append(event)
+            rows_by_round[round_id] = round_rows
+
+        # A download is normally for returned cards, so put the newest closed
+        # round first and list currently deployed/open rounds afterward.
+        events_by_site[site_code] = sorted(
+            site_events,
+            key=lambda event: (
+                bool(event["deployment_end"]),
+                event["deployment_end"] or event["deployment_start"],
+            ),
+            reverse=True,
+        )
+
+    return events_by_site, rows_by_round
+
+
 # ---------------------------------------------------------------------------
 # Container — replaces module-level globals
 # ---------------------------------------------------------------------------
@@ -249,12 +398,24 @@ def load_deployments(csv_path: Path) -> dict:
 # Canonical filenames inside the lookup-tables directory.
 SITES_CSV = "sites.csv"
 PLOTS_CSV = "plots.csv"
-ARUS_CSV = "ARUs.csv"
-CAMERAS_CSV = "cameras.csv"
+DEVICES_CSV = "devices.csv"
 DEPLOYMENTS_CSV = "deployments.csv"
 SOUNDHUB_JSON = "soundhub_config.json"
 WI_CONFIG_JSON = "wi_config.json"
 PROGRAM_CONFIG_JSON = "program_config.json"
+
+# Box remains authoritative for stable/manual reference data and export
+# defaults. Device inventory and placement history are installed from the
+# verified Survey123 transformation and must never be overwritten by an older
+# Box copy during startup.
+BOX_MANAGED_FILENAMES = frozenset({
+    SITES_CSV,
+    PLOTS_CSV,
+    SOUNDHUB_JSON,
+    WI_CONFIG_JSON,
+    PROGRAM_CONFIG_JSON,
+    "motus.csv",
+})
 
 
 @dataclass
@@ -269,12 +430,16 @@ class LookupTables:
     plot_names: dict = field(default_factory=dict)
     plot_metadata: dict = field(default_factory=dict)
     soundhub_config: dict = field(default_factory=dict)
+    devices: list[dict] = field(default_factory=list)
+    device_deployments: list[dict] = field(default_factory=list)
     arus: dict = field(default_factory=dict)
     cameras: dict = field(default_factory=dict)
     wi_config: dict = field(default_factory=dict)
     program_config: dict = field(default_factory=dict)
     plot_coords: dict = field(default_factory=dict)
     deployments: dict = field(default_factory=dict)
+    active_deployment_round_id: str = ""
+    _deployment_rows_by_round: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def load(cls, data_dir: Path) -> "LookupTables":
@@ -287,12 +452,75 @@ class LookupTables:
         self.reserves = load_reserves(data_dir / SITES_CSV)
         self.plot_names, self.plot_metadata = load_plot_names(data_dir / PLOTS_CSV)
         self.soundhub_config = load_soundhub_config(data_dir / SOUNDHUB_JSON)
-        self.arus = load_arus(data_dir / ARUS_CSV)
-        self.cameras = load_cameras(data_dir / CAMERAS_CSV)
+        self.devices = load_devices(data_dir / DEVICES_CSV)
+        self.device_deployments = load_device_deployments(data_dir / DEPLOYMENTS_CSV)
+        self.deployments, self._deployment_rows_by_round = build_deployment_rounds(
+            self.device_deployments
+        )
+        self.active_deployment_round_id = ""
+        self.arus = {}
+        self.cameras = {}
         self.wi_config = load_wi_config(data_dir / WI_CONFIG_JSON)
         self.program_config = load_program_config(data_dir / PROGRAM_CONFIG_JSON)
         self.plot_coords = load_plot_coords(data_dir / PLOTS_CSV)
-        self.deployments = load_deployments(data_dir / DEPLOYMENTS_CSV)
+
+    def activate_deployment_round(self, round_id: str) -> None:
+        """Expose camera/ARU compatibility views for one selected field round."""
+        if round_id not in self._deployment_rows_by_round:
+            raise LookupSchemaError(f"Unknown deployment round: {round_id}")
+
+        chosen: dict[tuple, dict] = {}
+        for row in sorted(
+            self._deployment_rows_by_round[round_id],
+            key=lambda r: (r["deployment_start_date"], r.get("deployment_start_datetime", "")),
+        ):
+            key = (row["site_code"], int(row["plot_number"]), row["device_type"])
+            chosen[key] = row
+
+        cameras: dict[tuple, dict] = {}
+        arus: dict[tuple, dict] = {}
+        for key, row in chosen.items():
+            if row["device_type"] in {"ML", "SA"}:
+                cameras[key] = {
+                    **row,
+                    "camera_id": row.get("camera_id") or row.get("device_id", ""),
+                }
+            elif row["device_type"] in {"BD", "BT"}:
+                arus[key] = row
+
+        self.active_deployment_round_id = round_id
+        self.cameras = cameras
+        self.arus = arus
+
+    def clear_active_deployment_round(self) -> None:
+        """Clear event-scoped device views when no valid round is selected."""
+        self.active_deployment_round_id = ""
+        self.cameras = {}
+        self.arus = {}
+
+    def available_device_keys(self, round_id: str | None = None) -> set[tuple]:
+        """Return ``(site, plot, type)`` keys available in a selected round."""
+        selected = round_id or self.active_deployment_round_id
+        return {
+            (row["site_code"], int(row["plot_number"]), row["device_type"])
+            for row in self._deployment_rows_by_round.get(selected, [])
+        }
+
+    def returned_rounds(self, site_code: str) -> list[dict]:
+        """Completed rounds whose cards are available to download."""
+        return [
+            event
+            for event in self.deployments.get(site_code, [])
+            if event.get("deployment_end")
+        ]
+
+    def current_rounds(self, site_code: str) -> list[dict]:
+        """Open placements shown as read-only field inventory in the GUI."""
+        return [
+            event
+            for event in self.deployments.get(site_code, [])
+            if not event.get("deployment_end")
+        ]
 
     # -- convenience views over reserves --------------------------------
 

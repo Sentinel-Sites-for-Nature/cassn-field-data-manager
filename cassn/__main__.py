@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cassn.box.auth import BOX_AVAILABLE, load_box_config
 from cassn.config import LOCAL_DATA_DIR
 from cassn.core.image_metadata import EXIF_AVAILABLE
 from cassn.gui import FieldDataWizard
-from cassn.lookups import LookupTables
+from cassn.lookups import LookupSchemaError, LookupTables
 
 
 def main() -> None:
@@ -40,7 +40,16 @@ def main() -> None:
 
     # Load the injected dependencies once and hand them to the window.
     box_config = load_box_config()
-    lookups = LookupTables.load(LOCAL_DATA_DIR)
+    try:
+        lookups = LookupTables.load(LOCAL_DATA_DIR)
+    except LookupSchemaError as exc:
+        QMessageBox.critical(
+            None,
+            "Survey123 Lookups Missing or Invalid",
+            f"The new device lookup system could not be loaded:\n\n{exc}\n\n"
+            "The app will not fall back to cameras.csv or ARUs.csv.",
+        )
+        raise SystemExit(1) from exc
 
     window = FieldDataWizard(lookups=lookups, box_config=box_config)
     window.show()

@@ -304,8 +304,8 @@ def build_inventory_record(
         'device_type': dev_code,
         'device_label': device_label,
         'device_id': device_id,
-        # Image identity comes from cameras.csv (the camera_id); audio rows
-        # leave this blank and use device_id (the AudioMoth serial) instead.
+        # Image identity comes from the selected Survey123 device placement;
+        # audio rows leave this blank and use the AudioMoth device_id instead.
         'camera_id': device_id if file_type == 'image' else '',
         # The camera's hardware serial read from EXIF (image rows only); QC
         # cross-checks that camera_id is a substring of this.
