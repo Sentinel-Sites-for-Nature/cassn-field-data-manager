@@ -1221,7 +1221,7 @@ class FieldDataWizard(QMainWindow):
 
         self.devices = []
         for plot_num in sorted(self.device_checkboxes.keys()):
-            plot_label = plot_names.get(plot_num, str(plot_num))
+            plot_label = plot_names.get(plot_num) or str(plot_num)
 
             for dev_code in DEVICE_TYPES.keys():
                 if self.device_checkboxes[plot_num][dev_code].isChecked():
@@ -1831,7 +1831,8 @@ class FieldDataWizard(QMainWindow):
         plot_row.addWidget(QLabel("Plot:"))
         plot_combo = QComboBox()
         for num in sorted(plot_names_for_reserve.keys()):
-            plot_combo.addItem(f"{num} — {plot_names_for_reserve[num]}", userData=num)
+            name = plot_names_for_reserve.get(num, "")
+            plot_combo.addItem(f"{num} — {name}" if name else str(num), userData=num)
         plot_row.addWidget(plot_combo, stretch=1)
         layout.addLayout(plot_row)
 
@@ -1892,7 +1893,7 @@ class FieldDataWizard(QMainWindow):
                 f"Device {device_label} is already in this deployment.")
             return
 
-        plot_label = plot_names_for_reserve.get(plot_num, str(plot_num))
+        plot_label = plot_names_for_reserve.get(plot_num) or str(plot_num)
 
         # Append to devices list and the device tree
         self.devices.append((plot_num, plot_label, dev_code, device_label))

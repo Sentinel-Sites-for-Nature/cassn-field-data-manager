@@ -75,7 +75,9 @@ def load_plot_names(csv_path: Path) -> tuple[dict, dict]:
 
                         if site_code not in plot_names:
                             plot_names[site_code] = {}
-                        if plot_number >= 1 and plot_name:
+                        # A plot with no name is still a real, selectable plot;
+                        # callers fall back to displaying the bare number.
+                        if plot_number >= 1:
                             plot_names[site_code][plot_number] = plot_name
                         plot_metadata[(site_code, plot_number)] = {
                             "plot_name": plot_name,

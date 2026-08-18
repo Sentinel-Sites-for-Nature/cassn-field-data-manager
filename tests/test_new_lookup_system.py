@@ -16,6 +16,7 @@ from cassn.lookups import (
     LookupTables,
     build_deployment_rounds,
     load_device_deployments,
+    load_plot_names,
 )
 
 
@@ -261,3 +262,42 @@ def test_event_only_legacy_deployments_schema_is_rejected(tmp_path):
 
     with pytest.raises(LookupSchemaError, match="wrong schema"):
         load_device_deployments(path)
+
+
+def test_plots_without_names_are_still_selectable(tmp_path):
+    """Survey123-sourced plots.csv leaves plot_name blank for many sites; those
+    plots must still reach the wizard's device grid (keyed on plot number)."""
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_code", "plot_number", "plot_name"],
+        [
+            {"site_code": "StrathearnRanch", "plot_number": "1", "plot_name": ""},
+            {"site_code": "StrathearnRanch", "plot_number": "2", "plot_name": ""},
+            {"site_code": "Cahill", "plot_number": "1", "plot_name": "One"},
+        ],
+    )
+
+    plot_names, plot_metadata = load_plot_names(plots_path)
+
+    assert plot_names == {
+        "StrathearnRanch": {1: "", 2: ""},
+        "Cahill": {1: "One"},
+    }
+    assert plot_metadata[("StrathearnRanch", 1)]["plot_name"] == ""
+
+
+def test_plot_number_zero_is_excluded(tmp_path):
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_code", "plot_number", "plot_name"],
+        [
+            {"site_code": "Cahill", "plot_number": "0", "plot_name": ""},
+            {"site_code": "Cahill", "plot_number": "1", "plot_name": "One"},
+        ],
+    )
+
+    plot_names, _plot_metadata = load_plot_names(plots_path)
+
+    assert plot_names == {"Cahill": {1: "One"}}
