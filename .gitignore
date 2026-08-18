@@ -77,3 +77,6 @@ scratch/
 # Local scratch and generated output
 output/
 tmp/
+
+# Local agent operating instructions
+AGENTS.md
