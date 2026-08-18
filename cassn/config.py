@@ -106,7 +106,7 @@ QC_SIDECAR_FILES = (
 
 IMAGE_FIELDS = [
     "filename", "original_filename", "deployment_event_id", "deployment_id",
-    "organization", "site", "site_full_name", "site_code",
+    "organization", "site_name", "site_short_name", "site_code",
     "start_date", "end_date", "recorded_by",
     "subproject", "subproject_design", "placename", "event_name", "event_description",
     "plot_number", "device_type", "camera_id", "camera_serial_exif", "file_type",
@@ -128,7 +128,7 @@ IMAGE_FIELDS = [
 
 AUDIO_FIELDS = [
     "filename", "original_filename", "deployment_event_id", "deployment_id",
-    "organization", "site", "site_full_name", "site_code",
+    "organization", "site_name", "site_short_name", "site_code",
     "deployment_start_date", "deployment_end_date", "recorded_by",
     "subproject", "subproject_design", "placename", "event_name", "event_description",
     "plot_number", "device_type", "device_id", "file_type",

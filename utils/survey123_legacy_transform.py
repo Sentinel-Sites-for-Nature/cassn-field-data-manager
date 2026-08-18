@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
-LEGACY_SITE_ALIASES = {"BDCDRC": "BDC"}
+SURVEY_SITE_CODE_ALIASES = {"BDCDRC": "BDC"}
+GENERATED_OPEN_EVENT_PREFIXES = ("INFERRED_", "OPEN_")
 
 DEVICE_FIELDS = (
     "device_record_id",
@@ -41,7 +42,7 @@ DEPLOYMENT_FIELDS = (
     "event_start_date",
     "event_end_date",
     "event_match_status",
-    "site_code",
+    "site_short_name",
     "plot_number",
     "device_type",
     "device_record_id",
@@ -93,6 +94,52 @@ ISSUE_FIELDS = (
     "source_objectid",
     "message",
 )
+
+
+def _canonical_deployment_id(row: Mapping[str, Any]) -> str:
+    """Return the stable per-device ID used by metadata and downstream tools.
+
+    Open placements deliberately have no ID. The ID is assigned only when the
+    placement closes, using the deployment end date.
+    """
+    identity_date = _text(row.get("deployment_end_date"))
+    if not identity_date:
+        return ""
+    try:
+        plot_number = str(int(_text(row.get("plot_number"))))
+        date_token = date.fromisoformat(identity_date).strftime("%Y%m%d")
+    except (TypeError, ValueError) as exc:
+        raise TransformError(
+            "Cannot build canonical deployment_id without a valid plot and date"
+        ) from exc
+    return (
+        f"UC_{_text(row.get('site_short_name'))}_plot{plot_number}_"
+        f"{_text(row.get('device_type'))}_{date_token}"
+    )
+
+
+def _canonical_deployment_event_id(row: Mapping[str, Any]) -> str:
+    """Return a closed-event ID and leave every open event unnamed.
+
+    The legacy adapter used to mint ``OPEN_`` and ``INFERRED_`` placeholders.
+    Those values are not authoritative Survey123 identifiers and, once copied
+    into the active lookup, could be mistaken for real events by a later
+    refresh. Preserve a real closed-event ID when one exists; otherwise derive
+    the closed event name from the actual placement end date.
+    """
+    identity_date = _text(row.get("deployment_end_date"))
+    if not identity_date:
+        return ""
+    current = _text(row.get("deployment_event_id"))
+    if current and not current.startswith(GENERATED_OPEN_EVENT_PREFIXES):
+        return current
+    try:
+        date_token = date.fromisoformat(identity_date).strftime("%Y%m%d")
+    except ValueError as exc:
+        raise TransformError(
+            "Cannot name a closed deployment event without a valid end date"
+        ) from exc
+    return f"UC_{_text(row.get('site_short_name'))}_{date_token}"
 
 
 class TransformError(RuntimeError):
@@ -204,13 +251,13 @@ def _survey_item_ids(snapshot_path: Path) -> dict[str, str]:
 
 def _canonical_site(
     attributes: Mapping[str, Any],
-    label_to_site: Mapping[str, str],
+    survey_value_to_short_name: Mapping[str, str],
 ) -> tuple[str, str]:
-    label = _text(attributes.get("siteID"))
-    if label == "other":
-        label = _text(attributes.get("siteID_other"))
-    label = LEGACY_SITE_ALIASES.get(label, label)
-    return label_to_site.get(label, ""), label
+    survey_value = _text(attributes.get("siteID"))
+    if survey_value == "other":
+        survey_value = _text(attributes.get("siteID_other"))
+    survey_value = SURVEY_SITE_CODE_ALIASES.get(survey_value, survey_value)
+    return survey_value_to_short_name.get(survey_value, ""), survey_value
 
 
 def _deployment_time(role: str, attributes: Mapping[str, Any]) -> Any:
@@ -299,28 +346,49 @@ def transform_legacy_snapshot(
 
     site_fields, site_rows = _read_csv(lookup_dir / "sites.csv")
     plot_fields, plot_rows = _read_csv(lookup_dir / "plots.csv")
-    event_fields, event_rows = _read_csv(lookup_dir / "deployments.csv")
-    new_system_input = "deployment_start_date" in event_fields
-    if new_system_input:
-        camera_fields, camera_rows = event_fields, [
-            row for row in event_rows if _text(row.get("device_type")) in {"ML", "SA"}
-        ]
-        aru_fields, aru_rows = event_fields, [
-            row for row in event_rows if _text(row.get("device_type")) in {"BD", "BT"}
-        ]
-    else:
-        camera_fields, camera_rows = _read_csv(lookup_dir / "cameras.csv")
-        aru_fields, aru_rows = _read_csv(lookup_dir / "ARUs.csv")
-    label_to_site = {_text(row.get("label_code")): _text(row.get("site_code")) for row in site_rows}
+    deployment_fields, deployment_rows = _read_csv(lookup_dir / "deployments.csv")
+    required_site_fields = {"site_name", "site_short_name", "site_code"}
+    required_plot_fields = {"site_short_name", "plot_number"}
+    required_deployment_fields = {
+        "deployment_event_id",
+        "site_short_name",
+        "plot_number",
+        "device_type",
+        "deployment_start_date",
+        "deployment_end_date",
+    }
+    for filename, fields, required in (
+        ("sites.csv", site_fields, required_site_fields),
+        ("plots.csv", plot_fields, required_plot_fields),
+        ("deployments.csv", deployment_fields, required_deployment_fields),
+    ):
+        missing = sorted(required - set(fields))
+        if missing:
+            raise TransformError(
+                f"{filename} uses the wrong active schema; missing columns: "
+                + ", ".join(missing)
+            )
+
+    camera_rows = [
+        row for row in deployment_rows if _text(row.get("device_type")) in {"ML", "SA"}
+    ]
+    aru_rows = [
+        row for row in deployment_rows if _text(row.get("device_type")) in {"BD", "BT"}
+    ]
+    survey_value_to_short_name: dict[str, str] = {}
+    for row in site_rows:
+        site_short_name = _text(row.get("site_short_name"))
+        survey_value_to_short_name[_text(row.get("site_code"))] = site_short_name
+        survey_value_to_short_name[site_short_name] = site_short_name
     valid_plots = {
-        (_text(row.get("site_code")), _normalize_plot(row.get("plot_number")))
+        (_text(row.get("site_short_name")), _normalize_plot(row.get("plot_number")))
         for row in plot_rows
     }
     current_cameras: dict[tuple[str, str, str], dict[str, str]] = {}
     for row in sorted(camera_rows, key=lambda value: _text(value.get("deployment_start_date"))):
         current_cameras[
             (
-                _text(row.get("site_code")),
+                _text(row.get("site_short_name")),
                 _normalize_plot(row.get("plot_number")),
                 _text(row.get("device_type")),
             )
@@ -329,7 +397,7 @@ def transform_legacy_snapshot(
     current_arus_by_event: dict[tuple[str, str, str, str], dict[str, str]] = {}
     for row in aru_rows:
         key = (
-            _text(row.get("site_code")),
+            _text(row.get("site_short_name")),
             _normalize_plot(row.get("plot_number")),
             _text(row.get("device_type")),
         )
@@ -337,17 +405,13 @@ def transform_legacy_snapshot(
         current_arus_by_event[(_text(row.get("deployment_event_id")), *key)] = row
 
     events_by_site: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in event_rows:
-        start_text = _text(
-            row.get("event_start_date") if new_system_input else row.get("deployment_start")
-        )
+    for row in deployment_rows:
+        start_text = _text(row.get("event_start_date") or row.get("deployment_start_date"))
         if not start_text:
             continue
         start = date.fromisoformat(start_text)
-        end_text = _text(
-            row.get("event_end_date") if new_system_input else row.get("deployment_end")
-        )
-        events_by_site[_text(row.get("site_code"))].append(
+        end_text = _text(row.get("event_end_date") or row.get("deployment_end_date"))
+        events_by_site[_text(row.get("site_short_name"))].append(
             {
                 "start": start,
                 "end": date.fromisoformat(end_text) if end_text else None,
@@ -394,19 +458,19 @@ def transform_legacy_snapshot(
         device_type: str,
         device_id: str,
     ) -> None:
-        site_code, raw_site = _canonical_site(attributes, label_to_site)
-        if not site_code:
+        site_short_name, raw_site = _canonical_site(attributes, survey_value_to_short_name)
+        if not site_short_name:
             add_issue("blocking", "unknown_site", role, attributes, f"Unknown site: {raw_site}")
             return
         plot = _normalize_plot(attributes.get("plot_number"))
         plot_resolution = "survey"
-        if (site_code, plot) not in valid_plots:
+        if (site_short_name, plot) not in valid_plots:
             add_issue(
                 "blocking",
                 "unknown_plot",
                 role,
                 attributes,
-                f"Cannot resolve authoritative plot for {site_code}: {plot or '<missing>'}",
+                f"Cannot resolve authoritative plot for {site_short_name}: {plot or '<missing>'}",
             )
             return
         start_epoch = _deployment_time(role, attributes)
@@ -418,21 +482,19 @@ def transform_legacy_snapshot(
 
         event_candidates = [
             event
-            for event in events_by_site.get(site_code, [])
+            for event in events_by_site.get(site_short_name, [])
             if event["start"] <= site_day
             and (event["end"] is None or site_day <= event["end"])
         ]
         if event_candidates:
             matched_event = max(event_candidates, key=lambda event: event["start"])
-            event_id = matched_event["event_id"] or (
-                f"OPEN_{site_code}_{matched_event['start'].strftime('%Y%m%d')}"
-            )
+            event_id = matched_event["event_id"]
             event_status = "current_lookup"
             event_start = matched_event["start"]
             event_end = matched_event["end"]
         else:
-            event_id = f"INFERRED_{site_code}_{site_day.strftime('%Y%m%d')}"
-            event_status = "inferred_open"
+            event_id = ""
+            event_status = "unmatched"
             event_start = site_day
             event_end = None
             add_issue(
@@ -440,24 +502,21 @@ def transform_legacy_snapshot(
                 "missing_current_event",
                 role,
                 attributes,
-                f"No current deployment event contains {site_code} on {site_day}",
+                f"No current deployment event contains {site_short_name} on {site_day}",
             )
 
         globalid = _text(attributes.get("globalid"))
-        deployment_id = f"S123_{globalid}_{device_type}" if globalid else (
-            f"S123_{role}_{_text(attributes.get('objectid'))}_{device_type}"
-        )
         device_record_id = f"{device_type}:{device_id}" if device_id else (
             f"{device_type}:unknown:{globalid or _text(attributes.get('objectid'))}"
         )
         normalized.append(
             {
-                "deployment_id": deployment_id,
+                "deployment_id": "",
                 "deployment_event_id": event_id,
                 "event_start_date": event_start.isoformat(),
                 "event_end_date": event_end.isoformat() if event_end else "",
                 "event_match_status": event_status,
-                "site_code": site_code,
+                "site_short_name": site_short_name,
                 "plot_number": plot,
                 "device_type": device_type,
                 "device_record_id": device_record_id,
@@ -494,9 +553,9 @@ def transform_legacy_snapshot(
 
     retrievals_by_plot: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for attributes in _snapshot_features(snapshot_path, "retrieval"):
-        site_code, raw_site = _canonical_site(attributes, label_to_site)
+        site_short_name, raw_site = _canonical_site(attributes, survey_value_to_short_name)
         plot = _normalize_plot(attributes.get("Plot"))
-        if not site_code or (site_code, plot) not in valid_plots:
+        if not site_short_name or (site_short_name, plot) not in valid_plots:
             add_issue(
                 "blocking",
                 "invalid_retrieval_key",
@@ -510,7 +569,7 @@ def transform_legacy_snapshot(
         if not value:
             add_issue("blocking", "missing_retrieval_time", "retrieval", attributes, "Missing retrieval time")
             continue
-        retrievals_by_plot[(site_code, plot)].append(
+        retrievals_by_plot[(site_short_name, plot)].append(
             {"time": value, "attributes": attributes}
         )
     for values in retrievals_by_plot.values():
@@ -518,7 +577,7 @@ def transform_legacy_snapshot(
 
     by_slot: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in normalized:
-        by_slot[(row["site_code"], row["plot_number"], row["device_type"])].append(row)
+        by_slot[(row["site_short_name"], row["plot_number"], row["device_type"])].append(row)
     for rows in by_slot.values():
         rows.sort(key=lambda row: row["_start_dt"])
         for index, row in enumerate(rows):
@@ -526,7 +585,7 @@ def transform_legacy_snapshot(
             retrieval = next(
                 (
                     item
-                    for item in retrievals_by_plot.get((row["site_code"], row["plot_number"]), [])
+                    for item in retrievals_by_plot.get((row["site_short_name"], row["plot_number"]), [])
                     # Retrieval forms are often submitted after the replacement
                     # device has already been installed. A retrieval on the same
                     # calendar day closes the prior placement, not the new one.
@@ -555,6 +614,8 @@ def transform_legacy_snapshot(
             )
             row["deployment_end_date"] = end_time.date().isoformat() if end_time else ""
             row["deployment_end_reason"] = end_reason
+            row["deployment_id"] = _canonical_deployment_id(row)
+            row["deployment_event_id"] = _canonical_deployment_event_id(row)
             if retrieval:
                 attributes = retrieval["attributes"]
                 row["retrieval_methods"] = _text(attributes.get("MethodsDeployed"))
@@ -563,7 +624,7 @@ def transform_legacy_snapshot(
                 row["retrieval_objectid"] = _text(attributes.get("objectid"))
 
     for row in normalized:
-        key = (row["site_code"], row["plot_number"], row["device_type"])
+        key = (row["site_short_name"], row["plot_number"], row["device_type"])
         attributes = row["_attributes"]
         if row["device_type"] in {"ML", "SA"}:
             current = current_cameras.get(key, {})
@@ -581,8 +642,7 @@ def transform_legacy_snapshot(
                     ),
                     "detection_distance": _text(current.get("detection_distance")),
                     "compatibility_source": (
-                        "previous_deployments" if new_system_input and current
-                        else "current_cameras" if current
+                        "previous_deployments" if current
                         else "survey_fallback"
                     ),
                 }
@@ -597,8 +657,7 @@ def transform_legacy_snapshot(
                     "sensor_height_meters": _text(current.get("sensor_height_meters")),
                     "ARU_status": _text(current.get("ARU_status")),
                     "compatibility_source": (
-                        "previous_deployments" if new_system_input and current
-                        else "current_ARUs" if current
+                        "previous_deployments" if current
                         else "survey_only"
                     ),
                 }
@@ -632,7 +691,7 @@ def transform_legacy_snapshot(
         normalized,
         key=lambda item: (
             item["deployment_start_datetime"],
-            item["site_code"],
+            item["site_short_name"],
             int(item["plot_number"]),
             item["device_type"],
         ),
@@ -669,9 +728,8 @@ def transform_legacy_snapshot(
             "preserved_current_contract": {
                 "sites.csv": site_fields,
                 "plots.csv": plot_fields,
-                "camera_compatibility_fields": camera_fields,
-                "aru_compatibility_fields": aru_fields,
-                "deployments.csv": event_fields,
+                "device_compatibility_fields": deployment_fields,
+                "deployments.csv": deployment_fields,
                 "wi_config.json": sorted(
                     json.loads((lookup_dir / "wi_config.json").read_text(encoding="utf-8-sig"))
                 ),

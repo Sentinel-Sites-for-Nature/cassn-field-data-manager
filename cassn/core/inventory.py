@@ -8,7 +8,7 @@ process that are pure given their inputs, so they can be tested without a GUI or
 a physical card:
 
 * :func:`build_renamed_filename` — the single source of truth for the
-  ``{org}_{site}_plot{n}_{devcode}_{YYYYMMDD}_{seq}{ext}`` naming convention.
+  ``{org}_{site_short_name}_plot{n}_{devcode}_{YYYYMMDD}_{seq}{ext}`` naming convention.
 * :func:`build_inventory_record` — assembles one inventory dict from the four
   metadata sources (EXIF, Reconyx/ExifTool, CONFIG.TXT, WAV comment) plus plot
   and SoundHub lookups, applying the exact source-precedence the original used.
@@ -113,6 +113,87 @@ def index_inventory_by_storage_relpath(file_inventory) -> dict[str, dict]:
             raise ValueError(f"Duplicate inventory storage path: {relative_path}")
         indexed[relative_path] = entry
     return indexed
+
+
+def deduplicate_exact_storage_entries(file_inventory) -> list[dict]:
+    """Remove only provably identical duplicate storage records in place.
+
+    Historical interrupted/resumed sessions can contain the same CONFIG record
+    twice.  Colliding records are safe to collapse only when they identify the
+    same source-relative file and carry the same non-empty SHA-256.  Any other
+    collision remains a hard error so genuinely conflicting data is never
+    discarded silently.  Returns the removed records for audit/logging.
+    """
+    indexed: dict[str, dict] = {}
+    kept: list[dict] = []
+    removed: list[dict] = []
+    for entry in file_inventory:
+        relative_path = inventory_storage_relpath(entry)
+        prior = indexed.get(relative_path)
+        if prior is None:
+            indexed[relative_path] = entry
+            kept.append(entry)
+            continue
+
+        same_source = (
+            str(prior.get("source_relpath", ""))
+            == str(entry.get("source_relpath", ""))
+            and bool(entry.get("source_relpath"))
+        )
+        prior_sha256 = str(prior.get("file_hash_sha256", ""))
+        same_hash = bool(prior_sha256) and prior_sha256 == str(
+            entry.get("file_hash_sha256", "")
+        )
+        same_sha1 = (
+            not prior.get("file_hash_sha1")
+            or not entry.get("file_hash_sha1")
+            or prior.get("file_hash_sha1") == entry.get("file_hash_sha1")
+        )
+        if same_source and same_hash and same_sha1:
+            removed.append(entry)
+            continue
+        raise ValueError(f"Conflicting duplicate inventory storage path: {relative_path}")
+
+    if removed:
+        file_inventory[:] = kept
+    return removed
+
+
+def inventory_by_source_relpath(file_inventory, device_label) -> dict[str, dict]:
+    """Index one device's inventory by card-relative source identity."""
+    indexed: dict[str, dict] = {}
+    for entry in file_inventory:
+        if entry.get("device_label") != device_label:
+            continue
+        source_relpath = str(entry.get("source_relpath", "") or "")
+        if not source_relpath:
+            continue
+        prior = indexed.get(source_relpath)
+        if prior is not None and prior is not entry:
+            raise ValueError(
+                f"Duplicate inventory source path for {device_label}: {source_relpath}"
+            )
+        indexed[source_relpath] = entry
+    return indexed
+
+
+def next_plain_file_sequence(file_inventory, device_label) -> int:
+    """Return one past the greatest existing ``_NNNNN`` plain-media suffix.
+
+    Counting records is unsafe after an intentional duplicate drop because a
+    gap can make ``count + 1`` reuse an existing destination filename.
+    """
+    import re
+
+    greatest = 0
+    for entry in file_inventory:
+        if entry.get("device_label") != device_label:
+            continue
+        stem = Path(str(entry.get("new_filename", ""))).stem
+        match = re.search(r"_(\d{5})$", stem)
+        if match:
+            greatest = max(greatest, int(match.group(1)))
+    return greatest + 1
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +305,7 @@ def reconcile_device_dir(device_dir, file_inventory, device_label) -> list[str]:
 
 def build_renamed_filename(
     org: str,
-    site: str,
+    site_short_name: str,
     plot_num,
     dev_code: str,
     date_str: str,
@@ -233,7 +314,7 @@ def build_renamed_filename(
 ) -> str:
     """Build a renamed file following the deployment naming convention.
 
-    ``{org}_{site}_plot{plot_num}_{dev_code}_{date_str}_{seq_str}{file_ext}``
+    ``{org}_{site_short_name}_plot{plot_num}_{dev_code}_{date_str}_{seq_str}{file_ext}``
 
     The caller supplies ``date_str`` and ``seq_str`` so the same convention
     covers all three cases the wizard produces:
@@ -243,7 +324,7 @@ def build_renamed_filename(
     * sequence-aware image — ``seq_str`` is ``f"{event_num:05d}_{position}"``;
     * plain media — ``seq_str`` is a zero-padded running counter ``f"{n:05d}"``.
     """
-    return f"{org}_{site}_plot{plot_num}_{dev_code}_{date_str}_{seq_str}{file_ext}"
+    return f"{org}_{site_short_name}_plot{plot_num}_{dev_code}_{date_str}_{seq_str}{file_ext}"
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +502,9 @@ def generate_session_summary(
     lines.append("CASSN DEPLOYMENT SUMMARY")
     lines.append("=" * 60)
     lines.append(f"Generated:        {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"Reserve:          {metadata.get('reserve_name', '?')}")
+    lines.append(f"Site name:        {metadata.get('site_name', '?')}")
+    lines.append(f"Site short name:  {metadata.get('site_short_name', '?')}")
+    lines.append(f"Site code:        {metadata.get('site_code', '?')}")
     lines.append(f"Organization:     {metadata.get('organization', '?')}")
     lines.append(f"Observer:         {metadata.get('observer', '?')}")
     lines.append(f"Deployment event start: {metadata.get('deployment_start', '?')}")
@@ -495,12 +578,14 @@ def generate_session_summary(
 SESSION_SCHEMA_VERSION = 1
 
 
-def write_session(deployment_folder: Path, session: dict) -> None:
+def write_session(deployment_folder: Path, session: dict) -> str:
     """Atomically persist a session dict to ``session.json`` in the deployment.
 
     Writes to a ``.json.tmp`` sibling first and ``replace()``s it into place,
     which is atomic on POSIX — an interrupted save never leaves a half-written
-    ``session.json``. Swallows all errors: a failed save must never crash the app.
+    ``session.json``. Returns an empty string on success or a user-displayable
+    error on failure; callers must stop collection when recovery state cannot be
+    persisted.
 
     Serialized compactly (no indent, no separator padding). This file is a
     machine-only crash-recovery record with one record per copied file, so its
@@ -514,8 +599,9 @@ def write_session(deployment_folder: Path, session: dict) -> None:
         with open(tmp_path, "w") as f:
             json.dump(session, f, separators=(",", ":"), default=str)
         tmp_path.replace(session_path)
-    except Exception:
-        pass
+        return ""
+    except Exception as exc:
+        return f"Could not save session recovery file: {exc}"
 
 
 def find_all_sessions(staging_root: Path) -> list:

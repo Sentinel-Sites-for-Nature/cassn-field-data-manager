@@ -378,8 +378,8 @@ def _make_refresh_fixture(tmp_path: Path) -> tuple[Path, Path]:
     lookup_dir.mkdir()
     _write_csv(
         lookup_dir / "plots.csv",
-        ["site_code", "plot_number", "plot_name"],
-        [{"site_code": "TestSite", "plot_number": "1", "plot_name": "One"}],
+        ["site_short_name", "plot_number", "plot_name"],
+        [{"site_short_name": "TestSite", "plot_number": "1", "plot_name": "One"}],
     )
     (lookup_dir / "devices.csv").write_text("old devices\n", encoding="utf-8")
     (lookup_dir / "deployments.csv").write_text("old deployments\n", encoding="utf-8")
@@ -396,7 +396,7 @@ def _make_refresh_fixture(tmp_path: Path) -> tuple[Path, Path]:
         [
             "deployment_id",
             "deployment_event_id",
-            "site_code",
+            "site_short_name",
             "plot_number",
             "device_type",
             "device_record_id",
@@ -406,9 +406,9 @@ def _make_refresh_fixture(tmp_path: Path) -> tuple[Path, Path]:
         ],
         [
             {
-                "deployment_id": "deployment-1",
+                "deployment_id": "UC_TestSite_plot1_ML_20260201",
                 "deployment_event_id": "UC_TestSite_20260201",
-                "site_code": "TestSite",
+                "site_short_name": "TestSite",
                 "plot_number": "1",
                 "device_type": "ML",
                 "device_record_id": "ML:CAM1",
@@ -513,6 +513,21 @@ def test_refresh_validation_failure_never_changes_live_files(tmp_path):
     assert (lookup_dir / "deployments.csv").read_bytes() == old_deployments
 
 
+def test_refresh_validation_rejects_generated_open_event_name(tmp_path):
+    candidate, lookup_dir = _make_refresh_fixture(tmp_path)
+    path = candidate / "deployments.csv"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    rows[0]["deployment_id"] = ""
+    rows[0]["deployment_event_id"] = "INFERRED_TestSite_20260101"
+    rows[0]["deployment_end_date"] = ""
+    _write_csv(path, fields, rows)
+
+    with pytest.raises(sync.RefreshError, match="deployment_event_id to an open placement"):
+        sync.validate_candidate_lookup_set(candidate, lookup_dir)
+
+
 def test_refresh_command_runs_complete_pipeline(tmp_path, monkeypatch):
     candidate, lookup_dir = _make_refresh_fixture(tmp_path)
     snapshot = tmp_path / "snapshots" / candidate.name
@@ -520,6 +535,7 @@ def test_refresh_command_runs_complete_pipeline(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     args = sync.argparse.Namespace(
         config=config.config_path,
+        box_config=tmp_path / "box-config.json",
         snapshot_root=snapshot.parent,
         candidate_root=candidate.parent,
         lookup_dir=lookup_dir,
@@ -551,7 +567,21 @@ def test_refresh_command_runs_complete_pipeline(tmp_path, monkeypatch):
         "transform_legacy_snapshot",
         lambda source, lookups, output: (candidate, {"counts": {}}),
     )
+    monkeypatch.setattr(
+        sync,
+        "load_box_config",
+        lambda path: sync.argparse.Namespace(app_config_folder_id="folder-1"),
+        raising=False,
+    )
+    monkeypatch.setattr(sync, "get_box_client", lambda config: object())
+    published = []
+    monkeypatch.setattr(
+        sync,
+        "publish_validated_lookup_pair",
+        lambda client, folder_id, source: published.append((folder_id, source)) or (),
+    )
 
     assert sync.command_refresh(args) == 0
+    assert published == [("folder-1", candidate)]
     assert (lookup_dir / "devices.csv").read_bytes() == (candidate / "devices.csv").read_bytes()
     assert (lookup_dir / sync.REFRESH_RECEIPT_FILENAME).is_file()

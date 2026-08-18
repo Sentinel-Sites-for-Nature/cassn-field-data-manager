@@ -32,26 +32,20 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     """Build ``(image_rows, audio_rows)`` from the file inventory and lookups.
 
     ``lookups`` is a :class:`cassn.lookups.LookupTables`; this reads its
-    ``reserves`` (site full name), event-scoped ``arus`` / ``cameras`` views
+    canonical ``sites``, event-scoped ``arus`` / ``cameras`` views
     derived from device-level deployments, ``soundhub_config`` (ARU defaults),
     and ``wi_config`` (WI project defaults).
     """
     org = metadata.get('organization', '')
-    site = metadata.get('site', '')
+    site_name = metadata.get('site_name', '')
+    site_short_name = metadata.get('site_short_name', '')
+    site_code = metadata.get('site_code', '')
     end = metadata.get('deployment_end', '')
     observer = metadata.get('observer', '')
-    # Site full name and code from reserves (list of (site_code, site_name))
-    site_full_name = ''
-    site_code = site  # fallback
-    for sc, sn in lookups.reserves:
-        if sc == site:
-            site_full_name = sn
-            break
-
     deployment_event_id = metadata.get("deployment_event_id", "")
     if not deployment_event_id:
         raise ValueError("No Survey123 deployment_event_id is active")
-    subproject = subproject_for(site, end)
+    subproject = subproject_for(site_short_name, end)
     now_iso = datetime.now(timezone.utc).isoformat()
 
     soundhub_config = lookups.soundhub_config
@@ -84,12 +78,12 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         except (TypeError, ValueError):
             plot_num_int = None
 
-        placename = f"{site}_plot{plot_num}"
+        placename = f"{site_short_name}_plot{plot_num}"
 
         # Event-scoped placement lookup from the new device-level
         # deployments.csv. The compatibility views are populated only after a
         # Survey123 round has been selected.
-        placement_key = (site_code, plot_num_int, dev_type)
+        placement_key = (site_short_name, plot_num_int, dev_type)
         if dev_type in {"ML", "SA"}:
             placement_row = lookups.cameras.get(placement_key, {})
             aru_row = {}
@@ -99,14 +93,15 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         deployment_id = placement_row.get("deployment_id", "")
         if not deployment_id:
             raise ValueError(
-                f"No Survey123 deployment row for {site_code} plot {plot_num} {dev_type}"
+                f"No Survey123 deployment row for {site_short_name} "
+                f"plot {plot_num} {dev_type}"
             )
         placement_start = placement_row.get("deployment_start_date", "")
         placement_end = placement_row.get("deployment_end_date", "")
         if not placement_start or not placement_end:
             raise ValueError(
                 f"Incomplete Survey123 placement interval for "
-                f"{site_code} plot {plot_num} {dev_type}"
+                f"{site_short_name} plot {plot_num} {dev_type}"
             )
 
         # SoundHub config lookup (keyed by device type suffix)
@@ -121,8 +116,8 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'deployment_event_id': deployment_event_id,
             'deployment_id':      deployment_id,
             'organization':       org,
-            'site':               site,
-            'site_full_name':     site_full_name,
+            'site_name':          site_name,
+            'site_short_name':    site_short_name,
             'site_code':          site_code,
             'subproject':         subproject,
             'subproject_design':  '',
@@ -150,7 +145,10 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         }
 
         if file_type == 'image':
-            cam_key = (site, plot_num_int, dev_type) if plot_num_int else None
+            cam_key = (
+                (site_short_name, plot_num_int, dev_type)
+                if plot_num_int else None
+            )
             cam = lookups.cameras.get(cam_key, {}) if cam_key else {}
             row = {**base,
                 'start_date':    f"{placement_start} 00:00:00",

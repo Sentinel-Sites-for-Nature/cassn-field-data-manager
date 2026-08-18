@@ -7,9 +7,9 @@ the column list and the writer:
 
 * the **GUI** generates it by reshaping the already-written
   ``image_file_metadata.csv`` (one row per unique camera ``deployment_id``);
-* the **CLI** (``utils/generate_wi_deployments.py``) builds it directly from a
-  deployment's devices + the ``cameras.csv`` / ``plots.csv`` / ``wi_config.json``
-  lookups, for back-filling WI CSVs across Box.
+* compatibility callers can build it directly from a deployment's devices plus
+  an event-scoped camera view, plot coordinates, and ``wi_config.json``. In the
+  active app that camera view comes from device-level ``deployments.csv``.
 
 This module is the single source of truth for both. :data:`WI_COLUMNS`, the
 ``event_name`` convention (:func:`deployment_event_name`), and the
@@ -85,7 +85,7 @@ def deployment_event_name(start_date: str, end_date: str) -> str:
         return ""
 
 
-def subproject_for(site: str, end_date: str) -> str:
+def subproject_for(site_short_name: str, end_date: str) -> str:
     """Return the ``Site_Year`` subproject grouping, e.g. ``ABCD_2026``.
 
     Groups every deployment at a site within a calendar year into one
@@ -95,9 +95,9 @@ def subproject_for(site: str, end_date: str) -> str:
     (:mod:`cassn.export.metadata_csv`) and the WI builder below.
     """
     year = (end_date or "")[:4]
-    if not site or len(year) != 4 or not year.isdigit():
+    if not site_short_name or len(year) != 4 or not year.isdigit():
         return ""
-    return f"{site}_{year}"
+    return f"{site_short_name}_{year}"
 
 
 def rows_to_csv_bytes(rows: list[dict]) -> bytes:
@@ -130,13 +130,13 @@ def build_wi_rows(
     """
     _log = log or (lambda _m: None)
 
-    site = deployment_info.get("site", "")
+    site_short_name = deployment_info.get("site_short_name", "")
     org = deployment_info.get("organization", "")
     start = deployment_info.get("deployment_start", "")
     end = deployment_info.get("deployment_end", "")
     observer = deployment_info.get("observer", "")
 
-    subproject_name = subproject_for(site, end)
+    subproject_name = subproject_for(site_short_name, end)
     event_name = deployment_event_name(start, end)
 
     rows_by_type: dict[str, list[dict]] = {}
@@ -152,19 +152,25 @@ def build_wi_rows(
         except (TypeError, ValueError):
             plot_num_int = None
 
-        cam = cameras.get((site, plot_num_int, dev_type), {}) if plot_num_int else {}
-        coords = plot_coords.get((site, plot_num_int), {}) if plot_num_int else {}
+        cam = cameras.get((site_short_name, plot_num_int, dev_type), {}) if plot_num_int else {}
+        coords = plot_coords.get((site_short_name, plot_num_int), {}) if plot_num_int else {}
 
         camera_id = cam.get("camera_id", "")
         if not camera_id:
-            _log(f"  Warning: camera_id missing for {site} plot {plot_num} {dev_type}")
+            _log(
+                f"  Warning: camera_id missing for {site_short_name} "
+                f"plot {plot_num} {dev_type}"
+            )
 
         row = {
             "project_id": wi_config.get(f"project_id_{dev_type}", ""),
-            "deployment_id": f"{org}_{site}_plot{plot_num}_{dev_type}_{end.replace('-', '')}",
+            "deployment_id": (
+                f"{org}_{site_short_name}_plot{plot_num}_{dev_type}_"
+                f"{end.replace('-', '')}"
+            ),
             "subproject_name": subproject_name,
             "subproject_design": "",
-            "placename": f"{site}_plot{plot_num}",
+            "placename": f"{site_short_name}_plot{plot_num}",
             "longitude": format_wi_coordinate(coords.get("longitude", "")),
             "latitude": format_wi_coordinate(coords.get("latitude", "")),
             "start_date": f"{start} 00:00:00" if start else "",

@@ -20,7 +20,6 @@ import csv
 import json
 import os
 import platform
-import shutil
 import subprocess
 import sys
 import time
@@ -97,16 +96,24 @@ from cassn.core.image_metadata import (
     parse_camera_recorded_datetime,
 )
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
-from cassn.core.hashing import sha256_sha1
+from cassn.core.file_transfer import (
+    FileTransferError,
+    copy_file_verified,
+    hash_file_with_retries,
+)
 from cassn.core.inventory import (
     SESSION_SCHEMA_VERSION,
     build_inventory_record,
     build_renamed_filename,
+    deduplicate_exact_storage_entries,
     generate_session_summary,
+    index_inventory_by_storage_relpath,
+    inventory_by_source_relpath,
+    inventory_storage_relpath,
+    next_plain_file_sequence,
     write_session,
 )
 from cassn.core.inventory import (
-    already_copied_relpaths,
     count_expected_files,
     find_all_sessions_multi as _find_all_sessions_multi,
     reconcile_device_dir,
@@ -126,11 +133,10 @@ from cassn.core.quality_control import (
     qc_path_for,
     validate_coordinates,
     validate_datetimes,
-    verify_copy_hash,
 )
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
-from cassn.lookups import BOX_MANAGED_FILENAMES, LookupSchemaError, LookupTables
+from cassn.lookups import LookupTables
 
 
 # How often, at most, to persist session.json from inside the copy loop. The save
@@ -169,6 +175,8 @@ class FieldDataWizard(QMainWindow):
         self.current_deployment_folder = None
         self.file_inventory = []
         self.seen_file_hashes = set()  # session-wide duplicate detection
+        self._copy_in_progress = False
+        self._session_save_error_shown = False
         self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
         self.wi_split_thread = None
@@ -187,10 +195,6 @@ class FieldDataWizard(QMainWindow):
         # Check Box authentication
         self.box_authenticated = self.check_box_auth()
 
-        # Sync only authoritative/static lookups from Box. Survey123 device
-        # inventory and placement history are installed separately and strict.
-        self.sync_lookup_tables()
-
         # Build UI
         self.init_ui()
 
@@ -203,9 +207,9 @@ class FieldDataWizard(QMainWindow):
     # Dependency helpers
     # ------------------------------------------------------------------
 
-    def _valid_reserve_names(self) -> set[str]:
-        """Canonical reserve-name set passed to the Box threads for validation."""
-        return set(self.lookups.reserve_names)
+    def _valid_site_names(self) -> set[str]:
+        """Canonical formal site-name set passed to Box threads for validation."""
+        return set(self.lookups.site_names)
 
     # ------------------------------------------------------------------
     # Box authentication / lookup sync
@@ -229,108 +233,6 @@ class FieldDataWizard(QMainWindow):
             pass
 
         return False
-
-    def sync_lookup_tables(self):
-        """Download latest lookup tables from Box app_config folder.
-
-        On success: saves a sync timestamp and reloads all lookup data.
-        On failure: checks for cached files.
-          - If cache exists: warns user with last-synced date and asks to confirm.
-          - If no cache: hard blocks with an error and quits.
-        """
-        app_config_folder_id = self.box_config.app_config_folder_id
-        if not app_config_folder_id:
-            return
-
-        timestamp_path = LOCAL_DATA_DIR / ".last_synced"
-
-        try:
-            client = get_box_client(self.box_config)
-            if not client:
-                return
-
-            LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-            items = client.folders.get_folder_items(app_config_folder_id)
-            synced = []
-
-            for item in items.entries:
-                if item.type != "file" or item.name not in BOX_MANAGED_FILENAMES:
-                    continue
-                local_path = LOCAL_DATA_DIR / item.name
-                content = client.downloads.download_file(item.id)
-                with open(local_path, "wb") as f:
-                    for chunk in content:
-                        f.write(chunk)
-                synced.append(item.name)
-
-            if synced:
-                # Save sync timestamp
-                timestamp_path.write_text(datetime.now().isoformat())
-                print(f"Synced lookup tables from Box: {', '.join(synced)}")
-
-            # Reload all lookup data with fresh files
-            self.lookups.reload(LOCAL_DATA_DIR)
-
-            # Rebuild the plot grid in case the chosen reserve gained or lost plots.
-            # Safe to call even if the UI hasn't been built yet — guarded below.
-            try:
-                if hasattr(self, "grid_layout") and hasattr(self, "site_code_edit"):
-                    self._rebuild_plot_grid(self.site_code_edit.text() or None)
-            except Exception:
-                pass
-
-        except LookupSchemaError as e:
-            QMessageBox.critical(
-                self,
-                "Survey123 Lookups Missing or Invalid",
-                f"The new device lookup system could not be loaded:\n\n{e}\n\n"
-                "The app will not fall back to cameras.csv or ARUs.csv.",
-            )
-            raise
-        except Exception as e:
-            print(f"Could not sync lookup tables from Box: {e}")
-            self._handle_sync_failure(timestamp_path)
-
-    def _handle_sync_failure(self, timestamp_path):
-        """Handle a failed sync — warn user or hard block depending on cache state."""
-        sites_cache = LOCAL_DATA_DIR / "sites.csv"
-
-        # No cache at all — hard block
-        if not sites_cache.exists():
-            QMessageBox.critical(
-                self,
-                "Lookup Tables Missing",
-                "Could not connect to Box and no cached lookup tables were found.\n\n"
-                "An internet connection is required on first launch to download "
-                "the lookup tables needed to run the app.\n\n"
-                "Please connect to the internet and relaunch.",
-            )
-            sys.exit(1)
-
-        # Cache exists — show last synced date and ask to confirm
-        if timestamp_path.exists():
-            try:
-                synced_at = datetime.fromisoformat(timestamp_path.read_text().strip())
-                date_str = synced_at.strftime("%B %d, %Y at %I:%M %p")
-                age_msg = f"Lookup tables were last synced on {date_str}."
-            except Exception:
-                age_msg = "Lookup table sync date is unknown."
-        else:
-            age_msg = "Lookup tables have never been synced from Box."
-
-        reply = QMessageBox.warning(
-            self,
-            "Could Not Sync Lookup Tables",
-            f"Could not connect to Box to sync the latest lookup tables.\n\n"
-            f"{age_msg}\n\n"
-            f"Proceeding with outdated tables could result in incorrect metadata.\n\n"
-            f"Proceed with cached lookup tables anyway?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-
-        if reply == QMessageBox.No:
-            sys.exit(0)
 
     def load_config(self):
         """Load saved configuration"""
@@ -397,10 +299,25 @@ class FieldDataWizard(QMainWindow):
             "deployment_folder": str(self.current_deployment_folder),
         }
 
-        write_session(self.current_deployment_folder, session)
+        error = write_session(self.current_deployment_folder, session)
+        if error:
+            if hasattr(self, "log_text"):
+                self.log(f"  ERROR: {error}")
+            if not self._session_save_error_shown:
+                self._session_save_error_shown = True
+                QMessageBox.critical(
+                    self,
+                    "Session Save Failed",
+                    f"{error}\n\nCollection has been stopped so the saved "
+                    "inventory cannot drift from the staged files. Check the "
+                    "destination drive and retry.",
+                )
+            return False
         # Any write resets the interval, so a boundary save (e.g. device complete)
         # keeps the copy loop from immediately re-saving on its next tick.
         self._last_session_save = time.monotonic()
+        self._session_save_error_shown = False
+        return True
 
     def _remember_staging_root(self, root) -> None:
         """Record ``root`` in the known-staging-roots list (de-duplicated, order-stable)."""
@@ -465,10 +382,10 @@ class FieldDataWizard(QMainWindow):
                 statuses = s["data"].get("device_statuses", {})
                 total = len(statuses)
                 completed = sum(1 for v in statuses.values() if v.get("status") in ("Complete", "Skipped"))
-                reserve = meta.get("reserve_name", "Unknown Reserve")
+                site_name = meta.get("site_name") or meta.get("reserve_name", "Unknown Site")
                 start = meta.get("deployment_start", "?")
                 end = meta.get("deployment_end", "?")
-                label = f"✓  {reserve}  |  {start} → {end}  |  {completed}/{total} devices done"
+                label = f"✓  {site_name}  |  {start} → {end}  |  {completed}/{total} devices done"
             else:
                 folder_name = s["path"].parent.name
                 label = f"⚠  CORRUPTED — {folder_name}  (truncated file, may be repairable)"
@@ -510,12 +427,38 @@ class FieldDataWizard(QMainWindow):
     def restore_session(self, session_data):
         """Restore app state from a saved session dict."""
         self.metadata = session_data.get("metadata", {})
+        migrated_site_metadata = False
+        if "site_short_name" not in self.metadata:
+            # One-time migration for sessions created before the canonical site
+            # schema. Active runtime paths below use only the canonical keys.
+            legacy_short_name = self.metadata.pop("site", "")
+            legacy_site_name = self.metadata.pop("reserve_name", "")
+            site = (
+                self.lookups.site_by_short_name.get(legacy_short_name)
+                or self.lookups.site_by_name.get(legacy_site_name)
+            )
+            self.metadata["site_name"] = site.site_name if site else legacy_site_name
+            self.metadata["site_short_name"] = (
+                site.site_short_name if site else legacy_short_name
+            )
+            self.metadata["site_code"] = site.site_code if site else ""
+            migrated_site_metadata = True
         self.devices = [tuple(d) for d in session_data.get("devices", [])]
         self.file_inventory = session_data.get("file_inventory", [])
+        self.current_deployment_folder = Path(session_data["deployment_folder"])
+        try:
+            removed_duplicates = deduplicate_exact_storage_entries(self.file_inventory)
+        except ValueError as exc:
+            QMessageBox.critical(
+                self,
+                "Session Inventory Conflict",
+                f"{exc}\n\nThis is not an exact duplicate and cannot be "
+                "repaired automatically. Collection and upload remain blocked.",
+            )
+            return
         self.seen_file_hashes = {
             e["file_hash_sha256"] for e in self.file_inventory if e.get("file_hash_sha256")
         }
-        self.current_deployment_folder = Path(session_data["deployment_folder"])
 
         # Migrate any pre-existing QC sidecars from the deployment root into qc/.
         # No-op for fresh sessions or already-migrated deployments.
@@ -526,11 +469,12 @@ class FieldDataWizard(QMainWindow):
         if idx >= 0:
             self.org_combo.setCurrentIndex(idx)
 
-        idx = self.reserve_combo.findText(self.metadata.get("reserve_name", ""))
+        idx = self.site_name_combo.findText(self.metadata.get("site_name", ""))
         if idx >= 0:
-            self.reserve_combo.setCurrentIndex(idx)
+            self.site_name_combo.setCurrentIndex(idx)
 
-        self.site_code_edit.setText(self.metadata.get("site", ""))
+        self.site_short_name_edit.setText(self.metadata.get("site_short_name", ""))
+        self.site_code_edit.setText(self.metadata.get("site_code", ""))
 
         # Restore the exact new-system round. Older saved sessions did not store
         # the round ID, so map their dates to a Survey123 round without consulting
@@ -586,10 +530,21 @@ class FieldDataWizard(QMainWindow):
                 device_label = self.devices[i][3]
                 if device_label in statuses:
                     self.device_tree.topLevelItem(i).setText(2, statuses[device_label].get("status", "Pending"))
-                    self.device_tree.topLevelItem(i).setText(3, str(statuses[device_label].get("files_copied", "0")))
+                actual_count = sum(
+                    1 for entry in self.file_inventory
+                    if entry.get("device_label") == device_label
+                )
+                self.device_tree.topLevelItem(i).setText(3, str(actual_count))
 
         self.tabs.setCurrentIndex(1)
         self.log(f"Resumed session: {len(self.file_inventory)} files already in inventory.")
+        if removed_duplicates:
+            self.log(
+                f"  Repaired {len(removed_duplicates)} exact duplicate inventory "
+                "record(s) left by an interrupted retry."
+            )
+        if removed_duplicates or migrated_site_metadata:
+            self.save_session()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -669,20 +624,25 @@ class FieldDataWizard(QMainWindow):
         self.org_combo.addItems(self.lookups.program_config.get("organizations") or ORGANIZATIONS)
         form_layout.addRow("Organization:", self.org_combo)
 
-        # Site (with autocomplete)
-        self.reserve_combo = QComboBox()
-        self.reserve_combo.setEditable(True)
-        reserve_names = self.lookups.reserve_names
-        self.reserve_combo.addItems(reserve_names)
+        # Formal site name (with autocomplete)
+        self.site_name_combo = QComboBox()
+        self.site_name_combo.setEditable(True)
+        site_names = self.lookups.site_names
+        self.site_name_combo.addItems(site_names)
 
-        completer = QCompleter(reserve_names)
+        completer = QCompleter(site_names)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
-        self.reserve_combo.setCompleter(completer)
-        self.reserve_combo.currentTextChanged.connect(self.on_reserve_changed)
-        form_layout.addRow("Site:", self.reserve_combo)
+        self.site_name_combo.setCompleter(completer)
+        self.site_name_combo.currentTextChanged.connect(self.on_site_changed)
+        form_layout.addRow("Site Name:", self.site_name_combo)
 
-        # Site code
+        # Stable relational key and deployment-ID token
+        self.site_short_name_edit = QLineEdit()
+        self.site_short_name_edit.setReadOnly(True)
+        form_layout.addRow("Site Short Name:", self.site_short_name_edit)
+
+        # Acronym
         self.site_code_edit = QLineEdit()
         self.site_code_edit.setReadOnly(True)
         form_layout.addRow("Site Code:", self.site_code_edit)
@@ -760,12 +720,12 @@ class FieldDataWizard(QMainWindow):
         self.plot_labels = {}
 
         # Reflect the combo's default selection. addItems() already selected the
-        # first reserve, but on_reserve_changed was connected afterward, so its
+        # first site, but on_site_changed was connected afterward, so its
         # site-code + plot-grid setup never ran for that initial value — the user
         # would otherwise have to re-select the site to proceed. Fall back to an
         # empty grid when there is no default (e.g. lookups failed to load).
-        if self.reserve_combo.currentText():
-            self.on_reserve_changed(self.reserve_combo.currentText())
+        if self.site_name_combo.currentText():
+            self.on_site_changed(self.site_name_combo.currentText())
         else:
             self._rebuild_plot_grid(reserve_code=None)
 
@@ -884,14 +844,14 @@ class FieldDataWizard(QMainWindow):
 
         # Control buttons
         control_layout = QHBoxLayout()
-        copy_btn = QPushButton("Select SD Card && Copy Files")
-        copy_btn.clicked.connect(self.copy_sd_card_data)
+        self.copy_btn = QPushButton("Select SD Card && Copy Files")
+        self.copy_btn.clicked.connect(self.copy_sd_card_data)
         skip_btn = QPushButton("Skip Selected Device")
         skip_btn.clicked.connect(self.skip_device)
         add_device_btn = QPushButton("Add Device…")
         add_device_btn.clicked.connect(self.add_device)
         add_device_btn.setToolTip("Add a new device (plot + type) to this deployment, e.g. a 5th plot or a missed device.")
-        control_layout.addWidget(copy_btn)
+        control_layout.addWidget(self.copy_btn)
         control_layout.addWidget(skip_btn)
         control_layout.addWidget(add_device_btn)
         control_layout.addStretch()
@@ -1034,24 +994,26 @@ class FieldDataWizard(QMainWindow):
     # Event Handlers
     # =========================================================================
 
-    def on_reserve_changed(self, text):
-        """Update site code and plot names when reserve changes"""
-        for code, name in self.lookups.reserves:
-            if name == text:
-                self.site_code_edit.setText(code)
-                self._populate_deploy_events(code)
-                return
+    def on_site_changed(self, text):
+        """Update canonical site identifiers and plot names when site changes."""
+        site = self.lookups.site_by_name.get(text)
+        if site:
+            self.site_short_name_edit.setText(site.site_short_name)
+            self.site_code_edit.setText(site.site_code)
+            self._populate_deploy_events(site.site_short_name)
+            return
+        self.site_short_name_edit.setText("")
         self.site_code_edit.setText("")
         self._populate_deploy_events("")
 
-    def _populate_deploy_events(self, site_code):
+    def _populate_deploy_events(self, site_short_name):
         """Show returned-card rounds separately from read-only open placements."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
         combo.blockSignals(True)
         combo.clear()
-        events = self.lookups.returned_rounds(site_code)
+        events = self.lookups.returned_rounds(site_short_name)
         for ev in events:
             start, end = ev["deployment_start"], ev["deployment_end"]
             count = ev["device_count"]
@@ -1062,7 +1024,7 @@ class FieldDataWizard(QMainWindow):
         combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
-        current = self.lookups.current_rounds(site_code)
+        current = self.lookups.current_rounds(site_short_name)
         if current:
             self.current_deployment_status_label.setText(
                 "\n".join(
@@ -1081,7 +1043,7 @@ class FieldDataWizard(QMainWindow):
         ev = self.deploy_event_combo.itemData(index)
         if not ev:
             self.lookups.clear_active_deployment_round()
-            self._rebuild_plot_grid(self.site_code_edit.text() or None)
+            self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
             return
         self.lookups.activate_deployment_round(ev["deployment_round_id"])
         start = QDate.fromString(ev["deployment_start"], "yyyy-MM-dd")
@@ -1091,7 +1053,7 @@ class FieldDataWizard(QMainWindow):
             end = QDate.fromString(ev["deployment_end"], "yyyy-MM-dd")
             if end.isValid():
                 self.deploy_end_date.setDate(end)
-        self._rebuild_plot_grid(self.site_code_edit.text() or None)
+        self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
 
     def on_observer_changed(self, text):
         """Show/hide other observer entry"""
@@ -1172,11 +1134,11 @@ class FieldDataWizard(QMainWindow):
     def validate_and_next(self):
         """Validate metadata and proceed to collection tab"""
         # Validation
-        if not self.reserve_combo.currentText():
+        if not self.site_name_combo.currentText():
             QMessageBox.warning(self, "Missing Information", "Please select a site.")
             return
 
-        if not self.site_code_edit.text():
+        if not self.site_short_name_edit.text() or not self.site_code_edit.text():
             QMessageBox.warning(self, "Missing Information", "Please select a valid site.")
             return
 
@@ -1200,13 +1162,15 @@ class FieldDataWizard(QMainWindow):
             return
 
         # Store metadata
-        reserve_name = self.reserve_combo.currentText()
-        reserve_code = self.site_code_edit.text()
+        site_name = self.site_name_combo.currentText()
+        site_short_name = self.site_short_name_edit.text()
+        site_code = self.site_code_edit.text()
 
         self.metadata = {
             "organization": self.org_combo.currentText(),
-            "reserve_name": reserve_name,
-            "site": reserve_code,
+            "site_name": site_name,
+            "site_short_name": site_short_name,
+            "site_code": site_code,
             "deployment_round_id": selected_event["deployment_round_id"],
             "deployment_event_id": selected_event["deployment_event_id"],
             "deployment_start": self.deploy_start_date.date().toString("yyyy-MM-dd"),
@@ -1217,7 +1181,7 @@ class FieldDataWizard(QMainWindow):
         # Build device list. Iterate over the plot numbers actually shown in the
         # grid (which were sized from plots.csv when the reserve was selected),
         # so a 5-plot reserve produces 5 plot entries and a 4-plot reserve produces 4.
-        plot_names = self.lookups.plot_names.get(reserve_code, {}) or {}
+        plot_names = self.lookups.plot_names.get(site_short_name, {}) or {}
 
         self.devices = []
         for plot_num in sorted(self.device_checkboxes.keys()):
@@ -1294,6 +1258,9 @@ class FieldDataWizard(QMainWindow):
 
     def copy_sd_card_data(self):
         """Copy data from SD card for selected device"""
+        if self._copy_in_progress:
+            return
+
         selected = self.device_tree.currentItem()
         if not selected:
             QMessageBox.information(self, "No Selection", "Please select a device from the list.")
@@ -1314,11 +1281,15 @@ class FieldDataWizard(QMainWindow):
                 return
 
         # Select SD card
+        self._copy_in_progress = True
+        self.copy_btn.setEnabled(False)
         sd_path = QFileDialog.getExistingDirectory(
             self, f"Select SD Card for Plot {plot_num} - {DEVICE_TYPES[dev_code]}"
         )
 
         if not sd_path:
+            self._copy_in_progress = False
+            self.copy_btn.setEnabled(True)
             return
 
         # Auto-count the files the copy loop will keep (anything classify_file()
@@ -1342,8 +1313,9 @@ class FieldDataWizard(QMainWindow):
 
         # One persistent ExifTool process for this whole device copy, instead of
         # spawning one per image (slow on a card of thousands). Closed in finally.
-        reconyx = ReconyxExtractor().start()
+        reconyx = None
         try:
+            reconyx = ReconyxExtractor().start()
             _files_copied, duplicate_count, hash_mismatch_count = self.process_sd_card_files(
                 Path(sd_path), device_folder, plot_num, plot_label, dev_code, device_label,
                 reconyx,
@@ -1353,7 +1325,9 @@ class FieldDataWizard(QMainWindow):
             device_entries = [e for e in self.file_inventory if e["device_label"] == device_label]
             total_for_device = len(device_entries)
             selected.setText(3, str(total_for_device))
-            self.save_session()
+            if not self.save_session():
+                selected.setText(2, "Incomplete")
+                raise RuntimeError("Session recovery file could not be saved")
 
             try:
                 write_metadata_outputs(
@@ -1403,10 +1377,9 @@ class FieldDataWizard(QMainWindow):
                 first_record = device_entries[0]
                 dev_type = first_record.get("device_type", "")
                 plot_num_val = first_record.get("plot_number", "")
-                site_value = self.metadata.get("site", "")
-                site_code = self.lookups.site_code_by_name.get(site_value, site_value)
+                site_short_name = self.metadata.get("site_short_name", "")
                 aru_key = (
-                    site_code,
+                    site_short_name,
                     int(plot_num_val) if str(plot_num_val).isdigit() else plot_num_val,
                     dev_type,
                 )
@@ -1433,7 +1406,10 @@ class FieldDataWizard(QMainWindow):
             self.log(f"✗ Error: {str(e)}\n")
             QMessageBox.critical(self, "Copy Error", f"Error copying files: {str(e)}")
         finally:
-            reconyx.close()
+            if reconyx is not None:
+                reconyx.close()
+            self._copy_in_progress = False
+            self.copy_btn.setEnabled(True)
 
     def process_sd_card_files(self, source_dir, dest_dir, plot_num, plot_label, dev_code, device_label, reconyx):
         """Process files from SD card.
@@ -1463,14 +1439,14 @@ class FieldDataWizard(QMainWindow):
         if orphans:
             self.log(f"  Removed {len(orphans)} orphaned file(s) from {device_label} left by a prior interrupted copy.")
 
-        # Resume support: skip files already in inventory for this device
-        already_copied = already_copied_relpaths(self.file_inventory, device_label)
-        prior_media_count = sum(
-            1
-            for entry in self.file_inventory
-            if entry["device_label"] == device_label and entry["file_type"] != "config"
+        # Resume support is keyed by source-relative identity. Existing records
+        # whose staged file is missing or size-inconsistent are restored to their
+        # original inventory path instead of being assigned a fresh filename.
+        inventoried_sources = inventory_by_source_relpath(
+            self.file_inventory, device_label
         )
-        file_sequence = prior_media_count + 1
+        inventoried_storage = index_inventory_by_storage_relpath(self.file_inventory)
+        file_sequence = next_plain_file_sequence(self.file_inventory, device_label)
 
         # Event counter for sequence-aware camera naming (increments per trigger, not per photo)
         prior_event_nums = [
@@ -1482,8 +1458,11 @@ class FieldDataWizard(QMainWindow):
         event_sequence = (max(prior_event_nums) + 1) if prior_event_nums else 1
         current_event_num = None
 
-        if already_copied:
-            self.log(f"  {len(already_copied)} files already copied for {device_label}, resuming...")
+        if inventoried_sources:
+            self.log(
+                f"  {len(inventoried_sources)} files already inventoried for "
+                f"{device_label}, resuming..."
+            )
 
         # Deployment end date for media filenames (YYYYMMDD)
         deploy_date = datetime.strptime(self.metadata["deployment_end"], "%Y-%m-%d")
@@ -1494,23 +1473,23 @@ class FieldDataWizard(QMainWindow):
         start_date_str = deploy_start.strftime("%Y%m%d")
 
         org = self.metadata["organization"]
-        site = self.metadata["site"]
-        plot_metadata = self.lookups.plot_metadata.get((site, plot_num), {})
+        site_short_name = self.metadata["site_short_name"]
+        plot_metadata = self.lookups.plot_metadata.get((site_short_name, plot_num), {})
 
         # Resolve physical device identifier
         if dev_code in AUDIO_DEVICE_TYPES:
-            aru_key = (site, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
+            aru_key = (site_short_name, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
             deployment_device_id = self.lookups.arus.get(aru_key, {}).get("device_id", "")
             device_id = parse_audiomoth_device_id(source_dir) or deployment_device_id
             if not device_id:
                 self.log(f"  Warning: could not find AudioMoth Device ID in {source_dir}")
         else:
-            cam_key = (site, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
+            cam_key = (site_short_name, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
             cam_meta = self.lookups.cameras.get(cam_key, {})
             device_id = cam_meta.get("camera_id", "")
             if not device_id:
                 self.log(
-                    f"  Warning: camera_id missing for {site} plot {plot_num} "
+                    f"  Warning: camera_id missing for {site_short_name} plot {plot_num} "
                     f"{dev_code} in the selected Survey123 deployment round"
                 )
 
@@ -1540,12 +1519,46 @@ class FieldDataWizard(QMainWindow):
                 if file_type == "other":
                     continue
 
-                # Skip files already copied in a prior session. Match on the path
-                # relative to the card root, not the bare filename, so two files
-                # that share a basename in different folders (e.g.
-                # 100RECNX/RCNX0001.JPG and 101RECNX/RCNX0001.JPG) aren't confused.
+                # Resume by card-relative path. A healthy staged file is skipped;
+                # a missing/truncated one is restored to the exact path already in
+                # the inventory and verified against its recorded hashes.
                 source_relpath = str(source_path.relative_to(source_dir))
-                if source_relpath in already_copied:
+                prior_entry = inventoried_sources.get(source_relpath)
+                if prior_entry is not None:
+                    prior_dest = (
+                        self.current_deployment_folder
+                        / inventory_storage_relpath(prior_entry)
+                    )
+                    expected_size = int(prior_entry.get("file_size_bytes", 0) or 0)
+                    staged_is_complete = (
+                        prior_dest.is_file()
+                        and (not expected_size or prior_dest.stat().st_size == expected_size)
+                    )
+                    if staged_is_complete:
+                        continue
+
+                    expected_sha256 = str(prior_entry.get("file_hash_sha256", ""))
+                    expected_sha1 = str(prior_entry.get("file_hash_sha1", ""))
+                    if not expected_sha256 or not expected_sha1:
+                        raise ValueError(
+                            f"Cannot safely restore {source_relpath}: inventory hashes missing"
+                        )
+                    self.log(
+                        f"  Restoring missing/incomplete staged file: "
+                        f"{prior_dest.name}"
+                    )
+                    result = copy_file_verified(
+                        source_path,
+                        prior_dest,
+                        expected_sha256=expected_sha256,
+                        expected_sha1=expected_sha1,
+                    )
+                    if result.attempts > 1:
+                        self.log(
+                            f"  Note: restored on retry {result.attempts - 1} — "
+                            f"{filename}"
+                        )
+                    files_copied += 1
                     continue
 
                 # For images: read EXIF + Reconyx metadata from source before
@@ -1596,45 +1609,91 @@ class FieldDataWizard(QMainWindow):
                     dest_path = dest_dir / new_filename
                     file_sequence += 1
 
-                # Remove any partial file left by a previously interrupted copy
-                if dest_path.exists():
-                    try:
-                        dest_path.unlink()
-                    except Exception as e:
-                        self.log(f"  Warning: could not remove partial file {dest_path.name}: {e}")
+                # Read/hash retries cover OS-level I/O failures as well as the
+                # post-copy verification. Duplicate media is rejected before any
+                # destination is touched.
+                try:
+                    source_result = hash_file_with_retries(source_path)
+                    source_hash = source_result.sha256
+                    source_sha1 = source_result.sha1
+                    if source_result.attempts > 1:
+                        self.log(
+                            f"  Note: source read recovered on retry "
+                            f"{source_result.attempts - 1} — {filename}"
+                        )
 
-                # Copy + post-copy hash verification with auto-retry: a transient
-                # SD-read glitch can corrupt a copy, so re-copy and re-verify up to
-                # 3 attempts total before declaring a hard failure. A copy recovered
-                # on retry is NOT counted as a mismatch.
-                source_hash, source_sha1 = sha256_sha1(source_path)
-                max_attempts = 3
-                copy_ok = False
-                file_hash, file_sha1 = "", ""
-                for attempt in range(1, max_attempts + 1):
-                    shutil.copy2(source_path, dest_path)
-                    file_hash, file_sha1 = sha256_sha1(dest_path)
-                    if verify_copy_hash(source_hash, file_hash):
-                        copy_ok = True
-                        if attempt > 1:
-                            self.log(f"  Note: copy verified on retry {attempt - 1} — {filename}")
-                        break
-                    # Mismatch — remove the bad copy before retrying (or before erroring).
-                    try:
-                        dest_path.unlink()
-                    except Exception:
-                        pass
+                    if is_duplicate_media(
+                        source_hash, file_type, self.seen_file_hashes
+                    ):
+                        self.log(
+                            f"  Warning: duplicate file skipped — {new_filename} "
+                            "matches an already-inventoried file"
+                        )
+                        duplicate_count += 1
+                        duplicate_names.append(new_filename)
+                        append_qc_report(
+                            self.current_deployment_folder,
+                            "duplicate_detection",
+                            device_label,
+                            "warning",
+                            f"Duplicate hash: {new_filename} matches an "
+                            "already-inventoried file",
+                        )
+                        continue
 
-                if not copy_ok:
-                    self.log(f"  ERROR: hash mismatch after copy — {filename} skipped after {max_attempts} attempts (source SHA-256 {source_hash[:8]}… ≠ dest {file_hash[:8]}…)")
+                    relative_dest = dest_path.relative_to(
+                        self.current_deployment_folder
+                    ).as_posix()
+                    prior_at_destination = inventoried_storage.get(relative_dest)
+                    if prior_at_destination is not None:
+                        if prior_at_destination.get("file_hash_sha256") == source_hash:
+                            expected_size = int(
+                                prior_at_destination.get("file_size_bytes", 0) or 0
+                            )
+                            if (
+                                not dest_path.is_file()
+                                or (expected_size and dest_path.stat().st_size != expected_size)
+                            ):
+                                copy_file_verified(
+                                    source_path,
+                                    dest_path,
+                                    expected_sha256=source_hash,
+                                    expected_sha1=source_sha1,
+                                )
+                            self.log(
+                                f"  Already inventoried at {relative_dest}; "
+                                "not creating a duplicate record."
+                            )
+                            continue
+                        raise ValueError(
+                            f"Refusing to overwrite inventory-owned destination: "
+                            f"{relative_dest}"
+                        )
+
+                    copy_result = copy_file_verified(
+                        source_path,
+                        dest_path,
+                        expected_sha256=source_hash,
+                        expected_sha1=source_sha1,
+                    )
+                    if copy_result.attempts > 1:
+                        self.log(
+                            f"  Note: copy verified on retry "
+                            f"{copy_result.attempts - 1} — {filename}"
+                        )
+                    file_hash, file_sha1 = source_hash, source_sha1
+                except FileTransferError as exc:
                     hash_mismatch_count += 1
                     hash_mismatch_names.append(filename)
-                    append_qc_report(self.current_deployment_folder, "hash_verification", device_label, "error",
-                                     f"Hash mismatch on {filename} (source ≠ dest)")
-                    QMessageBox.critical(self, "Copy Verification Failed",
-                        f"Hash mismatch detected for:\n{filename}\n\nThe destination file does not match the source after {max_attempts} attempts. "
-                        f"The file has been removed from staging. Check the SD card and retry.")
-                    continue
+                    append_qc_report(
+                        self.current_deployment_folder,
+                        "hash_verification",
+                        device_label,
+                        "error",
+                        str(exc),
+                    )
+                    self.save_session()
+                    raise
 
                 # File size floor: flag suspiciously small files using device-aware thresholds.
                 dest_size = dest_path.stat().st_size
@@ -1710,22 +1769,11 @@ class FieldDataWizard(QMainWindow):
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
-                # Duplicate detection: skip media files whose hash already exists in
-                # this session. CONFIG/text files are exempt — identical default
-                # settings across devices yield byte-identical CONFIG.TXT files, and
-                # each device's settings record must be kept (see is_duplicate_media).
-                if is_duplicate_media(file_hash, file_type, self.seen_file_hashes):
-                    self.log(f"  Warning: duplicate file skipped — {new_filename} matches an already-inventoried file")
-                    duplicate_count += 1
-                    duplicate_names.append(new_filename)
-                    append_qc_report(self.current_deployment_folder, "duplicate_detection", device_label, "warning",
-                                     f"Duplicate hash: {new_filename} matches an already-inventoried file")
-                    dest_path.unlink(missing_ok=True)
-                    continue
-
                 if file_type != "config":
                     self.seen_file_hashes.add(file_hash)
                 self.file_inventory.append(file_info)
+                inventoried_sources[source_relpath] = file_info
+                inventoried_storage[file_info["storage_relpath"]] = file_info
                 files_copied += 1
 
                 if file_type == "audio":
@@ -1739,7 +1787,10 @@ class FieldDataWizard(QMainWindow):
                 # ingest quadratic. The device-complete save (in the caller) always
                 # flushes the tail, bounding crash rework to this interval.
                 if time.monotonic() - self._last_session_save >= SESSION_SAVE_INTERVAL_SEC:
-                    self.save_session()
+                    if not self.save_session():
+                        raise FileTransferError(
+                            "Collection stopped because session.json could not be saved"
+                        )
 
         expected_floor = (
             file_size_floor_for("audio", dev_code)
@@ -1811,8 +1862,8 @@ class FieldDataWizard(QMainWindow):
                 "Start or open a deployment before adding a device.")
             return
 
-        reserve_code = self.metadata.get("site", "")
-        plot_names_for_reserve = self.lookups.plot_names.get(reserve_code, {}) or {}
+        site_short_name = self.metadata.get("site_short_name", "")
+        plot_names_for_reserve = self.lookups.plot_names.get(site_short_name, {}) or {}
 
         # Build the dialog
         dlg = QDialog(self)
@@ -1986,8 +2037,9 @@ class FieldDataWizard(QMainWindow):
         summary.append("DEPLOYMENT INFORMATION")
         summary.append("-" * 60)
         summary.append(f"Organization: {self.metadata['organization']}")
-        summary.append(f"Reserve: {self.metadata['reserve_name']}")
-        summary.append(f"Site: {self.metadata['site']}")
+        summary.append(f"Site Name: {self.metadata['site_name']}")
+        summary.append(f"Site Short Name: {self.metadata['site_short_name']}")
+        summary.append(f"Site Code: {self.metadata['site_code']}")
         summary.append(f"Deployment Event Period: {self.metadata['deployment_start']} to {self.metadata['deployment_end']}")
         summary.append(f"Observer: {self.metadata['observer']}")
         summary.append("")
@@ -2178,7 +2230,7 @@ class FieldDataWizard(QMainWindow):
             self.metadata,
             self.file_inventory,
             box_config=self.box_config,
-            valid_reserve_names=self._valid_reserve_names(),
+            valid_site_names=self._valid_site_names(),
         )
         self.upload_thread.progress.connect(self.on_upload_progress)
         self.upload_thread.finished.connect(self.on_upload_finished)
@@ -2324,7 +2376,7 @@ class FieldDataWizard(QMainWindow):
             self.file_inventory,
             self.metadata,
             box_config=self.box_config,
-            valid_reserve_names=self._valid_reserve_names(),
+            valid_site_names=self._valid_site_names(),
         )
         self.box_verify_thread.finished.connect(self._on_auto_box_verify_finished)
         self.box_verify_thread.start()
@@ -2351,7 +2403,7 @@ class FieldDataWizard(QMainWindow):
             self.file_inventory,
             self.metadata,
             box_config=self.box_config,
-            valid_reserve_names=self._valid_reserve_names(),
+            valid_site_names=self._valid_site_names(),
             hash_retry=2,  # automatic run: absorb Box's post-upload SHA-1 lag
         )
         self.fixity_thread.progress.connect(self._on_auto_fixity_progress)
@@ -2548,7 +2600,7 @@ class FieldDataWizard(QMainWindow):
             self.file_inventory,
             self.metadata,
             box_config=self.box_config,
-            valid_reserve_names=self._valid_reserve_names(),
+            valid_site_names=self._valid_site_names(),
         )
         self.fixity_thread.progress.connect(self._on_fixity_progress)
         self.fixity_thread.finished.connect(self._on_fixity_finished)
@@ -2651,7 +2703,7 @@ class FieldDataWizard(QMainWindow):
             self.file_inventory,
             self.metadata,
             box_config=self.box_config,
-            valid_reserve_names=self._valid_reserve_names(),
+            valid_site_names=self._valid_site_names(),
         )
         self.box_verify_thread.finished.connect(self._on_box_verify_finished)
         self.box_verify_thread.start()
@@ -2931,7 +2983,8 @@ class FieldDataWizard(QMainWindow):
             self.box_upload_complete = False
 
             # Reset UI
-            self.reserve_combo.setCurrentIndex(-1)
+            self.site_name_combo.setCurrentIndex(-1)
+            self.site_short_name_edit.clear()
             self.site_code_edit.clear()
             self.deploy_start_date.setDate(QDate.currentDate())
             self.deploy_end_date.setDate(QDate.currentDate())

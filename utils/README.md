@@ -2,6 +2,33 @@
 
 Helper scripts for maintenance and data recovery tasks.
 
+The active lookup contract uses `site_name,site_short_name,site_code` in
+`sites.csv`; `plots.csv` and Survey123-derived device-level `deployments.csv`
+join by `site_short_name`. `devices.csv` has no site key. Retired
+`cameras.csv`, `ARUs.csv`, and event-only `deployments.csv` are not inputs to
+the app or the Survey123 refresh transformer.
+
+## `sync_survey123_lookups.py refresh`
+
+This is the only supported publisher for the active device lookup pair:
+
+```text
+Survey123 → validated CSV snapshot → Box app_config → local offline caches
+```
+
+Run it with the field-data-manager closed:
+
+```bash
+.venv/bin/python utils/sync_survey123_lookups.py refresh
+```
+
+The command validates both CSVs and their relational references before the
+first Box write. Existing canonical Box files receive new versions, preserving
+the prior content in Box version history; missing files are created. The Box
+copies are downloaded and hash-verified before the local cache is replaced.
+Box credentials and `app_config_folder_id` come from
+`~/.cassn_config/config.json`.
+
 ---
 
 ## `box_auth_setup.py`
@@ -424,26 +451,37 @@ update `session.json`; normal app-driven uploads should use the automatic GUI
 workflow so nested inventory paths stay synchronized. Audio (`BD`/`BT`) is never
 touched. Point the WI uploader at each `<device>_N` subfolder in turn.
 
+For John's production maintenance workflow, a requested retroactive split is a
+**post-upload operation on the Box Drive deployment copy**. Resolve and target
+the deployment below
+`/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data`; do not target
+the G-DRIVE staging copy unless John explicitly requests that location. This
+operating convention is separate from the application's automatic pre-upload
+behavior for newly ingested deployments.
+
 ### Run
 
 ```bash
-# Preview only — writes nothing (default):
-python utils/split_for_wi.py --root "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging"
-
-# Perform the split on one deployment:
+# Preview one uploaded deployment in Box Drive — writes nothing (default):
 python utils/split_for_wi.py \
-  --root ".../UC_JepsonPrairie_20260423" --apply
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
 
-# Put everything back:
+# Perform the verified split while preventing sleep:
+caffeinate python utils/split_for_wi.py \
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+  --apply --yes
+
+# Put the Box Drive deployment back:
 python utils/split_for_wi.py \
-  --root ".../UC_JepsonPrairie_20260423" --undo
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+  --undo
 ```
 
 ### Options
 
 | Flag | Meaning |
 | --- | --- |
-| `--root` | Folder to scan: a season, a single deployment, or the staging drive. Required. |
+| `--root` | Folder to scan: a season or a single deployment. For production maintenance, use the Box Drive deployment. Required. |
 | `--limit N` | Max images per part (default `15000`). |
 | `--suffixes` | Device-folder suffixes to target (default `_ML _SA`). |
 | `--apply` | Perform the split. **Default is a dry-run report.** |
@@ -465,6 +503,41 @@ python utils/split_for_wi.py \
   stop with an error rather than overwriting or silently skipping a file.
 - **Safe against re-matching.** Part folders (`p1_ML_1`) never end in `_ML` /
   `_SA`, so re-scans can't recurse into prior output.
-- **Do not run during upload.** For a historical deployment, make an explicit
-  backup and ensure no Box upload or Box Drive synchronization is active before
-  applying a retroactive split.
+- **Run only after the original upload completes.** Do not overlap the split
+  with the initial Box upload or another maintenance utility. When the Box Drive
+  copy is the target, Box Drive will synchronize the verified moves afterward;
+  keep it running and keep the Mac awake until the server catches up.
+- **Avoid unaffected large folders.** Use `image_file_metadata.csv` to identify
+  oversized ML/SA devices first. For a large Box Drive deployment, expose only
+  those device folders through temporary symlinks under `/tmp`, run the dry-run
+  and apply against that selector root serially, then remove the symlinks. The
+  symlinks select targets; all moves still occur inside Box Drive.
+
+---
+
+## `normalize_wi_coordinates.py`
+
+Updates latitude and longitude in existing Wildlife Insights deployment CSVs
+to exactly eight decimal places. Values with fewer decimal places are padded
+with trailing zeroes; values with greater precision are rounded. Source lookup
+tables and general image metadata are not modified.
+
+The utility accepts one CSV, one deployment folder, or a broader root such as a
+Box year folder. Directory scans only select files matching
+`WI_metadata/wildlife_insights_*_deployments.csv`.
+
+```bash
+# Preview every applicable WI CSV below the 2026 Box folder:
+python utils/normalize_wi_coordinates.py \
+  "/Users/example/Library/CloudStorage/Box-Box/CASSN/field_data/2026"
+
+# Apply the reported changes:
+python utils/normalize_wi_coordinates.py \
+  "/Users/example/Library/CloudStorage/Box-Box/CASSN/field_data/2026" \
+  --apply
+```
+
+The default dry run writes nothing. With `--apply`, each changed CSV is written
+to a temporary file in the same directory and atomically replaced only after
+the complete output is safely flushed. Blank or invalid coordinates are left
+unchanged and reported as warnings.

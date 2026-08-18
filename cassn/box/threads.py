@@ -12,7 +12,7 @@ Dependencies are injected rather than read from module globals:
 
 * ``box_config`` (:class:`cassn.box.auth.BoxConfig`) carries the credentials
   and the field-data root folder id;
-* ``valid_reserve_names`` is the canonical set of reserve names (from the
+* ``valid_site_names`` is the canonical set of formal site names (from the
   loaded lookup tables) used to validate the destination path.
 
 This keeps the threads testable and free of the import-time config/CSV reads
@@ -104,14 +104,14 @@ class BoxUploadThread(QThread):
         file_inventory: list | None = None,
         *,
         box_config: BoxConfig,
-        valid_reserve_names: set[str],
+        valid_site_names: set[str],
     ):
         super().__init__()
         self.deployment_folder = deployment_folder
         self.metadata = metadata
         self.file_inventory = file_inventory or []
         self.box_config = box_config
-        self.valid_reserve_names = valid_reserve_names
+        self.valid_site_names = valid_site_names
         self.client = None
         self.deploy_folder_id = None  # set during run(); used for provenance re-upload
         # Cooperative cancellation flag — set from the GUI thread via cancel()
@@ -137,11 +137,11 @@ class BoxUploadThread(QThread):
             storage = BoxStorage(self.client)
 
             # Validate reserve name against canonical list before building path
-            reserve_name = self.metadata.get("reserve_name", "")
-            if reserve_name not in self.valid_reserve_names:
+            site_name = self.metadata.get("site_name", "")
+            if site_name not in self.valid_site_names:
                 self.finished.emit(
                     False,
-                    f"Reserve name '{reserve_name}' not found in sites.csv. "
+                    f"Site name '{site_name}' not found in sites.csv. "
                     "Cannot determine Box folder path.",
                 )
                 return
@@ -152,7 +152,7 @@ class BoxUploadThread(QThread):
             deploy_name = self.deployment_folder.name
 
             year_id = storage.find_or_create_folder(target_folder_id, year)
-            reserve_id = storage.find_or_create_folder(year_id, reserve_name)
+            reserve_id = storage.find_or_create_folder(year_id, site_name)
             deploy_id = storage.find_or_create_folder(reserve_id, deploy_name)
             self.deploy_folder_id = deploy_id  # saved for provenance re-upload
 
@@ -400,14 +400,14 @@ class BoxVerifyThread(QThread):
         metadata: dict,
         *,
         box_config: BoxConfig,
-        valid_reserve_names: set[str],
+        valid_site_names: set[str],
     ):
         super().__init__()
         self.deployment_folder = deployment_folder
         self.file_inventory = file_inventory
         self.metadata = metadata
         self.box_config = box_config
-        self.valid_reserve_names = valid_reserve_names
+        self.valid_site_names = valid_site_names
 
     def run(self):
         try:
@@ -418,13 +418,13 @@ class BoxVerifyThread(QThread):
 
             storage = BoxStorage(client)
 
-            reserve_name = self.metadata.get("reserve_name", "")
-            if reserve_name not in self.valid_reserve_names:
-                self.finished.emit(False, f"Reserve '{reserve_name}' not in sites.csv", [])
+            site_name = self.metadata.get("site_name", "")
+            if site_name not in self.valid_site_names:
+                self.finished.emit(False, f"Site '{site_name}' not in sites.csv", [])
                 return
 
             year = self.metadata.get("deployment_end", "")[:4]
-            reserve_folder_name = sanitize_box_folder_name(reserve_name)
+            reserve_folder_name = sanitize_box_folder_name(site_name)
             deploy_name = self.deployment_folder.name
 
             year_id = storage.find_child_folder(
@@ -528,7 +528,7 @@ class FixityCheckThread(QThread):
         metadata: dict,
         *,
         box_config: BoxConfig,
-        valid_reserve_names: set[str],
+        valid_site_names: set[str],
         hash_retry: int = 0,
     ):
         super().__init__()
@@ -536,7 +536,7 @@ class FixityCheckThread(QThread):
         self.file_inventory = file_inventory
         self.metadata = metadata
         self.box_config = box_config
-        self.valid_reserve_names = valid_reserve_names
+        self.valid_site_names = valid_site_names
         # >0 when run as the automatic post-upload verify: Box can lag computing a
         # fresh file's SHA-1, so re-fetch unavailable hashes before reporting them.
         # The manual button leaves this 0 (on-demand re-check, no lag expected).
@@ -557,13 +557,13 @@ class FixityCheckThread(QThread):
             storage = BoxStorage(client)
 
             # 2) Walk to the deployment folder on Box
-            reserve_name = self.metadata.get("reserve_name", "")
-            if reserve_name not in self.valid_reserve_names:
-                self.finished.emit(False, f"Reserve '{reserve_name}' not in sites.csv.", [])
+            site_name = self.metadata.get("site_name", "")
+            if site_name not in self.valid_site_names:
+                self.finished.emit(False, f"Site '{site_name}' not in sites.csv.", [])
                 return
 
             year = self.metadata.get("deployment_end", "")[:4]
-            reserve_folder_name = sanitize_box_folder_name(reserve_name)
+            reserve_folder_name = sanitize_box_folder_name(site_name)
             deploy_name = self.deployment_folder.name
 
             year_id = storage.find_child_folder(

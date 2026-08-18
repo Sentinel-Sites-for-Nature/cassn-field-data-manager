@@ -7,13 +7,17 @@ import pytest
 from cassn.core.inventory import (
     already_copied_relpaths,
     count_expected_files,
+    deduplicate_exact_storage_entries,
     default_storage_relpath,
     index_inventory_by_storage_relpath,
+    inventory_by_source_relpath,
     inventory_storage_relpath,
+    next_plain_file_sequence,
     refresh_legacy_device_manifest,
     reconcile_device_dir,
     set_inventory_storage_relpath,
     sorted_walk,
+    write_session,
 )
 
 
@@ -131,6 +135,86 @@ def test_index_inventory_by_storage_relpath_rejects_collisions():
 
     with pytest.raises(ValueError, match="Duplicate inventory storage path"):
         index_inventory_by_storage_relpath(entries)
+
+
+def test_exact_duplicate_config_record_is_safely_collapsed():
+    record = {
+        "device_label": "p1_BD",
+        "new_filename": "UC_S_plot1_BD_20260305_CONFIG_01.txt",
+        "source_relpath": "CONFIG.TXT",
+        "file_hash_sha256": "abc123",
+        "file_hash_sha1": "def456",
+    }
+    entries = [record, dict(record)]
+
+    removed = deduplicate_exact_storage_entries(entries)
+
+    assert len(removed) == 1
+    assert entries == [record]
+
+
+def test_conflicting_storage_collision_is_never_auto_repaired():
+    entries = [
+        {
+            "device_label": "p1_BD",
+            "new_filename": "config.txt",
+            "source_relpath": "CONFIG.TXT",
+            "file_hash_sha256": "first",
+        },
+        {
+            "device_label": "p1_BD",
+            "new_filename": "config.txt",
+            "source_relpath": "CONFIG.TXT",
+            "file_hash_sha256": "different",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="Conflicting duplicate"):
+        deduplicate_exact_storage_entries(entries)
+
+
+def test_inventory_by_source_relpath_is_device_scoped_and_unique():
+    p1 = {
+        "device_label": "p1_BD",
+        "source_relpath": "20260420_000000.WAV",
+    }
+    p2 = {
+        "device_label": "p2_BD",
+        "source_relpath": "20260420_000000.WAV",
+    }
+    assert inventory_by_source_relpath([p1, p2], "p1_BD") == {
+        "20260420_000000.WAV": p1
+    }
+
+
+def test_next_plain_sequence_uses_max_suffix_not_record_count():
+    entries = [
+        {"device_label": "p1_BD", "new_filename": "UC_S_plot1_BD_20260710_00001.wav"},
+        {"device_label": "p1_BD", "new_filename": "UC_S_plot1_BD_20260710_00014.wav"},
+        {"device_label": "p2_BD", "new_filename": "UC_S_plot2_BD_20260710_00099.wav"},
+        {"device_label": "p1_BD", "new_filename": "UC_S_plot1_BD_20260305_CONFIG_01.txt"},
+    ]
+
+    assert next_plain_file_sequence(entries, "p1_BD") == 15
+
+
+def test_write_session_reports_success(tmp_path):
+    assert write_session(tmp_path, {"schema_version": 1}) == ""
+    assert json.loads((tmp_path / "session.json").read_text()) == {
+        "schema_version": 1
+    }
+
+
+def test_write_session_reports_replace_failure(tmp_path, monkeypatch):
+    def fail_replace(_self, _target):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(type(tmp_path), "replace", fail_replace)
+
+    error = write_session(tmp_path, {"schema_version": 1})
+
+    assert "Could not save session recovery file" in error
+    assert "Input/output error" in error
 
 
 def test_reconcile_device_dir_removes_only_orphans(tmp_path):

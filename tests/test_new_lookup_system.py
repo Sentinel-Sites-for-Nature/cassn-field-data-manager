@@ -11,19 +11,22 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from cassn.export.metadata_csv import build_metadata_rows
+from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS
 from cassn.lookups import (
     LookupSchemaError,
     LookupTables,
+    Site,
     build_deployment_rounds,
     load_device_deployments,
     load_plot_names,
+    load_sites,
 )
 
 
 FIELDS = [
     "deployment_id",
     "deployment_event_id",
-    "site_code",
+    "site_short_name",
     "plot_number",
     "device_type",
     "device_id",
@@ -51,7 +54,7 @@ def placement(**changes) -> dict:
     row = {
         "deployment_id": "dep-old-camera",
         "deployment_event_id": "source-event",
-        "site_code": "TestSite",
+        "site_short_name": "TestSite",
         "plot_number": "1",
         "device_type": "ML",
         "device_id": "CAM-OLD",
@@ -68,6 +71,90 @@ def placement(**changes) -> dict:
     }
     row.update(changes)
     return row
+
+
+def test_canonical_site_and_plot_loaders_join_on_short_name(tmp_path):
+    sites_path = tmp_path / "sites.csv"
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        sites_path,
+        ["site_name", "site_short_name", "site_code"],
+        [{
+            "site_name": "Cahill Riparian Reserve",
+            "site_short_name": "Cahill",
+            "site_code": "CRR",
+        }],
+    )
+    write_csv(
+        plots_path,
+        ["site_short_name", "plot_number", "plot_name"],
+        [{"site_short_name": "Cahill", "plot_number": "1", "plot_name": "One"}],
+    )
+
+    assert load_sites(sites_path) == [Site("Cahill Riparian Reserve", "Cahill", "CRR")]
+    plot_names, _plot_metadata = load_plot_names(plots_path)
+    assert plot_names == {"Cahill": {1: "One"}}
+
+
+def test_plots_without_names_are_still_selectable(tmp_path):
+    """Survey123-sourced plots.csv leaves plot_name blank for many sites; those
+    plots must still reach the wizard's device grid (keyed on plot number)."""
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_short_name", "plot_number", "plot_name"],
+        [
+            {"site_short_name": "StrathearnRanch", "plot_number": "1", "plot_name": ""},
+            {"site_short_name": "StrathearnRanch", "plot_number": "2", "plot_name": ""},
+            {"site_short_name": "Cahill", "plot_number": "1", "plot_name": "One"},
+        ],
+    )
+
+    plot_names, plot_metadata = load_plot_names(plots_path)
+
+    assert plot_names == {
+        "StrathearnRanch": {1: "", 2: ""},
+        "Cahill": {1: "One"},
+    }
+    assert plot_metadata[("StrathearnRanch", 1)]["plot_name"] == ""
+
+
+def test_plot_number_zero_is_excluded(tmp_path):
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_short_name", "plot_number", "plot_name"],
+        [
+            {"site_short_name": "Cahill", "plot_number": "0", "plot_name": ""},
+            {"site_short_name": "Cahill", "plot_number": "1", "plot_name": "One"},
+        ],
+    )
+
+    plot_names, _plot_metadata = load_plot_names(plots_path)
+
+    assert plot_names == {"Cahill": {1: "One"}}
+
+
+def test_legacy_site_schema_is_rejected(tmp_path):
+    sites_path = tmp_path / "sites.csv"
+    write_csv(
+        sites_path,
+        ["site_name", "site_code", "label_code"],
+        [{"site_name": "Cahill Riparian Reserve", "site_code": "Cahill", "label_code": "CRR"}],
+    )
+
+    with pytest.raises(LookupSchemaError, match="required columns"):
+        load_sites(sites_path)
+
+
+def test_metadata_schemas_expose_only_canonical_site_fields():
+    for fields in (IMAGE_FIELDS, AUDIO_FIELDS):
+        assert "site_name" in fields
+        assert "site_short_name" in fields
+        assert "site_code" in fields
+        assert "site" not in fields
+        assert "site_full_name" not in fields
+        assert "label_code" not in fields
 
 
 def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path):
@@ -110,6 +197,7 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
     may = next(event for event in events["TestSite"] if event["deployment_end"] == "2026-05-06")
     assert april["deployment_start"] == "2026-01-08"
     assert april["device_count"] == 2
+    assert april["deployment_event_id"] == "UC_TestSite_20260424"
     assert may["device_count"] == 1
 
     lookups = LookupTables(
@@ -123,6 +211,7 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
     assert [event["deployment_start"] for event in lookups.current_rounds("TestSite")] == [
         "2026-05-06"
     ]
+    assert lookups.current_rounds("TestSite")[0]["deployment_event_id"] == ""
     lookups.activate_deployment_round(april["deployment_round_id"])
     assert lookups.cameras[("TestSite", 1, "ML")]["camera_id"] == "CAM-OLD"
     assert lookups.arus[("TestSite", 1, "BD")]["device_id"] == "ARU-1"
@@ -151,7 +240,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
     event = events["TestSite"][0]
     lookups = LookupTables(
-        reserves=[("TestSite", "Test Reserve")],
+        sites=[Site("Test Reserve", "TestSite", "TST")],
         soundhub_config={},
         wi_config={},
         deployments=events,
@@ -190,7 +279,9 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     images, audio = build_metadata_rows(
         {
             "organization": "UC",
-            "site": "TestSite",
+            "site_name": "Test Reserve",
+            "site_short_name": "TestSite",
+            "site_code": "TST",
             "deployment_start": event["deployment_start"],
             "deployment_end": event["deployment_end"],
             "deployment_event_id": event["deployment_event_id"],
@@ -203,6 +294,9 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     assert images[0]["start_date"] == "2026-01-08 00:00:00"
     assert images[0]["end_date"] == "2026-04-24 23:59:59"
     assert images[0]["event_name"] == "2026JAN-2026APR"
+    assert images[0]["site_name"] == "Test Reserve"
+    assert images[0]["site_short_name"] == "TestSite"
+    assert images[0]["site_code"] == "TST"
     assert audio[0]["date_installed"] == "2026-03-04"
 
 
@@ -227,7 +321,7 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
     write_csv(path, FIELDS, rows)
     events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
     lookups = LookupTables(
-        reserves=[("TestSite", "Test Reserve")],
+        sites=[Site("Test Reserve", "TestSite", "TST")],
         plot_names={"TestSite": {1: "One"}},
         deployments=events,
         _deployment_rows_by_round=rows_by_round,
@@ -238,6 +332,9 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
 
     window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
     try:
+        assert window.site_name_combo.currentText() == "Test Reserve"
+        assert window.site_short_name_edit.text() == "TestSite"
+        assert window.site_code_edit.text() == "TST"
         assert window.deploy_event_combo.count() == 1
         assert window.deploy_event_combo.currentData()["deployment_end"] == "2026-04-24"
         assert "Since 2026-04-24" in window.current_deployment_status_label.text()
@@ -262,42 +359,3 @@ def test_event_only_legacy_deployments_schema_is_rejected(tmp_path):
 
     with pytest.raises(LookupSchemaError, match="wrong schema"):
         load_device_deployments(path)
-
-
-def test_plots_without_names_are_still_selectable(tmp_path):
-    """Survey123-sourced plots.csv leaves plot_name blank for many sites; those
-    plots must still reach the wizard's device grid (keyed on plot number)."""
-    plots_path = tmp_path / "plots.csv"
-    write_csv(
-        plots_path,
-        ["site_code", "plot_number", "plot_name"],
-        [
-            {"site_code": "StrathearnRanch", "plot_number": "1", "plot_name": ""},
-            {"site_code": "StrathearnRanch", "plot_number": "2", "plot_name": ""},
-            {"site_code": "Cahill", "plot_number": "1", "plot_name": "One"},
-        ],
-    )
-
-    plot_names, plot_metadata = load_plot_names(plots_path)
-
-    assert plot_names == {
-        "StrathearnRanch": {1: "", 2: ""},
-        "Cahill": {1: "One"},
-    }
-    assert plot_metadata[("StrathearnRanch", 1)]["plot_name"] == ""
-
-
-def test_plot_number_zero_is_excluded(tmp_path):
-    plots_path = tmp_path / "plots.csv"
-    write_csv(
-        plots_path,
-        ["site_code", "plot_number", "plot_name"],
-        [
-            {"site_code": "Cahill", "plot_number": "0", "plot_name": ""},
-            {"site_code": "Cahill", "plot_number": "1", "plot_name": "One"},
-        ],
-    )
-
-    plot_names, _plot_metadata = load_plot_names(plots_path)
-
-    assert plot_names == {"Cahill": {1: "One"}}

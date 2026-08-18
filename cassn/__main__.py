@@ -22,7 +22,7 @@ from cassn.box.auth import BOX_AVAILABLE, load_box_config
 from cassn.config import LOCAL_DATA_DIR
 from cassn.core.image_metadata import EXIF_AVAILABLE
 from cassn.gui import FieldDataWizard
-from cassn.lookups import LookupSchemaError, LookupTables
+from cassn.lookup_sync import LookupBootstrapError, bootstrap_lookup_tables
 
 
 def main() -> None:
@@ -38,18 +38,22 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # Load the injected dependencies once and hand them to the window.
+    # Box is the canonical distribution point. Synchronize the complete
+    # configuration before strict loading; a validated local snapshot is the
+    # only permitted offline fallback.
     box_config = load_box_config()
     try:
-        lookups = LookupTables.load(LOCAL_DATA_DIR)
-    except LookupSchemaError as exc:
+        bootstrap = bootstrap_lookup_tables(box_config, LOCAL_DATA_DIR)
+        lookups = bootstrap.lookups
+    except LookupBootstrapError as exc:
         QMessageBox.critical(
             None,
-            "Survey123 Lookups Missing or Invalid",
-            f"The new device lookup system could not be loaded:\n\n{exc}\n\n"
-            "The app will not fall back to cameras.csv or ARUs.csv.",
+            "Lookup Configuration Unavailable",
+            str(exc),
         )
         raise SystemExit(1) from exc
+    if bootstrap.warning:
+        QMessageBox.warning(None, "Using Offline Lookup Cache", bootstrap.warning)
 
     window = FieldDataWizard(lookups=lookups, box_config=box_config)
     window.show()

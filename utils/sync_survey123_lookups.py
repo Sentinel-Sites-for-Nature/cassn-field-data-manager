@@ -4,8 +4,9 @@
 This utility is deliberately standalone and does not run when the field data
 manager starts. Snapshot and transform operations are non-destructive; the
 explicit ``refresh`` command installs only the local Survey123-managed lookup
-pair after validation, backup, atomic replacement, and hash verification. It
-never modifies ArcGIS records or Box-hosted lookup tables.
+pair after validation, publishes that validated pair to canonical Box
+``app_config`` files, and then updates the local offline cache with backup,
+atomic replacement, and hash verification. It never modifies ArcGIS records.
 
 The OAuth implementation uses authorization-code flow with PKCE.  A client
 secret is neither read nor sent: this is a native/public client, so the
@@ -51,6 +52,10 @@ try:
         load_device_deployments,
         load_devices,
     )
+    from cassn.box.auth import get_box_client, load_box_config
+    from cassn.box.lookup_publisher import publish_validated_lookup_pair
+    from cassn.lookup_sync import canonical_deployment_id
+    from cassn.config import CONFIG_JSON as DEFAULT_BOX_CONFIG_PATH
 except ModuleNotFoundError:  # Direct execution from outside the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from cassn.lookups import (  # type: ignore[no-redef]
@@ -59,6 +64,10 @@ except ModuleNotFoundError:  # Direct execution from outside the repository root
         load_device_deployments,
         load_devices,
     )
+    from cassn.box.auth import get_box_client, load_box_config  # type: ignore[no-redef]
+    from cassn.box.lookup_publisher import publish_validated_lookup_pair  # type: ignore[no-redef]
+    from cassn.lookup_sync import canonical_deployment_id  # type: ignore[no-redef]
+    from cassn.config import CONFIG_JSON as DEFAULT_BOX_CONFIG_PATH  # type: ignore[no-redef]
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".cassn_config" / "survey123" / "sources.json"
@@ -1061,11 +1070,62 @@ def validate_candidate_lookup_set(candidate_path: Path, lookup_dir: Path) -> dic
     if len(device_record_ids) != len(set(device_record_ids)):
         raise RefreshError("devices.csv contains duplicate device_record_id values")
 
-    deployment_ids = [row.get("deployment_id", "") for row in deployments]
-    if any(not value for value in deployment_ids):
-        raise RefreshError("deployments.csv contains a blank deployment_id")
+    closed_without_id = [
+        row
+        for row in deployments
+        if row.get("deployment_end_date", "") and not row.get("deployment_id", "")
+    ]
+    if closed_without_id:
+        raise RefreshError("deployments.csv has a closed placement without deployment_id")
+    named_open = [
+        row
+        for row in deployments
+        if not row.get("deployment_end_date", "") and row.get("deployment_id", "")
+    ]
+    if named_open:
+        raise RefreshError("deployments.csv assigns deployment_id to an open placement")
+
+    named_open_events = [
+        row
+        for row in deployments
+        if not row.get("deployment_end_date", "")
+        and row.get("deployment_event_id", "")
+    ]
+    if named_open_events:
+        raise RefreshError(
+            "deployments.csv assigns deployment_event_id to an open placement"
+        )
+    placeholder_events = [
+        row.get("deployment_event_id", "")
+        for row in deployments
+        if row.get("deployment_event_id", "").startswith(("INFERRED_", "OPEN_"))
+    ]
+    if placeholder_events:
+        raise RefreshError(
+            "deployments.csv contains legacy inferred/open deployment event IDs"
+        )
+
+    deployment_ids = [
+        row.get("deployment_id", "")
+        for row in deployments
+        if row.get("deployment_id", "")
+    ]
     if len(deployment_ids) != len(set(deployment_ids)):
         raise RefreshError("deployments.csv contains duplicate deployment_id values")
+
+    try:
+        noncanonical = [
+            row.get("deployment_id", "")
+            for row in deployments
+            if row.get("deployment_id", "") != canonical_deployment_id(row)
+        ]
+    except LookupSchemaError as exc:
+        raise RefreshError(str(exc)) from exc
+    if noncanonical:
+        raise RefreshError(
+            "deployments.csv contains non-canonical deployment_id values; expected "
+            "UC_<site_short_name>_plotN_<device_type>_<YYYYMMDDend>"
+        )
 
     known_device_records = set(device_record_ids)
     missing_device_records = sorted(
@@ -1082,14 +1142,14 @@ def validate_candidate_lookup_set(candidate_path: Path, lookup_dir: Path) -> dic
 
     plot_rows = _read_csv_dicts(lookup_dir / "plots.csv")
     valid_plots = {
-        (row.get("site_code", ""), row.get("plot_number", ""))
+        (row.get("site_short_name", ""), row.get("plot_number", ""))
         for row in plot_rows
     }
     unknown_plots = sorted(
         {
-            (row.get("site_code", ""), row.get("plot_number", ""))
+            (row.get("site_short_name", ""), row.get("plot_number", ""))
             for row in deployments
-            if (row.get("site_code", ""), row.get("plot_number", "")) not in valid_plots
+            if (row.get("site_short_name", ""), row.get("plot_number", "")) not in valid_plots
         }
     )
     if unknown_plots:
@@ -1432,7 +1492,7 @@ def command_transform(args: argparse.Namespace) -> int:
 
 
 def command_refresh(args: argparse.Namespace) -> int:
-    """Run the complete read/transform/validate/backup/install workflow."""
+    """Run snapshot/transform/validate/Box-publish/cache-install workflow."""
     config = load_config(args.config)
     record, refreshed = usable_token_record(config)
     if refreshed:
@@ -1444,7 +1504,7 @@ def command_refresh(args: argparse.Namespace) -> int:
         output_root=args.snapshot_root,
         page_size=args.page_size,
     )
-    print(f"1/4 Snapshot verified: {snapshot_path}")
+    print(f"1/5 Snapshot verified: {snapshot_path}")
     for source in snapshot_manifest["sources"]:
         count = sum(dataset["record_count"] for dataset in source["datasets"])
         print(f"    {source['role']}: {count} records")
@@ -1457,11 +1517,11 @@ def command_refresh(args: argparse.Namespace) -> int:
         )
     except TransformError as exc:
         raise RefreshError(str(exc)) from exc
-    print(f"2/4 Candidate generated: {candidate_path}")
+    print(f"2/5 Candidate generated: {candidate_path}")
 
     validation = validate_candidate_lookup_set(candidate_path, args.lookup_dir)
     print(
-        "3/4 Candidate validated: "
+        "3/5 Candidate validated: "
         f"{validation['devices']} devices, {validation['deployments']} placements, "
         f"{validation['rounds']} rounds"
     )
@@ -1473,8 +1533,28 @@ def command_refresh(args: argparse.Namespace) -> int:
     if validation["warnings"]:
         print(f"    Note: {validation['warnings']} non-blocking warning(s) are listed in issues.csv.")
 
+    try:
+        box_config = load_box_config(args.box_config)
+    except Exception as exc:
+        raise RefreshError(f"Could not load Box configuration: {exc}") from exc
+    if not box_config.app_config_folder_id:
+        raise RefreshError("Box app_config_folder_id is not configured")
+    box_client = get_box_client(box_config)
+    if box_client is None:
+        raise RefreshError(
+            "Box authentication is unavailable; run utils/box_auth_setup.py and retry"
+        )
+    published = publish_validated_lookup_pair(
+        box_client,
+        box_config.app_config_folder_id,
+        candidate_path,
+    )
+    print("4/5 Published and verified canonical Box snapshots:")
+    for item in published:
+        print(f"    {item.name}: {item.action} (file ID {item.file_id})")
+
     receipt = install_candidate_lookup_set(candidate_path, args.lookup_dir, validation)
-    print(f"4/4 Installed and hash-verified: {args.lookup_dir.resolve()}")
+    print(f"5/5 Installed and hash-verified offline cache: {args.lookup_dir.resolve()}")
     print(f"    Previous lookup pair backed up to: {receipt['backup_path']}")
     print("Refresh complete. Restart the app to load the new Survey123 data.")
     return 0
@@ -1587,6 +1667,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_LOOKUP_DIR,
         help=f"live lookup directory (default: {DEFAULT_LOOKUP_DIR})",
+    )
+    refresh_parser.add_argument(
+        "--box-config",
+        type=Path,
+        default=DEFAULT_BOX_CONFIG_PATH,
+        help=f"Box app configuration (default: {DEFAULT_BOX_CONFIG_PATH})",
     )
     refresh_parser.add_argument(
         "--page-size",

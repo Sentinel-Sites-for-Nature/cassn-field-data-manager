@@ -31,13 +31,13 @@ def make_fixture(tmp_path: Path) -> tuple[Path, Path]:
     lookup = tmp_path / "lookups"
     write_csv(
         lookup / "sites.csv",
-        ["site_name", "site_code", "label_code"],
+        ["site_name", "site_short_name", "site_code"],
         [["Test Reserve", "TestSite", "TST"]],
     )
     write_csv(
         lookup / "plots.csv",
         [
-            "site_code",
+            "site_short_name",
             "plot_number",
             "plot_name",
             "plot_latitude",
@@ -50,41 +50,32 @@ def make_fixture(tmp_path: Path) -> tuple[Path, Path]:
         ],
     )
     write_csv(
-        lookup / "cameras.csv",
+        lookup / "deployments.csv",
         [
-            "site_code",
+            "deployment_id",
+            "deployment_event_id",
+            "event_start_date",
+            "event_end_date",
+            "site_short_name",
             "plot_number",
             "device_type",
+            "device_id",
+            "deployment_start_date",
+            "deployment_end_date",
             "camera_id",
             "feature_type",
             "sensor_height",
             "sensor_orientation",
-        ],
-        [
-            ["TestSite", "1", "ML", "CAM1", "Trail game", "Knee height", "Parallel"],
-            ["TestSite", "2", "SA", "0000", "None", "Knee height", "Pointed Downward"],
-        ],
-    )
-    write_csv(
-        lookup / "ARUs.csv",
-        [
-            "deployment_event_id",
-            "site_code",
-            "plot_number",
-            "device_type",
             "mounted_on",
             "sensor_height_meters",
             "ARU_status",
         ],
         [
-            ["UC_TestSite_20260110", "TestSite", "1", "BD", "Pole", "1", ""],
-            ["UC_TestSite_20260110", "TestSite", "1", "BT", "Pole", "2.5", ""],
+            ["old-ml", "UC_TestSite_20260110", "2026-01-01", "2026-01-10", "TestSite", "1", "ML", "CAM1", "2026-01-01", "2026-01-10", "CAM1", "Trail game", "Knee height", "Parallel", "", "", ""],
+            ["old-sa", "UC_TestSite_20260110", "2026-01-01", "2026-01-10", "TestSite", "2", "SA", "0000", "2026-01-01", "2026-01-10", "0000", "None", "Knee height", "Pointed Downward", "", "", ""],
+            ["old-bd", "UC_TestSite_20260110", "2026-01-01", "2026-01-10", "TestSite", "1", "BD", "0000", "2026-01-01", "2026-01-10", "", "", "", "", "Pole", "1", ""],
+            ["old-bt", "UC_TestSite_20260110", "2026-01-01", "2026-01-10", "TestSite", "1", "BT", "", "2026-01-01", "2026-01-10", "", "", "", "", "Pole", "2.5", ""],
         ],
-    )
-    write_csv(
-        lookup / "deployments.csv",
-        ["site_code", "deployment_start", "deployment_end", "deployment_event_id"],
-        [["TestSite", "2026-01-01", "2026-01-10", "UC_TestSite_20260110"]],
     )
     (lookup / "wi_config.json").write_text(json.dumps({"project_id_ML": "p"}))
     (lookup / "soundhub_config.json").write_text(json.dumps({"ARU_make": "AudioMoth"}))
@@ -168,7 +159,7 @@ def make_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return snapshot, lookup
 
 
-def test_transform_preserves_contract_and_allows_legacy_ids(tmp_path):
+def test_transform_generates_canonical_per_device_ids(tmp_path):
     snapshot, lookup = make_fixture(tmp_path)
 
     output, manifest = transform_legacy_snapshot(snapshot, lookup, tmp_path / "candidates")
@@ -182,14 +173,20 @@ def test_transform_preserves_contract_and_allows_legacy_ids(tmp_path):
     assert manifest["counts"]["blocking_issues"] == 0
     assert {row["device_id"] for row in devices} >= {"CAM1", "0000", ""}
     ml = next(row for row in deployments if row["device_type"] == "ML")
+    assert ml["site_short_name"] == "TestSite"
     assert ml["plot_number"] == "1"
     assert ml["plot_resolution"] == "survey"
     assert ml["feature_type"] == "Trail game"
     assert ml["sensor_height"] == "Knee height"
+    assert ml["deployment_id"] == "UC_TestSite_plot1_ML_20260106"
     bd = next(row for row in deployments if row["device_type"] == "BD")
+    assert bd["deployment_id"] == "UC_TestSite_plot1_BD_20260106"
     assert bd["deployment_end_reason"] == "retrieved"
     assert bd["retrieval_methods"] == ""
     assert bd["mounted_on"] == "Pole"
+    sa = next(row for row in deployments if row["device_type"] == "SA")
+    assert sa["deployment_id"] == "UC_TestSite_plot2_SA_20260110"
+    assert not any(row["deployment_id"].startswith("S123_") for row in deployments)
     assert (output / "wi_config.json").is_file()
     assert (output / "soundhub_config.json").is_file()
     if __import__("os").name != "nt":
@@ -246,5 +243,59 @@ def test_same_day_retrieval_closes_prior_device_not_replacement(tmp_path):
     replacement_row = next(row for row in deployments if row["device_id"] == "CAM2")
     assert first_row["deployment_end_reason"] == "redeployed"
     assert first_row["deployment_end_date"] == replacement_row["deployment_start_date"]
+    assert first_row["deployment_id"] == "UC_TestSite_plot1_ML_20260106"
     assert replacement_row["deployment_end_reason"] == "current_event_end"
     assert replacement_row["deployment_end_date"] == "2026-01-10"
+    assert replacement_row["deployment_id"] == "UC_TestSite_plot1_ML_20260110"
+
+
+def test_open_placement_has_no_deployment_id(tmp_path):
+    snapshot, lookup = make_fixture(tmp_path)
+    deployments_path = lookup / "deployments.csv"
+    with deployments_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    for row in rows:
+        row["event_end_date"] = ""
+        row["deployment_end_date"] = ""
+    with deployments_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output, _manifest = transform_legacy_snapshot(snapshot, lookup, tmp_path / "candidates")
+
+    with (output / "deployments.csv").open() as handle:
+        deployments = list(csv.DictReader(handle))
+    sa = next(row for row in deployments if row["device_type"] == "SA")
+    assert sa["deployment_end_reason"] == "open"
+    assert sa["deployment_id"] == ""
+    assert sa["deployment_event_id"] == ""
+
+
+def test_generated_event_placeholders_do_not_survive_refresh(tmp_path):
+    snapshot, lookup = make_fixture(tmp_path)
+    write_role(snapshot, "retrieval", [])
+    deployments_path = lookup / "deployments.csv"
+    with deployments_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    for row in rows:
+        row["deployment_event_id"] = "INFERRED_TestSite_20260101"
+        row["event_end_date"] = ""
+        row["deployment_end_date"] = ""
+    with deployments_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    output, _manifest = transform_legacy_snapshot(snapshot, lookup, tmp_path / "candidates")
+
+    with (output / "deployments.csv").open() as handle:
+        deployments = list(csv.DictReader(handle))
+    assert all(row["deployment_id"] == "" for row in deployments)
+    assert all(row["deployment_event_id"] == "" for row in deployments)
+    assert not any(
+        row["deployment_event_id"].startswith(("INFERRED_", "OPEN_"))
+        for row in deployments
+    )

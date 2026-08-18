@@ -29,7 +29,7 @@ def test_build_wi_rows_formats_lookup_coordinates():
     rows_by_type = build_wi_rows(
         {
             "organization": "UC",
-            "site": "TEST",
+            "site_short_name": "TEST",
             "deployment_start": "2026-01-01",
             "deployment_end": "2026-02-01",
         },

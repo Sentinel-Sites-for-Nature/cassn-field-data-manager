@@ -19,16 +19,19 @@ Default is a DRY RUN — it reports what would change and writes nothing. Pass
 ``--apply`` to perform the split, or ``--undo`` to reverse a previous one.
 
 Examples:
-  # Preview the whole practice drive (writes nothing):
-  python utils/split_for_wi.py --root "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging"
-
-  # Actually split one deployment:
+  # Preview one uploaded deployment in Box Drive (writes nothing):
   python utils/split_for_wi.py \
-    --root "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging/UC_JepsonPrairie_20260423" --apply
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
 
-  # Put everything back:
+  # Actually split the uploaded deployment while preventing sleep:
+  caffeinate python utils/split_for_wi.py \
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+    --apply --yes
+
+  # Put the Box Drive deployment back:
   python utils/split_for_wi.py \
-    --root "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging/UC_JepsonPrairie_20260423" --undo
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+    --undo
 """
 from __future__ import annotations
 
@@ -173,7 +176,7 @@ def main() -> int:
         description="Split oversized _ML/_SA folders into Wildlife-Insights-sized batches."
     )
     ap.add_argument("--root", required=True,
-                    help="Folder to scan: a season, a deployment, or the staging drive.")
+                    help="Folder to scan: a Box Drive year or uploaded deployment.")
     ap.add_argument("--limit", type=int, default=WI_UPLOAD_LIMIT,
                     help=f"Max images per part (default {WI_UPLOAD_LIMIT}).")
     ap.add_argument("--suffixes", nargs="+", default=list(DEFAULT_DEVICE_SUFFIXES),
