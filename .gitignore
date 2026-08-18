@@ -66,3 +66,14 @@ sample_data/
 .Rproj.user
 scratch/
 *.Rproj
+# Terraform (state records live resource attributes; providers are re-downloadable)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+*.tfplan
+
+# Local scratch and generated output
+output/
+tmp/
