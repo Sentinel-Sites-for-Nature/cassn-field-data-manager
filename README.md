@@ -18,12 +18,13 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Reconyx MakerNote Parsing**: Sequence position, trigger type (Motion/Time-lapse), sequence total, ambient temperature, moon phase, battery voltage, and battery type extracted directly from Reconyx HYPERFIRE HP4K EXIF MakerNote via ExifTool.
 - **Device Identification**: Historical physical-device assignments come from the selected Survey123 round in device-level `deployments.csv`. AudioMoth IDs read from the card are used when present and the deployment lookup supplies the ID when CONFIG.TXT is absent.
 - **Timestamps**: `recorded_datetime` stored as ISO 8601 with UTC offset (e.g. `2025-12-04T15:48:05-08:00`), sourced from EXIF for cameras and AudioMoth filename for audio; DST-aware via `zoneinfo`
-- **Cloud Storage**: Automatic upload to Box with progress tracking and OAuth token refresh
+- **Cloud Storage**: Upload to Box with progress tracking and OAuth token refresh. Transfers are started by hand from the grouped action menus on the final tab — nothing uploads on its own.
 - **Multi-Format File Support**: Images (JPG, PNG, TIF, RAW), audio (WAV, MP3, FLAC)
 - **Lookup Authority**: Survey123 is upstream of the validated device snapshot; the refresh command publishes that snapshot to Box `app_config`, and every app installation synchronizes the complete Box configuration into its offline cache before loading.
 - **Wildlife Insights Export**: Generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, using event-scoped camera metadata from `deployments.csv` and defaults from `wi_config.json`.
 - **Wildlife Insights Image Batching**: Before the first Box upload, camera folders above 15,000 images are automatically organized into verified, burst-preserving numbered parts. The operation is visible, cancellable, and resumable.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
+- **Wildlife SoundHub Submission**: Bird audio is transcoded to lossless FLAC into a local tree mirroring SoundHub's S3 bucket, with `deployment.csv` and `recording.csv` projected from `audio_file_metadata.csv`, then uploaded and verified. Box keeps the original WAVs untouched. See the Wildlife SoundHub Preparation section.
 - **Session Persistence**: Interrupted downloads resume automatically. Previously copied files are skipped and sequence/event numbering continues correctly.
 
 ## Installation
@@ -51,6 +52,16 @@ sudo apt install libimage-exiftool-perl
 
 If ExifTool isn't available the app still runs — it simply skips the Reconyx
 extras (temperature, moon phase, battery) and the ExifTool sequence fallback.
+
+Preparing bird audio for Wildlife SoundHub requires the **FLAC** encoder. It is
+only needed for that step; without it the rest of the app is unaffected.
+
+```bash
+# macOS
+brew install flac
+# Debian/Ubuntu
+sudo apt install flac
+```
 
 ### Download
 
@@ -174,7 +185,6 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 - Select who is downloading the data
 - Check which devices (ML, SA, BD, BT) for each plot
 - Configure local staging location (default: `~/Desktop/CASSN_field_data_staging`)
-- Enable/disable automatic Box upload
 
 #### Step 2: Collect SD Card Data
 - Insert SD card for each device
@@ -186,9 +196,11 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 - Review deployment summary
 - View file counts and sizes by device
 - Before the first Box upload, oversized camera folders are automatically prepared in Wildlife Insights batches of at most 15,000 images
-- Files automatically upload to Box (if enabled)
-- Re-run Box verification checks on demand from the "Re-run QC Checks" group
-- Open staging folder to verify
+- Start transfers by hand from the grouped action menus at the bottom of the tab.
+  Nothing uploads on its own:
+  - **Uploads** — Box upload, and the two-step SoundHub path (prepare, then upload)
+  - **QC Checks** — Box verification, Box↔local hashes, SoundHub verification
+  - **Deployment** — open either staging folder, switch deployment, start a new one
 - Start new deployment or exit
 
 ### Screenshots
@@ -258,6 +270,144 @@ history is never reorganized automatically.
 
 See [the real-data acceptance checklist](docs/wi_split_acceptance_test.md) when
 validating this workflow against a Box-connected deployment.
+
+## Wildlife SoundHub Preparation
+
+Bird (BD) audio is submitted to [Wildlife SoundHub](https://wildlifesoundhub.org/),
+which runs BirdNET over it and provides the validation tooling. Bat (BT) audio is
+**not** part of this path — it is destined for NABat.
+
+The workflow deliberately splits at the end of ingest:
+
+- **Box keeps the WAVs**, uncompressed and unmodified, as the archival original.
+- **SoundHub gets a FLAC transcode** plus two metadata CSVs, staged locally in a
+  tree that mirrors the S3 bucket exactly, then pushed.
+
+FLAC is lossless — decoding returns bit-identical audio — so the WAVs are kept for
+a different reason: `flac --keep-foreign-metadata` carries the AudioMoth RIFF
+comment across (it lands in an APPLICATION block tagged `riff`) but **does not
+preserve the GUANO chunk**. Until that is solved, the WAV on Box is the only copy
+holding the full original metadata.
+
+### Bucket layout
+
+```text
+s3://casoundhub/upload/UCNature-SSN/deployment.csv
+s3://casoundhub/upload/UCNature-SSN/recording.csv
+s3://casoundhub/upload/UCNature-SSN/<deployment_id>/<filename>.flac
+```
+
+Both CSVs sit at the **project** root and are cumulative across every deployment
+ever submitted — they are not per-deployment files. Local staging mirrors this
+one-for-one, so the upload is a plain recursive walk with no path rewriting.
+
+Two properties of the SoundHub account shape everything here:
+
+| Property | Consequence |
+|---|---|
+| The IAM role has `PutObject` and `ListBucket` but **no `DeleteObject`** | A key written to the wrong place can only be removed by SoundHub staff by hand. Deployment ids are read from `audio_file_metadata.csv` and validated, never re-derived from folder names. |
+| SoundHub **drains** the `upload/` landing zone once it ingests a submission | An empty prefix is not evidence of a failed upload. Verify immediately after uploading; the durable record lives in the `is_submitted_to_soundhub` / `soundhub_submitter` / `soundhub_submission_datetime` columns, never in a later bucket listing. |
+
+### The two CSVs
+
+Both are projections of `audio_file_metadata.csv` — nothing is re-derived, and no
+second pass over the audio is needed.
+
+**`deployment.csv`** — one row per SoundHub deployment, in the column order of the
+Deployment Template sheet of `templates/SoundHub_Metadata_Template.xlsx`. Every
+column except `project_short_name` is already an `audio_file_metadata.csv` column
+under the same name. Dates and times carry **no** UTC offset.
+
+Note that one CA-SSN deployment *event* (`UC_StrathearnRanch_20260714`) contains
+several SoundHub *deployments* — one per plot's recorder
+(`UC_StrathearnRanch_plot1_BD_20260714`) — each with its own S3 folder and its own
+row here.
+
+**`recording.csv`** — one row per FLAC, carrying the per-file timestamps SoundHub
+cannot otherwise obtain. SoundHub's standard ingest reads recording times out of
+the original AudioMoth filename (`20251222_161300.WAV`), but CA-SSN renames files
+earlier in the pipeline to a convention whose date component is the deployment
+*retrieval* date — identical for every file in a deployment. The sidecar CSV
+resolves this.
+
+| Column | Source |
+|---|---|
+| `filename` | The staged name, with `.wav` swapped for `.flac` |
+| `deployment_id` | Straight from `audio_file_metadata.csv` |
+| `start` | `recorded_datetime` — read from each WAV's GUANO chunk at ingest, so it survives the rename |
+| `end` | `start` plus `recording_duration_sec` |
+
+Unlike the deployment dates, `start` and `end` **do** carry a UTC offset:
+`2026-05-11 00:00:00-07:00`.
+
+### Preparing and uploading from the app
+
+Both steps are on the **Review & Finalize** tab and are operator-initiated.
+
+1. **Uploads → Prepare Bird Audio for SoundHub…** transcodes this deployment's BD
+   WAVs to FLAC (level 5, `--verify`, `--keep-foreign-metadata`) into the staging
+   tree, then rebuilds the project CSVs. Source WAVs are never touched. Progress is
+   per-file and the job is cancellable; completed files are kept, so re-running
+   resumes. A copy of both CSVs is also written to the deployment's `soundhub/`
+   subfolder so the submission travels to Box alongside the raw data.
+2. **Uploads → Upload Bird Data to SoundHub** pushes the staged tree to S3 and
+   verifies it, then stamps the submission provenance columns on the BD rows.
+
+**QC Checks → Verify SoundHub Upload** re-runs the reconciliation on demand.
+
+### Preparing previously-downloaded deployments
+
+`utils/prep_soundhub.py` covers the backlog — deployments ingested before this step
+existed. It shares the app's code, so a deployment prepared here is identical to one
+prepared in the GUI.
+
+```bash
+# One deployment
+python utils/prep_soundhub.py stage --deployment "/path/to/UC_QuailRidge_20260108"
+
+# Every deployment under a season folder
+python utils/prep_soundhub.py stage --root "/path/to/2026"
+
+# Review what is staged and where it will land
+python utils/prep_soundhub.py status
+
+# Push, then verify
+python utils/prep_soundhub.py upload
+```
+
+Staging is idempotent: an existing FLAC is left alone and a re-staged deployment
+replaces its own rows in the project CSVs rather than duplicating them. Uploads
+skip objects already present at the same size, so an interrupted transfer is
+finished by simply running the command again.
+
+### Configuration
+
+AWS credentials are **not** read by the app — boto3 resolves them from the standard
+chain (`~/.aws/credentials`, environment, instance role). Confirm the right identity
+before a first push:
+
+```bash
+aws sts get-caller-identity
+```
+
+The rest is optional, under a `soundhub` block in `~/.cassn_config/config.json`.
+Omitted keys fall back to the constants in `cassn/config.py`:
+
+```json
+{
+  "soundhub": {
+    "staging_root": "/Users/YOU/cassn/soundhub/s3_upload_staging",
+    "bucket": "casoundhub",
+    "upload_prefix": "upload",
+    "project_short_name": "UCNature-SSN",
+    "region": "us-east-2",
+    "aws_profile": null
+  }
+}
+```
+
+Project-level metadata (objectives, taxonomy, sensor layout, admin contact) is
+entered once in the SoundHub web interface and is **not** submitted as a file.
 
 ## Metadata Schema
 
@@ -505,13 +655,13 @@ cassn-field-data-manager/
 │   ├── box/                          # Box auth, client, and upload/verify threads
 │   ├── core/                         # Classification, metadata extraction, inventory, QC
 │   ├── export/                       # Wildlife Insights / metadata CSV writers
+│   ├── soundhub/                     # SoundHub FLAC staging, CSV export, S3 upload
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
 │   ├── generate_wi_deployments.py    # Wildlife Insights deployment CSV generator
 │   ├── generate_occurrences.py       # Wildlife Insights occurrences CSV generator
-│   ├── convert_to_flac.py            # WAV → FLAC batch converter
-│   └── verify_flac_conversion.py     # FLAC conversion integrity check
+│   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
 │   ├── sites.csv
 │   ├── plots.csv

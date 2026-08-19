@@ -5,9 +5,14 @@
 # must be installed separately:
 #   macOS:   brew install exiftool
 #   Windows: download from https://exiftool.org and add it to PATH
+#
+# The SoundHub pipeline also needs the `flac` encoder on PATH:
+#   macOS:   brew install flac
+#   Windows: download from https://xiph.org/flac and add it to PATH
 
 PySide6          # Qt GUI
 box-sdk-gen      # Box cloud storage + OAuth
+boto3            # Wildlife SoundHub S3 upload
 Pillow           # image EXIF reading
 piexif           # image EXIF reading
 PyExifTool       # camera metadata (requires the exiftool binary, see note above)

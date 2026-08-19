@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -51,8 +51,10 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QMenu,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -67,6 +69,16 @@ from cassn.box.threads import (
     FixityCheckThread,
     ProvenanceUploadThread,
 )
+from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
+from cassn.soundhub.export import read_bd_audio_rows, write_deployment_copy
+from cassn.soundhub.staging import flac_available
+from cassn.soundhub.upload import (
+    boto3_available,
+    load_soundhub_config,
+    project_prefix,
+    staged_objects,
+    verify_project,
+)
 from cassn.gui.wi_split_thread import WISplitThread
 from cassn.config import (
     APP_TITLE,
@@ -80,6 +92,7 @@ from cassn.config import (
     IMAGE_FIELDS,
     LOCAL_DATA_DIR,
     ORGANIZATIONS,
+    SOUNDHUB_DEVICE_TYPE,
 )
 from cassn.core.audio_metadata import (
     parse_audiomoth_config_file,
@@ -181,6 +194,8 @@ class FieldDataWizard(QMainWindow):
         self.upload_thread = None
         self.wi_split_thread = None
         self.provenance_thread = None
+        self.soundhub_stage_thread = None
+        self.soundhub_upload_thread = None
         self.box_verify_thread = None
         self.fixity_thread = None
         self._post_upload_box_summary = ""
@@ -763,9 +778,7 @@ class FieldDataWizard(QMainWindow):
         staging_group.setLayout(staging_layout)
         layout.addWidget(staging_group)
 
-        self.upload_to_box_cb = QCheckBox("Upload to Box after processing")
-        self.upload_to_box_cb.setChecked(False)
-        # Box upload option
+        # Box connection status
         box_group = QGroupBox("Box Cloud Storage")
         box_layout = QVBoxLayout()
 
@@ -782,9 +795,12 @@ class FieldDataWizard(QMainWindow):
         box_status_layout.addStretch()
         box_layout.addLayout(box_status_layout)
 
-        self.upload_to_box_cb.setChecked(self.box_authenticated)
-        self.upload_to_box_cb.setEnabled(self.box_authenticated)
-        box_layout.addWidget(self.upload_to_box_cb)
+        upload_note = QLabel(
+            "Uploads are started by hand from the Review & Finalize tab — "
+            "nothing transfers on its own."
+        )
+        upload_note.setWordWrap(True)
+        box_layout.addWidget(upload_note)
 
         if not self.box_authenticated:
             auth_note = QLabel("⚠ Box not connected. Run box_auth_setup.py to authenticate.")
@@ -944,51 +960,151 @@ class FieldDataWizard(QMainWindow):
         self.hash_group.hide()
         layout.addWidget(self.hash_group)
 
-        # Action buttons
+        # SoundHub progress (hidden by default)
+        self.soundhub_group = QGroupBox("SoundHub Preparation & Upload Progress")
+        soundhub_layout = QVBoxLayout()
+
+        self.soundhub_progress_bar = QProgressBar()
+        self.soundhub_progress_bar.setMinimum(0)
+        self.soundhub_progress_bar.setMaximum(100)
+        soundhub_layout.addWidget(self.soundhub_progress_bar)
+
+        self.soundhub_status_label = QLabel("")
+        soundhub_layout.addWidget(self.soundhub_status_label)
+
+        self.cancel_soundhub_btn = QPushButton("Cancel")
+        self.cancel_soundhub_btn.clicked.connect(self.cancel_soundhub)
+        self.cancel_soundhub_btn.setToolTip(
+            "Stop after the current file. Completed work is kept — re-running "
+            "resumes from where it stopped."
+        )
+        self.cancel_soundhub_btn.hide()
+        soundhub_layout.addWidget(self.cancel_soundhub_btn)
+
+        self.soundhub_group.setLayout(soundhub_layout)
+        self.soundhub_group.hide()
+        layout.addWidget(self.soundhub_group)
+
+        # ------------------------------------------------------------------
+        # Action menus
+        #
+        # These were a flat row of six buttons in which a destructive upload sat
+        # next to "Exit". Grouping them by what they do makes the destination of
+        # each action explicit and leaves room to add platforms without the row
+        # growing sideways.
+        # ------------------------------------------------------------------
+        self.upload_now_btn = self._menu_action(
+            "Upload to Box Now",
+            self.upload_to_box_manual,
+            "Upload this deployment's raw data and metadata to Box.",
+            enabled=self.box_authenticated,
+        )
+        self.soundhub_stage_btn = self._menu_action(
+            "Prepare Bird Audio for SoundHub…",
+            self.stage_for_soundhub,
+            "Convert this deployment's bird (BD) WAVs to FLAC and build the "
+            "SoundHub deployment.csv and recording.csv. Source WAVs are not modified.",
+        )
+        self.soundhub_upload_btn = self._menu_action(
+            "Upload Bird Data to SoundHub",
+            self.upload_to_soundhub,
+            "Push the staged FLAC tree and project manifests to the SoundHub S3 bucket.",
+        )
+
+        self.box_verify_btn = self._menu_action(
+            "Verify Box Upload",
+            self.run_box_verify,
+            "List the deployment folder on Box and reconcile against local "
+            "inventory. Reports missing or unexpected files.",
+            enabled=self.box_authenticated,
+        )
+        self.fixity_btn = self._menu_action(
+            "Verify Box ↔ Local Hashes",
+            self.run_fixity_check,
+            "End-to-end Box/local verification: compare each local raw file's "
+            "SHA-1 against the SHA-1 reported by Box.",
+        )
+        self.soundhub_verify_btn = self._menu_action(
+            "Verify SoundHub Upload",
+            self.verify_soundhub,
+            "Reconcile the staged SoundHub tree against the S3 bucket. Only "
+            "meaningful right after an upload — SoundHub empties the landing "
+            "zone once it ingests a submission.",
+        )
+
+        self.open_btn = self._menu_action(
+            "Open Staging Folder", self.open_staging_folder,
+            "Reveal this deployment's folder in Finder.",
+        )
+        self.open_soundhub_btn = self._menu_action(
+            "Open SoundHub Staging Folder", self.open_soundhub_folder,
+            "Reveal the local tree that mirrors the SoundHub S3 bucket.",
+        )
+        self.switch_deployment_btn = self._menu_action(
+            "Open Different Deployment…", self.open_different_deployment,
+            "Switch to a different deployment in staging — useful for "
+            "re-verifying past uploads.",
+        )
+        self.new_btn = self._menu_action(
+            "Start New Deployment", self.start_new_deployment,
+            "Clear this session and begin a new deployment.",
+        )
+
         button_layout = QHBoxLayout()
-
-        self.open_btn = QPushButton("Open Staging Folder")
-        self.open_btn.clicked.connect(self.open_staging_folder)
-
-        self.switch_deployment_btn = QPushButton("Open Different Deployment…")
-        self.switch_deployment_btn.clicked.connect(self.open_different_deployment)
-        self.switch_deployment_btn.setToolTip("Switch to a different deployment in staging — useful for re-verifying past uploads.")
-
-        self.upload_now_btn = QPushButton("Upload to Box Now")
-        self.upload_now_btn.clicked.connect(self.upload_to_box_manual)
-        self.upload_now_btn.setEnabled(self.box_authenticated)
-
-        self.fixity_btn = QPushButton("Verify Box ↔ Local Hashes")
-        self.fixity_btn.clicked.connect(self.run_fixity_check)
-        self.fixity_btn.setToolTip("End-to-end Box/local verification: compare each local raw file's SHA-1 against the SHA-1 reported by Box.")
-
-        self.box_verify_btn = QPushButton("Verify Box Upload")
-        self.box_verify_btn.clicked.connect(self.run_box_verify)
-        self.box_verify_btn.setToolTip("List the deployment folder on Box and reconcile against local inventory. Reports missing or unexpected files.")
-        self.box_verify_btn.setEnabled(self.box_authenticated)
-
-        self.new_btn = QPushButton("Start New Deployment")
-        self.new_btn.clicked.connect(self.start_new_deployment)
+        button_layout.addWidget(self._menu_button("Uploads ▾", [
+            self.upload_now_btn,
+            None,
+            self.soundhub_stage_btn,
+            self.soundhub_upload_btn,
+        ]))
+        button_layout.addWidget(self._menu_button("QC Checks ▾", [
+            self.box_verify_btn,
+            self.fixity_btn,
+            None,
+            self.soundhub_verify_btn,
+        ]))
+        button_layout.addWidget(self._menu_button("Deployment ▾", [
+            self.open_btn,
+            self.open_soundhub_btn,
+            self.switch_deployment_btn,
+            None,
+            self.new_btn,
+        ]))
+        button_layout.addStretch()
 
         self.exit_btn = QPushButton("Exit")
         self.exit_btn.clicked.connect(self.close)
-
-        # "Re-run QC Checks" group — the same Box-verification steps that run
-        # automatically after an upload, exposed for manual re-runs.
-        qc_group = QGroupBox("Re-run QC Checks")
-        qc_layout = QHBoxLayout()
-        qc_layout.addWidget(self.box_verify_btn)
-        qc_layout.addWidget(self.fixity_btn)
-        qc_group.setLayout(qc_layout)
-
-        button_layout.addWidget(self.open_btn)
-        button_layout.addWidget(self.switch_deployment_btn)
-        button_layout.addWidget(self.upload_now_btn)
-        button_layout.addWidget(qc_group)
-        button_layout.addWidget(self.new_btn)
-        button_layout.addStretch()
         button_layout.addWidget(self.exit_btn)
         layout.addLayout(button_layout)
+
+    def _menu_action(self, text, handler, tooltip="", *, enabled=True):
+        """Build one menu entry.
+
+        Returns a ``QAction`` rather than a button so the rest of the wizard can
+        keep calling ``setEnabled`` on these by name exactly as it did when they
+        were buttons.
+        """
+        action = QAction(text, self)
+        action.triggered.connect(handler)
+        action.setEnabled(enabled)
+        if tooltip:
+            action.setToolTip(tooltip)
+        return action
+
+    def _menu_button(self, label, actions):
+        """A dropdown button holding ``actions``; ``None`` inserts a separator."""
+        button = QToolButton()
+        button.setText(label)
+        button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(button)
+        menu.setToolTipsVisible(True)
+        for action in actions:
+            if action is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(action)
+        button.setMenu(menu)
+        return button
 
     # =========================================================================
     # Event Handlers
@@ -2014,10 +2130,9 @@ class FieldDataWizard(QMainWindow):
         self.generate_metadata_files()
         self.update_review_tab()
         self.tabs.setCurrentIndex(2)
-
-        # Auto-upload if enabled
-        if self.upload_to_box_cb.isChecked() and self.box_authenticated:
-            self.upload_to_box()
+        # Uploads are operator-initiated. Reaching this tab used to start the
+        # Box transfer on its own, which gave no chance to review the summary
+        # first and no way to choose a destination.
 
     def generate_metadata_files(self):
         """Generate CSVs, deployment_event_record.json, and WI deployment exports."""
@@ -2032,6 +2147,17 @@ class FieldDataWizard(QMainWindow):
         self._wi_status_lines = generate_wi_deployments_from_image_csv(
             self.current_deployment_folder, log=self.log
         )
+
+        # SoundHub's two CSVs are projections of the audio metadata, so they can
+        # be written now — before any upload — and travel to Box with the rest of
+        # the deployment. FLAC staging later rewrites the identical files.
+        try:
+            audio_rows = read_bd_audio_rows(self.current_deployment_folder)
+            if audio_rows:
+                out = write_deployment_copy(self.current_deployment_folder, audio_rows)
+                self.log(f"Generated SoundHub deployment.csv and recording.csv in {out.name}/")
+        except Exception as e:
+            self.log(f"Warning: could not generate SoundHub CSVs: {e}")
 
     def update_review_tab(self):
         """Update review summary"""
@@ -2097,9 +2223,6 @@ class FieldDataWizard(QMainWindow):
         else:
             summary.append("  Skipped (wi_config.json not found in local_data/)")
         summary.append("")
-
-        if self.upload_to_box_cb.isChecked():
-            summary.append("Box Upload: In progress or will be uploaded...")
 
         summary.append("")
         summary.append("=" * 60)
@@ -2790,6 +2913,254 @@ class FieldDataWizard(QMainWindow):
             subprocess.run(['explorer', str(self.current_deployment_folder)])
         else:
             subprocess.run(['xdg-open', str(self.current_deployment_folder)])
+
+    # ------------------------------------------------------------------
+    # Wildlife SoundHub
+    #
+    # Two operator-initiated steps: transcode the bird audio into the local
+    # tree that mirrors the S3 bucket, then push it. They are separate because
+    # the transcode is long, restartable, and worth reviewing before anything
+    # leaves the machine — and because the upload role cannot delete, so a
+    # wrong key is permanent.
+    # ------------------------------------------------------------------
+
+    def _soundhub_staging_root(self) -> Path:
+        return Path(load_soundhub_config()["staging_root"])
+
+    def _soundhub_busy(self) -> bool:
+        for thread in (self.soundhub_stage_thread, self.soundhub_upload_thread):
+            if thread and thread.isRunning():
+                return True
+        return False
+
+    def _set_soundhub_actions_enabled(self, enabled: bool):
+        for action in (
+            self.soundhub_stage_btn,
+            self.soundhub_upload_btn,
+            self.soundhub_verify_btn,
+            self.new_btn,
+            self.switch_deployment_btn,
+        ):
+            action.setEnabled(enabled)
+        self.exit_btn.setEnabled(enabled)
+
+    def stage_for_soundhub(self):
+        """Transcode this deployment's bird audio to FLAC and build the CSVs."""
+        if not self.current_deployment_folder:
+            QMessageBox.information(self, "No Data", "No deployment data to prepare.")
+            return
+        if self._soundhub_busy():
+            return
+        if not flac_available():
+            QMessageBox.warning(
+                self, "FLAC Encoder Missing",
+                "The 'flac' encoder is not installed.\n\n"
+                "Install it with:  brew install flac",
+            )
+            return
+
+        staging_root = self._soundhub_staging_root()
+        confirm = QMessageBox.question(
+            self, "Prepare Bird Audio for SoundHub",
+            f"Convert this deployment's bird (BD) WAVs to FLAC?\n\n"
+            f"Staging to: {staging_root}\n\n"
+            "Source WAVs are not modified. Bat (BT) audio is not included. "
+            "This can take several minutes per plot.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        self.soundhub_group.show()
+        self.soundhub_progress_bar.setValue(0)
+        self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_status_label.setText("Converting bird audio to FLAC…")
+        self.cancel_soundhub_btn.setText("Cancel")
+        self.cancel_soundhub_btn.setEnabled(True)
+        self.cancel_soundhub_btn.show()
+        self._set_soundhub_actions_enabled(False)
+
+        self.soundhub_stage_thread = SoundHubStageThread(
+            self.current_deployment_folder, staging_root
+        )
+        self.soundhub_stage_thread.progress.connect(self.on_soundhub_progress)
+        self.soundhub_stage_thread.completed.connect(self.on_soundhub_stage_complete)
+        self.soundhub_stage_thread.start()
+
+    def upload_to_soundhub(self):
+        """Push the staged SoundHub tree to the S3 bucket."""
+        if self._soundhub_busy():
+            return
+        if not boto3_available():
+            QMessageBox.warning(
+                self, "AWS SDK Missing",
+                "boto3 is not installed.\n\nInstall it with:  pip install boto3",
+            )
+            return
+
+        staging_root = self._soundhub_staging_root()
+        try:
+            settings = load_soundhub_config()
+            objects = staged_objects(staging_root, settings)
+        except Exception as e:
+            QMessageBox.warning(self, "Nothing Staged", str(e))
+            return
+
+        total_gb = sum(o["size"] for o in objects) / 1e9
+        confirm = QMessageBox.question(
+            self, "Upload Bird Data to SoundHub",
+            f"Upload {len(objects)} object(s) ({total_gb:.2f} GB) to\n"
+            f"s3://{settings['bucket']}/{project_prefix(settings)}/ ?\n\n"
+            "The SoundHub account cannot delete objects, so anything sent must "
+            "be removed by hand on their side. Objects already in the bucket "
+            "are skipped.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        self.soundhub_group.show()
+        self.soundhub_progress_bar.setValue(0)
+        self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_status_label.setText("Uploading to SoundHub…")
+        self.cancel_soundhub_btn.setText("Cancel")
+        self.cancel_soundhub_btn.setEnabled(True)
+        self.cancel_soundhub_btn.show()
+        self._set_soundhub_actions_enabled(False)
+
+        self.soundhub_upload_thread = SoundHubUploadThread(staging_root)
+        self.soundhub_upload_thread.progress.connect(self.on_soundhub_progress)
+        self.soundhub_upload_thread.completed.connect(self.on_soundhub_upload_complete)
+        self.soundhub_upload_thread.start()
+
+    def verify_soundhub(self):
+        """Reconcile the staged SoundHub tree against the bucket."""
+        if self._soundhub_busy():
+            return
+        try:
+            check = verify_project(self._soundhub_staging_root())
+        except Exception as e:
+            QMessageBox.warning(self, "Verification Failed", str(e))
+            return
+
+        if check["ok"]:
+            QMessageBox.information(
+                self, "SoundHub Verified",
+                f"All {check['checked']} staged object(s) are present in the bucket.",
+            )
+            return
+
+        QMessageBox.warning(
+            self, "SoundHub Verification",
+            f"{check['present']}/{check['checked']} staged object(s) found in the "
+            f"bucket.\n\n{len(check['missing'])} missing, "
+            f"{len(check['mismatched'])} size mismatch(es).\n\n"
+            "If SoundHub has already ingested this submission the landing zone "
+            "is emptied and this result is expected — check the platform before "
+            "re-uploading.",
+        )
+
+    def cancel_soundhub(self):
+        """Cooperatively cancel the running SoundHub stage or upload."""
+        for thread in (self.soundhub_stage_thread, self.soundhub_upload_thread):
+            if thread and thread.isRunning():
+                thread.cancel()
+                self.cancel_soundhub_btn.setText("Cancelling…")
+                self.cancel_soundhub_btn.setEnabled(False)
+                self.soundhub_status_label.setText(
+                    "Cancellation requested — finishing the current file…"
+                )
+                return
+
+    def on_soundhub_progress(self, current, total, name):
+        if total:
+            self.soundhub_progress_bar.setValue(int(current / total * 100))
+        self.soundhub_status_label.setText(f"{name} ({current}/{total})")
+
+    def on_soundhub_stage_complete(self, success, cancelled, message, result):
+        self.cancel_soundhub_btn.hide()
+        self._set_soundhub_actions_enabled(True)
+        self.log(message)
+
+        if success:
+            self.soundhub_progress_bar.setValue(100)
+            self.soundhub_status_label.setText(f"✓ {message}")
+            self.soundhub_status_label.setStyleSheet("color: green;")
+            QMessageBox.information(
+                self, "SoundHub Preparation Complete",
+                message + "\n\nUse Uploads → Upload Bird Data to SoundHub when ready.",
+            )
+            return
+
+        self.soundhub_status_label.setText(f"{'⚠' if cancelled else '✗'} {message}")
+        self.soundhub_status_label.setStyleSheet(
+            "color: orange;" if cancelled else "color: red; font-weight: bold;"
+        )
+        if not cancelled:
+            QMessageBox.warning(self, "SoundHub Preparation Failed", message)
+
+    def on_soundhub_upload_complete(self, success, cancelled, message, result):
+        self.cancel_soundhub_btn.hide()
+        self._set_soundhub_actions_enabled(True)
+        self.log(message)
+
+        if success:
+            self.soundhub_progress_bar.setValue(100)
+            self.soundhub_status_label.setText(f"✓ {message}")
+            self.soundhub_status_label.setStyleSheet("color: green;")
+            self._write_soundhub_provenance()
+            QMessageBox.information(self, "SoundHub Upload Complete", message)
+            return
+
+        self.soundhub_status_label.setText(f"{'⚠' if cancelled else '✗'} {message}")
+        self.soundhub_status_label.setStyleSheet(
+            "color: orange;" if cancelled else "color: red; font-weight: bold;"
+        )
+        if not cancelled:
+            QMessageBox.warning(self, "SoundHub Upload Failed", message)
+
+    def _write_soundhub_provenance(self):
+        """Stamp the SoundHub submission columns on this deployment's BD rows.
+
+        This is the durable record that the submission happened. SoundHub drains
+        its S3 landing zone once it ingests a batch, so the bucket cannot be
+        asked after the fact — only these columns can answer it.
+        """
+        if not self.current_deployment_folder:
+            return
+        csv_path = self.current_deployment_folder / "audio_file_metadata.csv"
+        if not csv_path.exists():
+            return
+
+        observer = self.metadata.get("observer", "")
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            for row in rows:
+                if row.get("device_type") != SOUNDHUB_DEVICE_TYPE:
+                    continue
+                row["is_submitted_to_soundhub"] = True
+                row["soundhub_submitter"] = observer
+                row["soundhub_submission_datetime"] = submitted_at
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=AUDIO_FIELDS, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+            self.log(f"Recorded SoundHub submission provenance in {csv_path.name}")
+        except Exception as e:
+            self.log(f"Warning: could not record SoundHub provenance: {e}")
+
+    def open_soundhub_folder(self):
+        """Reveal the local tree that mirrors the SoundHub bucket."""
+        root = self._soundhub_staging_root()
+        root.mkdir(parents=True, exist_ok=True)
+        if platform.system() == 'Darwin':
+            subprocess.run(['open', str(root)])
+        elif platform.system() == 'Windows':
+            subprocess.run(['explorer', str(root)])
+        else:
+            subprocess.run(['xdg-open', str(root)])
 
     def _build_checklist_items(self) -> list[dict]:
         """

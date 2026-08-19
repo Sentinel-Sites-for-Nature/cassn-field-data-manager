@@ -150,6 +150,67 @@ AUDIO_FIELDS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Wildlife SoundHub
+#
+# Bird (BD) audio only. Brian Galey's ingest reads a FLAC tree plus two
+# project-level CSVs from an S3 landing zone he controls. The IAM role has
+# PutObject and ListBucket but *no* DeleteObject, so a wrong key can only be
+# removed by Brian by hand — get the structure right before pushing.
+#
+#   s3://casoundhub/upload/UCNature-SSN/deployment.csv
+#   s3://casoundhub/upload/UCNature-SSN/recording.csv
+#   s3://casoundhub/upload/UCNature-SSN/<deployment_id>/<filename>.flac
+#
+# The landing zone is *drained* once SoundHub ingests a submission, so an empty
+# prefix does not mean the upload failed. Verify immediately after uploading and
+# record the result in the audio CSV's soundhub provenance columns; never infer
+# submission state from a later bucket listing.
+# ---------------------------------------------------------------------------
+
+SOUNDHUB_PROJECT_NAME = "UC Nature Sentinel Site Acoustics"
+SOUNDHUB_PROJECT_SHORT_NAME = "UCNature-SSN"   # hyphenated: avoids S3 quoting issues
+SOUNDHUB_BUCKET = "casoundhub"
+SOUNDHUB_UPLOAD_PREFIX = "upload"
+SOUNDHUB_REGION = "us-east-2"
+
+# Only bird recorders go to SoundHub. Bat (BT) audio is destined for NABat and
+# is deliberately excluded everywhere in this pipeline.
+SOUNDHUB_DEVICE_TYPE = "BD"
+
+SOUNDHUB_STAGING_DEFAULT = Path.home() / "cassn" / "soundhub" / "s3_upload_staging"
+
+# Level 5 is the FLAC default. Level 8 buys ~5-10% more compression for a large
+# encode-time cost; lossless either way, so the audio is identical.
+FLAC_COMPRESSION_LEVEL = 5
+
+# Deployment Template sheet of templates/SoundHub_Metadata_Template.xlsx, in
+# sheet order. Every name except project_short_name is also an AUDIO_FIELDS
+# column, so the export is a projection rather than a remapping.
+SOUNDHUB_DEPLOYMENT_FIELDS = [
+    "project_short_name", "deployment_id", "subproject", "subproject_design",
+    "placename", "longitude", "latitude", "date_installed",
+    "deployment_start_date", "deployment_start_time",
+    "deployment_end_date", "deployment_end_time",
+    "frequency", "duration", "gain",
+    "filter_type_khz", "filter_type_duration", "filter_type_amplitude",
+    "ARU_make", "ARU_model", "ARU_container", "ARU_microphone",
+    "feature_type", "feature_type_details", "ARU_status", "mounted_on",
+    "sensor_height_meters", "recorded_by", "notes",
+]
+
+# recording.csv carries the per-file timestamps SoundHub cannot parse out of our
+# renamed files. Fields follow the example Brian sent 2026-06-18 and accepted on
+# 2026-06-23: start/end carry a UTC offset, unlike the deployment dates/times.
+SOUNDHUB_RECORDING_FIELDS = ["filename", "deployment_id", "start", "end"]
+
+# "2026-05-11 00:00:00-07:00" — space-separated date and time, offset retained.
+# Rendered with ``datetime.isoformat(sep=SOUNDHUB_DATETIME_SEPARATOR)`` rather
+# than strftime, because ``%z`` emits "-0700" without the colon. Brian's example
+# rendered the offset Postgres-style ("-8"); "-07:00" parses identically in
+# Postgres and in Python's fromisoformat, so it is the safer of the two.
+SOUNDHUB_DATETIME_SEPARATOR = " "
+
+# ---------------------------------------------------------------------------
 # QC check descriptions (single source of truth, embedded into qc_report.json)
 # ---------------------------------------------------------------------------
 

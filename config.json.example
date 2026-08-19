@@ -4,5 +4,13 @@
     "client_secret": "YOUR_BOX_CLIENT_SECRET_HERE",
     "field_data_folder_id": "YOUR_CASSN_FIELD_DATA_FOLDER_ID_HERE",
     "app_config_folder_id": "YOUR_CASSN_APP_CONFIG_FOLDER_ID_HERE"
+  },
+  "soundhub": {
+    "staging_root": "/Users/YOU/cassn/soundhub/s3_upload_staging",
+    "bucket": "casoundhub",
+    "upload_prefix": "upload",
+    "project_short_name": "UCNature-SSN",
+    "region": "us-east-2",
+    "aws_profile": null
   }
 }

@@ -26,6 +26,7 @@ def is_orphan_on_box(path: str) -> bool:
     return (
         path not in _EXPECTED_METADATA
         and not path.startswith("qc/lookup_snapshot/")
+        and not path.startswith("soundhub/")
         and not PurePosixPath(path).name.startswith("wildlife_insights_")
         and not PurePosixPath(path).name.endswith("_manifest.json")
     )

@@ -513,6 +513,106 @@ python utils/split_for_wi.py \
 
 ---
 
+## `prep_soundhub.py`
+
+Stages and uploads **bird (BD)** audio to Wildlife SoundHub. The application does
+this automatically for deployments it ingests; this CLI covers the backlog —
+deployments downloaded and pushed to Box before the SoundHub step existed. Both
+paths call the same code in `cassn/soundhub/`, so a deployment prepared here is
+identical to one prepared in the GUI.
+
+Replaces the retired `convert_to_flac.py` and `verify_flac_conversion.py`. Those
+rebuilt each `deployment_id` by parsing folder names, a derivation that dropped
+the organization prefix (`StrathearnRanch_plot1_BD_...` instead of
+`UC_StrathearnRanch_plot1_BD_...`). Since the SoundHub IAM role has no
+`DeleteObject` permission, that would have written S3 keys nobody on our side
+could remove. The deployment id now comes from `audio_file_metadata.csv`, which
+carries it straight from the Survey123 device row.
+
+### When to use
+
+- Preparing deployments already in Box that have never been sent to SoundHub.
+- Re-running a partial staging or a partial upload — both are resumable.
+- Checking what is staged before pushing anything.
+
+Bat (BT) audio is never touched; it is destined for NABat.
+
+### Requirements
+
+```bash
+pip install boto3
+brew install flac      # macOS; see https://xiph.org/flac elsewhere
+```
+
+AWS credentials come from the standard chain, not from the app. Confirm the
+identity before a first push:
+
+```bash
+aws sts get-caller-identity
+```
+
+### Run
+
+```bash
+# Stage one deployment: BD WAVs → FLAC, then rebuild the project CSVs
+python utils/prep_soundhub.py stage --deployment "/path/to/UC_QuailRidge_20260108"
+
+# Stage every deployment under a season folder
+python utils/prep_soundhub.py stage --root "/path/to/2026"
+
+# Review what is staged and where it will land in S3
+python utils/prep_soundhub.py status
+
+# Push to the bucket, then verify what landed
+python utils/prep_soundhub.py upload
+
+# Reconcile staging against the bucket without transferring anything
+python utils/prep_soundhub.py upload --verify-only
+```
+
+### Options
+
+| Flag | Meaning |
+| --- | --- |
+| `--staging DIR` | Staging root. Defaults to `soundhub.staging_root` in `~/.cassn_config/config.json`. |
+| `stage --deployment PATH` | One deployment folder. |
+| `stage --root PATH` | Scan below this folder for every deployment with an `audio_file_metadata.csv`. |
+| `upload --verify-only` | Skip the transfer; only reconcile staging against the bucket. |
+
+### Output
+
+```text
+<staging_root>/
+├── UCNature-SSN/                     # Mirrors the S3 prefix exactly
+│   ├── deployment.csv
+│   ├── recording.csv
+│   └── UC_QuailRidge_plot1_BD_20260118/
+│       └── UC_QuailRidge_plot1_BD_20260118_00001.flac
+└── .cassn_fragments/                 # Never uploaded — per-deployment CSV rows
+    └── UC_QuailRidge_plot1_BD_20260118/
+```
+
+Both CSVs are also written to the deployment folder's own `soundhub/` subfolder,
+so the submission travels to Box alongside the raw data.
+
+### Notes
+
+- **Source WAVs are never modified.** FLAC is written to the staging tree only.
+- **Idempotent.** An existing FLAC is left alone, and re-staging a deployment
+  replaces its rows in the project CSVs rather than duplicating them. An
+  interrupted run is finished by running it again.
+- **The project CSVs are cumulative.** They live at the project root in S3, not
+  per deployment, and are rebuilt from every fragment in staging on each run.
+- **Verify immediately after uploading.** SoundHub drains its `upload/` prefix
+  once it ingests a submission, so a later listing shows nothing. That is normal
+  and is not an upload failure — the durable record is the
+  `is_submitted_to_soundhub` column in `audio_file_metadata.csv`.
+- **Uploads cannot be undone.** The role has `PutObject` and `ListBucket` but no
+  `DeleteObject`. Use `status` before `upload`, and push one deployment first
+  when the structure is in any doubt.
+
+---
+
 ## `normalize_wi_coordinates.py`
 
 Updates latitude and longitude in existing Wildlife Insights deployment CSVs
