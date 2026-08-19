@@ -23,8 +23,10 @@ from cassn.lookups import (
     WI_CONFIG_JSON,
     LookupSchemaError,
     LookupTables,
+    canonical_deployment_ids,
     load_device_deployments,
     load_devices,
+    placement_key,
 )
 
 
@@ -65,24 +67,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def canonical_deployment_id(row: dict[str, str]) -> str:
-    """Build the exact per-device deployment ID required by the active schema."""
-    identity_date = row.get("deployment_end_date", "")
-    if not identity_date:
-        return ""
-    try:
-        plot_number = str(int(row.get("plot_number", "")))
-        date_token = datetime.strptime(identity_date, "%Y-%m-%d").strftime("%Y%m%d")
-    except (TypeError, ValueError) as exc:
-        raise LookupSchemaError(
-            "deployments.csv needs a valid plot_number and deployment date"
-        ) from exc
-    return (
-        f"UC_{row.get('site_short_name', '')}_plot{plot_number}_"
-        f"{row.get('device_type', '')}_{date_token}"
-    )
 
 
 def validate_device_lookup_pair(
@@ -133,10 +117,11 @@ def validate_device_lookup_pair(
     if len(deployment_ids) != len(set(deployment_ids)):
         raise LookupSchemaError("deployments.csv contains duplicate deployment_id values")
 
+    expected_ids = canonical_deployment_ids(deployments)
     noncanonical = [
         row["deployment_id"]
         for row in deployments
-        if row["deployment_id"] != canonical_deployment_id(row)
+        if row["deployment_id"] != expected_ids.get(placement_key(row), "")
     ]
     if noncanonical:
         raise LookupSchemaError(

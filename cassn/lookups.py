@@ -286,6 +286,76 @@ def load_device_deployments(csv_path: Path) -> list[dict]:
     return rows
 
 
+def placement_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
+    """Identity of one device placement, independent of the ID assigned to it.
+
+    Used to look a row up in the ID map without depending on ``deployment_id``,
+    which is the value being computed.
+    """
+    return (
+        str(row.get("site_short_name", "") or "").strip(),
+        str(row.get("plot_number", "") or "").strip(),
+        str(row.get("device_type", "") or "").strip(),
+        str(row.get("deployment_start_date", "") or "").strip(),
+        str(row.get("deployment_end_date", "") or "").strip(),
+    )
+
+
+def canonical_deployment_id(row: dict[str, str], identity_date: str) -> str:
+    """Build the deployment ID for one placement from an explicit identity date.
+
+    ``identity_date`` is the **round's** end date — the last day anything was
+    retrieved at that site on that visit — not the individual device's retrieval
+    date. Cameras and ARUs from one visit routinely come back across two days,
+    and every other identifier the app produces (the deployment folder name in
+    :func:`~cassn.lookups.build_deployment_rounds`, and every renamed file) uses
+    the round's date. Deriving this one from the device's own date instead made
+    22% of placements disagree with their own filenames.
+
+    The date is passed in rather than read off the row because a single row does
+    not know which round it belongs to; use :func:`canonical_deployment_ids` to
+    resolve a whole table at once.
+    """
+    if not identity_date:
+        return ""
+    try:
+        plot_number = str(int(row.get("plot_number", "")))
+        date_token = date.fromisoformat(identity_date).strftime("%Y%m%d")
+    except (TypeError, ValueError) as exc:
+        raise LookupSchemaError(
+            "deployments.csv needs a valid plot_number and deployment date"
+        ) from exc
+    return (
+        f"UC_{row.get('site_short_name', '')}_plot{plot_number}_"
+        f"{row.get('device_type', '')}_{date_token}"
+    )
+
+
+def canonical_deployment_ids(rows: list[dict[str, str]]) -> dict[tuple, str]:
+    """Map every closed placement in ``rows`` to its canonical deployment ID.
+
+    Groups the table into download rounds exactly as the wizard does, then dates
+    every placement in a round by that round's last retrieval. Open placements
+    are absent from the result: they have no end date and deliberately get no ID
+    until the placement closes.
+    """
+    _events, rows_by_round = build_deployment_rounds(rows)
+    resolved: dict[tuple, str] = {}
+    for round_rows in rows_by_round.values():
+        end_dates = [
+            r.get("deployment_end_date", "")
+            for r in round_rows
+            if r.get("deployment_end_date", "")
+        ]
+        if not end_dates:
+            continue
+        round_end = max(end_dates)
+        for row in round_rows:
+            if row.get("deployment_end_date", ""):
+                resolved[placement_key(row)] = canonical_deployment_id(row, round_end)
+    return resolved
+
+
 def build_deployment_rounds(
     rows: list[dict], *, max_visit_gap_days: int = 2
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:

@@ -19,6 +19,14 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+try:
+    from cassn.lookups import canonical_deployment_ids, placement_key
+except ModuleNotFoundError:  # Direct execution from outside the repository root.
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from cassn.lookups import canonical_deployment_ids, placement_key
+
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 SURVEY_SITE_CODE_ALIASES = {"BDCDRC": "BDC"}
@@ -94,28 +102,6 @@ ISSUE_FIELDS = (
     "source_objectid",
     "message",
 )
-
-
-def _canonical_deployment_id(row: Mapping[str, Any]) -> str:
-    """Return the stable per-device ID used by metadata and downstream tools.
-
-    Open placements deliberately have no ID. The ID is assigned only when the
-    placement closes, using the deployment end date.
-    """
-    identity_date = _text(row.get("deployment_end_date"))
-    if not identity_date:
-        return ""
-    try:
-        plot_number = str(int(_text(row.get("plot_number"))))
-        date_token = date.fromisoformat(identity_date).strftime("%Y%m%d")
-    except (TypeError, ValueError) as exc:
-        raise TransformError(
-            "Cannot build canonical deployment_id without a valid plot and date"
-        ) from exc
-    return (
-        f"UC_{_text(row.get('site_short_name'))}_plot{plot_number}_"
-        f"{_text(row.get('device_type'))}_{date_token}"
-    )
 
 
 def _canonical_deployment_event_id(row: Mapping[str, Any]) -> str:
@@ -614,7 +600,6 @@ def transform_legacy_snapshot(
             )
             row["deployment_end_date"] = end_time.date().isoformat() if end_time else ""
             row["deployment_end_reason"] = end_reason
-            row["deployment_id"] = _canonical_deployment_id(row)
             row["deployment_event_id"] = _canonical_deployment_event_id(row)
             if retrieval:
                 attributes = retrieval["attributes"]
@@ -622,6 +607,13 @@ def transform_legacy_snapshot(
                 row["retrieval_notes"] = _retrieval_notes(attributes)
                 row["retrieval_globalid"] = _text(attributes.get("globalid"))
                 row["retrieval_objectid"] = _text(attributes.get("objectid"))
+
+    # Assigned only once every row has its end date and event ID: the deployment
+    # ID carries the *round's* last retrieval date, and a single row cannot know
+    # which round it belongs to. Open placements stay unnamed.
+    resolved_ids = canonical_deployment_ids(normalized)
+    for row in normalized:
+        row["deployment_id"] = resolved_ids.get(placement_key(row), "")
 
     for row in normalized:
         key = (row["site_short_name"], row["plot_number"], row["device_type"])

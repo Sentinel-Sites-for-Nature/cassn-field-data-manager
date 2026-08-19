@@ -54,7 +54,7 @@ try:
     )
     from cassn.box.auth import get_box_client, load_box_config
     from cassn.box.lookup_publisher import publish_validated_lookup_pair
-    from cassn.lookup_sync import canonical_deployment_id
+    from cassn.lookup_sync import canonical_deployment_ids, placement_key
     from cassn.config import CONFIG_JSON as DEFAULT_BOX_CONFIG_PATH
 except ModuleNotFoundError:  # Direct execution from outside the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -66,7 +66,10 @@ except ModuleNotFoundError:  # Direct execution from outside the repository root
     )
     from cassn.box.auth import get_box_client, load_box_config  # type: ignore[no-redef]
     from cassn.box.lookup_publisher import publish_validated_lookup_pair  # type: ignore[no-redef]
-    from cassn.lookup_sync import canonical_deployment_id  # type: ignore[no-redef]
+    from cassn.lookup_sync import (  # type: ignore[no-redef]
+        canonical_deployment_ids,
+        placement_key,
+    )
     from cassn.config import CONFIG_JSON as DEFAULT_BOX_CONFIG_PATH  # type: ignore[no-redef]
 
 
@@ -1114,10 +1117,11 @@ def validate_candidate_lookup_set(candidate_path: Path, lookup_dir: Path) -> dic
         raise RefreshError("deployments.csv contains duplicate deployment_id values")
 
     try:
+        expected_ids = canonical_deployment_ids(deployments)
         noncanonical = [
             row.get("deployment_id", "")
             for row in deployments
-            if row.get("deployment_id", "") != canonical_deployment_id(row)
+            if row.get("deployment_id", "") != expected_ids.get(placement_key(row), "")
         ]
     except LookupSchemaError as exc:
         raise RefreshError(str(exc)) from exc
