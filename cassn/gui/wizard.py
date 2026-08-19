@@ -705,7 +705,7 @@ class FieldDataWizard(QMainWindow):
         device_layout.addWidget(instructions)
 
         # Device grid — header row only here; plot rows are built/rebuilt
-        # dynamically in _rebuild_plot_grid() based on the chosen reserve.
+        # dynamically in _rebuild_plot_grid() based on the chosen site.
         self.grid_layout = QGridLayout()
 
         self.grid_layout.addWidget(QLabel("Plot"), 0, 0)
@@ -727,7 +727,7 @@ class FieldDataWizard(QMainWindow):
         if self.site_name_combo.currentText():
             self.on_site_changed(self.site_name_combo.currentText())
         else:
-            self._rebuild_plot_grid(reserve_code=None)
+            self._rebuild_plot_grid(site_short_name=None)
 
         device_layout.addLayout(self.grid_layout)
 
@@ -1062,13 +1062,13 @@ class FieldDataWizard(QMainWindow):
         else:
             self.observer_other_edit.hide()
 
-    def update_plot_labels(self, reserve_code):
-        """Rebuild the plot/device grid for the chosen reserve."""
-        self._rebuild_plot_grid(reserve_code)
+    def update_plot_labels(self, site_short_name):
+        """Rebuild the plot/device grid for the chosen site."""
+        self._rebuild_plot_grid(site_short_name)
 
-    def _rebuild_plot_grid(self, reserve_code):
+    def _rebuild_plot_grid(self, site_short_name):
         """Tear down existing plot rows and rebuild them based on plots.csv for the
-        selected reserve. Reserves can have any number of plots (4, 5, etc.); the
+        selected site. Sites can have any number of plots (4, 5, etc.); the
         grid sizes itself to the data."""
         # Tear down existing plot rows (everything below row 0, which is the header)
         for plot_label in self.plot_labels.values():
@@ -1082,13 +1082,15 @@ class FieldDataWizard(QMainWindow):
         self.device_checkboxes = {}
 
         # Determine plot numbers to show
-        plot_names_for_reserve = self.lookups.plot_names.get(reserve_code, {}) if reserve_code else {}
-        plot_numbers = sorted(plot_names_for_reserve.keys())
+        plot_names_for_site = (
+            self.lookups.plot_names.get(site_short_name, {}) if site_short_name else {}
+        )
+        plot_numbers = sorted(plot_names_for_site.keys())
         available = self.lookups.available_device_keys()
 
         # Build a row per plot. row_idx maps to grid row (header is row 0).
         for row_idx, plot_num in enumerate(plot_numbers, start=1):
-            name = plot_names_for_reserve.get(plot_num, "")
+            name = plot_names_for_site.get(plot_num, "")
             label_text = f"Plot {plot_num}: {name}" if name else f"Plot {plot_num}"
             plot_label = QLabel(label_text)
             self.plot_labels[plot_num] = plot_label
@@ -1098,7 +1100,7 @@ class FieldDataWizard(QMainWindow):
             col = 1
             for dev_code in DEVICE_TYPES.keys():
                 cb = QCheckBox()
-                is_available = (reserve_code, plot_num, dev_code) in available
+                is_available = (site_short_name, plot_num, dev_code) in available
                 cb.setEnabled(is_available)
                 cb.setChecked(is_available)
                 if not is_available:
@@ -1586,7 +1588,8 @@ class FieldDataWizard(QMainWindow):
                     # plotN must be in the name so each plot's CONFIG is uniquely identifiable
                     # (otherwise BD plots 1, 2, 3, 4 all collide on the same filename).
                     new_filename = build_renamed_filename(
-                        org, site, plot_num, dev_code, start_date_str, "CONFIG_01", file_ext
+                        org, site_short_name, plot_num, dev_code, start_date_str,
+                        "CONFIG_01", file_ext
                     )
                     dest_path = dest_dir / new_filename
                 elif file_type == "image" and seq_pos is not None:
@@ -1596,7 +1599,7 @@ class FieldDataWizard(QMainWindow):
                         event_sequence += 1
                     seq_str = f"{current_event_num:05d}_{seq_pos}"
                     new_filename = build_renamed_filename(
-                        org, site, plot_num, dev_code, date_str, seq_str, file_ext
+                        org, site_short_name, plot_num, dev_code, date_str, seq_str, file_ext
                     )
                     dest_path = dest_dir / new_filename
                     file_sequence += 1
@@ -1604,7 +1607,7 @@ class FieldDataWizard(QMainWindow):
                     # Audio or image without sequence data: standard sequential naming
                     seq_str = f"{file_sequence:05d}"
                     new_filename = build_renamed_filename(
-                        org, site, plot_num, dev_code, date_str, seq_str, file_ext
+                        org, site_short_name, plot_num, dev_code, date_str, seq_str, file_ext
                     )
                     dest_path = dest_dir / new_filename
                     file_sequence += 1
@@ -1930,7 +1933,7 @@ class FieldDataWizard(QMainWindow):
         dev_code = dev_combo.currentData()
         device_label = f"p{plot_num}_{dev_code}"
 
-        if (reserve_code, plot_num, dev_code) not in self.lookups.available_device_keys():
+        if (site_short_name, plot_num, dev_code) not in self.lookups.available_device_keys():
             QMessageBox.warning(
                 self,
                 "Device Not in Deployment Round",
