@@ -1986,16 +1986,20 @@ class FieldDataWizard(QMainWindow):
             if reply == QMessageBox.No:
                 return
 
-        # Coordinate validation: non-null and within the California study area.
-        # Coordinates come from plots.csv, so this catches a bad value baked into
-        # the lookup table before it propagates into the metadata CSVs.
+        # Coordinate validation: latitude/longitude and elevation non-null and
+        # within the California study area. All three come from plots.csv, so this
+        # catches a bad value baked into the lookup table before it propagates
+        # into the metadata CSVs.
         coord_warnings = validate_coordinates(self.file_inventory)
         if coord_warnings:
             detail = "\n".join(f"  {w}" for w in coord_warnings)
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Coordinate Validation Warning")
             msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setText("Some coordinates are missing or outside the California study area. Review before generating CSVs.")
+            msg_box.setText(
+                "Some coordinates or elevations are missing or outside the "
+                "California study area. Review before generating CSVs."
+            )
             msg_box.setDetailedText(detail)
             msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
             msg_box.button(QMessageBox.Ok).setText("Continue Anyway")
@@ -2005,7 +2009,7 @@ class FieldDataWizard(QMainWindow):
                 append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "warning", w)
         else:
             append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "pass",
-                             "All coordinates non-null and within study-area bounds")
+                             "All coordinates and elevations non-null and within study-area bounds")
 
         self.generate_metadata_files()
         self.update_review_tab()

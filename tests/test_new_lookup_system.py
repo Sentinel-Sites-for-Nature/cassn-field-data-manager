@@ -119,6 +119,41 @@ def test_plots_without_names_are_still_selectable(tmp_path):
     assert plot_metadata[("StrathearnRanch", 1)]["plot_name"] == ""
 
 
+def test_plot_elevation_is_read_when_present(tmp_path):
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_short_name", "plot_number", "plot_name", "elevation_m"],
+        [
+            {"site_short_name": "Cahill", "plot_number": "1",
+             "plot_name": "One", "elevation_m": "128"},
+            # Present-but-empty is the common case in the hand-entered Box file
+            # and must land as a blank, never as a KeyError downstream.
+            {"site_short_name": "Cahill", "plot_number": "2",
+             "plot_name": "Two", "elevation_m": ""},
+        ],
+    )
+
+    _plot_names, plot_metadata = load_plot_names(plots_path)
+
+    assert plot_metadata[("Cahill", 1)]["elevation_m"] == "128"
+    assert plot_metadata[("Cahill", 2)]["elevation_m"] == ""
+
+
+def test_plot_elevation_absent_from_schema_loads_blank(tmp_path):
+    """Caches synced from Box before the column existed must keep loading."""
+    plots_path = tmp_path / "plots.csv"
+    write_csv(
+        plots_path,
+        ["site_short_name", "plot_number", "plot_name"],
+        [{"site_short_name": "Cahill", "plot_number": "1", "plot_name": "One"}],
+    )
+
+    _plot_names, plot_metadata = load_plot_names(plots_path)
+
+    assert plot_metadata[("Cahill", 1)]["elevation_m"] == ""
+
+
 def test_plot_number_zero_is_excluded(tmp_path):
     plots_path = tmp_path / "plots.csv"
     write_csv(
@@ -256,6 +291,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         "recorded_datetime": "2026-04-01T12:00:00-07:00",
         "latitude": "38",
         "longitude": "-122",
+        "elevation_m": "128",
     }
     inventory = [
         {
@@ -298,6 +334,8 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     assert images[0]["site_short_name"] == "TestSite"
     assert images[0]["site_code"] == "TST"
     assert audio[0]["date_installed"] == "2026-03-04"
+    assert images[0]["elevation_m"] == "128"
+    assert audio[0]["elevation_m"] == "128"
 
 
 def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, monkeypatch):

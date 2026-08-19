@@ -278,7 +278,7 @@ One row per camera trap file (images and associated files). Fields map directly 
 | `plot_number`, `device_type`, `camera_id`, `file_type` | Per-device identity |
 | `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from EXIF |
-| `latitude`, `longitude` | Plot coordinates from `plots.csv` |
+| `latitude`, `longitude`, `elevation_m` | Plot coordinates and elevation (metres) from `plots.csv` |
 | `camera_make`, `camera_model` | Camera manufacturer and model from EXIF |
 | `sequence_trigger_type`, `sequence_event_num`, `sequence_position`, `sequence_total` | Reconyx sequence data from MakerNote |
 | `temperature_c`, `moon_phase`, `battery_voltage`, `battery_voltage_avg`, `battery_type` | Reconyx MakerNote extras (via ExifTool) |
@@ -305,7 +305,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `plot_number`, `device_type`, `device_id`, `file_type` | Per-device identity |
 | `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from AudioMoth filename |
-| `latitude`, `longitude` | Plot coordinates from `plots.csv` |
+| `latitude`, `longitude`, `elevation_m` | Plot coordinates and elevation (metres) from `plots.csv` |
 | `ARU_make`, `ARU_model` | Hardcoded `AudioMoth`; model from CONFIG.TXT firmware string |
 | `sample_rate_hz` | From WAV header or CONFIG.TXT |
 | `gain` | Recording gain from WAV comment or CONFIG.TXT |
@@ -392,7 +392,7 @@ to interpret it.
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
 | `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
-| `coordinate_validation` | Plot coordinates (from `plots.csv`) must be non-null and fall within the California study-area bounding box. Catches unset (0,0) coordinates and values baked into the lookup table that land outside the expected region. | Automatic before CSV generation | Log panel + session-level entry in `qc_report.json` |
+| `coordinate_validation` | Plot coordinates and elevation (from `plots.csv`) must be non-null and fall within the California study-area bounding box and elevation range (-100 m to 4,500 m). Catches unset (0,0) coordinates, a blank or non-numeric `elevation_m`, and values baked into the lookup table that land outside the expected region. | Automatic before CSV generation | Log panel + session-level entry in `qc_report.json` |
 | `lookup_snapshot` | Copies the lookup/config tables in use into `qc/lookup_snapshot/` (with a manifest) so regenerated metadata can be tied to the exact site, plot, camera, ARU, SoundHub, and WI configuration used. | Automatic at metadata generation | `qc/lookup_snapshot/` + session-level entry in `qc_report.json` |
 | `wi_image_split` | Enforces the Wildlife Insights 15,000-image folder limit before the first Box upload. Oversized ML/SA folders are split without cutting trigger bursts, structurally verified, and synchronized back to session inventory. | Automatic immediately before the first Box upload | Preparation progress panel + log panel + session-level entry in `qc_report.json` |
 | (pre-upload manifest) | Before Box upload starts, writes `qc/box_upload_manifest.json` listing every uploadable file with its SHA-256 and SHA-1 when available. Used by the post-upload check below. | Automatic, immediately before Box upload | Sidecar file in deployment folder |
@@ -455,7 +455,7 @@ The app runs against authoritative site/plot references, Survey123-derived
 device history, and export defaults:
 
 - `sites.csv` — `site_name,site_short_name,site_code`, where the values are the formal name, stable relational/deployment-ID token, and acronym
-- `plots.csv` — plot names, numbers, and coordinates, joined to sites by `site_short_name`
+- `plots.csv` — plot names, numbers, coordinates, and hand-entered `elevation_m`, joined to sites by `site_short_name`
 - `devices.csv` — physical camera and ARU inventory derived from Survey123
 - `deployments.csv` — one Survey123-derived row per device placement interval, joined to sites by `site_short_name`, including event, plot, hardware identity, survey observations, retrieval provenance, and export fields
 - `wi_config.json` — Wildlife Insights project IDs and upload defaults

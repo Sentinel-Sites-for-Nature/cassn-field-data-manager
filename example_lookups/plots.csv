@@ -1,5 +1,5 @@
-site_short_name,plot_number,plot_name,plot_latitude,plot_longitude,plot_description
-ExampleReserve,1,Meadow,X.xxx,Y.yyy,"optional plot description. Habitat characteristics, notable features, etc."
-ExampleReserve,2,Creek,X.xxx,Y.yyy,
-ExampleReserve,3,Forest,X.xxx,Y.yyy,
-ExampleReserve,4,Dune,X.xxx,Y.yyy,
+site_short_name,plot_number,plot_name,plot_latitude,plot_longitude,elevation_m,plot_description
+ExampleReserve,1,Meadow,X.xxx,Y.yyy,Zzz,"optional plot description. Habitat characteristics, notable features, etc."
+ExampleReserve,2,Creek,X.xxx,Y.yyy,Zzz,
+ExampleReserve,3,Forest,X.xxx,Y.yyy,Zzz,
+ExampleReserve,4,Dune,X.xxx,Y.yyy,,

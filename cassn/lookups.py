@@ -108,6 +108,10 @@ def load_plot_names(csv_path: Path) -> tuple[dict, dict]:
                         plot_name = row["plot_name"].strip()
                         plot_latitude = row.get("plot_latitude", "").strip()
                         plot_longitude = row.get("plot_longitude", "").strip()
+                        # Hand-entered in the canonical plots.csv on Box, and
+                        # deliberately optional: cached snapshots predating the
+                        # column must keep loading, carrying a blank.
+                        elevation_m = (row.get("elevation_m") or "").strip()
                         plot_description = row.get("plot_description", "").strip()
 
                         if site_short_name not in plot_names:
@@ -120,6 +124,7 @@ def load_plot_names(csv_path: Path) -> tuple[dict, dict]:
                             "plot_name": plot_name,
                             "plot_latitude": plot_latitude,
                             "plot_longitude": plot_longitude,
+                            "elevation_m": elevation_m,
                             "plot_description": plot_description,
                         }
                 break  # read succeeded — stop trying encodings

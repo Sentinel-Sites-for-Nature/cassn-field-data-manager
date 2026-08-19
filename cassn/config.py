@@ -111,7 +111,7 @@ IMAGE_FIELDS = [
     "subproject", "subproject_design", "placename", "event_name", "event_description",
     "plot_number", "device_type", "camera_id", "camera_serial_exif", "file_type",
     "file_size_bytes", "file_hash_sha256", "file_hash_sha1", "recorded_datetime",
-    "latitude", "longitude",
+    "latitude", "longitude", "elevation_m",
     "camera_make", "camera_model",
     "sequence_trigger_type", "sequence_event_num", "sequence_position", "sequence_total",
     "temperature_c", "moon_phase", "battery_voltage", "battery_voltage_avg", "battery_type",
@@ -133,7 +133,7 @@ AUDIO_FIELDS = [
     "subproject", "subproject_design", "placename", "event_name", "event_description",
     "plot_number", "device_type", "device_id", "file_type",
     "file_size_bytes", "file_hash_sha256", "file_hash_sha1", "recorded_datetime",
-    "latitude", "longitude",
+    "latitude", "longitude", "elevation_m",
     "ARU_make", "ARU_model", "sample_rate_hz", "gain", "filter_type_khz",
     "battery_voltage", "temperature_c",
     "date_installed", "deployment_start_time", "deployment_end_time",
@@ -182,9 +182,10 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "(many files at the same second)."
     ),
     "coordinate_validation": (
-        "Coordinates (from plots.csv) should be non-null and fall within the California "
-        "study-area bounding box. Catches unset (0,0) coordinates and values baked into the "
-        "lookup table that land outside the expected region."
+        "Coordinates and elevation (from plots.csv) should be non-null and fall within the "
+        "California study-area bounding box and elevation range. Catches unset (0,0) "
+        "coordinates, a blank or non-numeric elevation, and values baked into the lookup "
+        "table that land outside the expected region."
     ),
     "wi_image_split": (
         "Before the first Box upload, camera folders above the Wildlife Insights "

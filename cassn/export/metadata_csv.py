@@ -133,6 +133,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'recorded_datetime':  entry.get('recorded_datetime', ''),
             'latitude':           entry.get('latitude', ''),
             'longitude':          entry.get('longitude', ''),
+            'elevation_m':        entry.get('elevation_m', ''),
             'app_version':        VERSION,
             'processing_datetime': now_iso,
             'is_uploaded_to_box': False,

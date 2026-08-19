@@ -540,14 +540,35 @@ def check_camera_serial(entries: list, device_label: str) -> list[str]:
     return []
 
 
-def validate_coordinates(file_inventory: list, bounds: dict | None = None) -> list[str]:
-    """Validate ``(latitude, longitude)`` across all inventory entries.
+def _elevation_warnings(plot: str, elev_raw, elev_min: float, elev_max: float) -> list[str]:
+    """Warnings for one plot's ``elevation_m``, which is hand-entered in plots.csv.
 
-    ``bounds`` may carry ``lat_min``/``lat_max``/``lon_min``/``lon_max``;
-    defaults cover the California study area. Coordinates are filled
-    programmatically from plots.csv, so the only failure modes worth checking
-    are unset (0,0) values and a lookup value that lands outside the study area.
-    Returns a list of warning strings (deduplicated per plot).
+    Elevation is deliberately optional in the lookup table, so a blank is a
+    warning rather than an error; the numeric and range checks catch a unit
+    mix-up (feet entered as metres) or a typo'd digit.
+    """
+    if elev_raw is None or str(elev_raw).strip() == '':
+        return [f"Plot {plot}: elevation is missing"]
+    try:
+        elev = float(elev_raw)
+    except (ValueError, TypeError):
+        return [f"Plot {plot}: elevation is not numeric ({elev_raw!r})"]
+    if not (elev_min <= elev <= elev_max):
+        return [
+            f"Plot {plot}: elevation {elev} m is outside expected study area bounds"
+        ]
+    return []
+
+
+def validate_coordinates(file_inventory: list, bounds: dict | None = None) -> list[str]:
+    """Validate ``(latitude, longitude, elevation_m)`` across all inventory entries.
+
+    ``bounds`` may carry ``lat_min``/``lat_max``/``lon_min``/``lon_max`` and
+    ``elev_min``/``elev_max``; defaults cover the California study area (the
+    elevation range spans Badwater Basin to Mount Whitney). Coordinates are
+    filled programmatically from plots.csv, so the only failure modes worth
+    checking are unset (0,0) values and a lookup value that lands outside the
+    study area. Returns a list of warning strings (deduplicated per plot).
     """
     if bounds is None:
         bounds = {}
@@ -555,6 +576,8 @@ def validate_coordinates(file_inventory: list, bounds: dict | None = None) -> li
     lat_max = float(bounds.get('lat_max', 42.5))
     lon_min = float(bounds.get('lon_min', -125.0))
     lon_max = float(bounds.get('lon_max', -114.0))
+    elev_min = float(bounds.get('elev_min', -100.0))
+    elev_max = float(bounds.get('elev_max', 4500.0))
 
     warnings = []
     seen_plots: set[str] = set()
@@ -565,26 +588,33 @@ def validate_coordinates(file_inventory: list, bounds: dict | None = None) -> li
         plot = str(e.get('plot_number', ''))
         if plot in seen_plots:
             continue
+        seen_plots.add(plot)
+        # Elevation is an independent column: it is reported whether or not the
+        # latitude/longitude pair checks out.
+        elev_warnings = _elevation_warnings(
+            plot, e.get('elevation_m', ''), elev_min, elev_max
+        )
+
         if lat_raw == '' or lon_raw == '':
             warnings.append(f"Plot {plot}: coordinates are missing")
-            seen_plots.add(plot)
+            warnings.extend(elev_warnings)
             continue
         try:
             lat = float(lat_raw)
             lon = float(lon_raw)
         except (ValueError, TypeError):
             warnings.append(f"Plot {plot}: coordinates are not numeric ({lat_raw!r}, {lon_raw!r})")
-            seen_plots.add(plot)
+            warnings.extend(elev_warnings)
             continue
 
         if lat == 0.0 and lon == 0.0:
             warnings.append(f"Plot {plot}: coordinates are (0, 0) — likely unset")
-            seen_plots.add(plot)
+            warnings.extend(elev_warnings)
             continue
 
         if not (lat_min <= lat <= lat_max) or not (lon_min <= lon <= lon_max):
             warnings.append(f"Plot {plot}: ({lat}, {lon}) is outside expected study area bounds")
-        seen_plots.add(plot)
+        warnings.extend(elev_warnings)
 
     return warnings
 

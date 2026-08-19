@@ -3,6 +3,7 @@ from cassn.core.quality_control import (
     build_box_verification_record,
     check_required_lookups,
     is_duplicate_media,
+    validate_coordinates,
 )
 
 
@@ -100,3 +101,45 @@ def test_required_lookups_ignores_aru_for_cameras():
         has_device_identity=True, has_coordinates=True, has_aru_row=False,
     )
     assert findings == []
+
+
+def _plot_entry(plot="1", lat="34.5", lon="-120.1", elevation="128"):
+    return {
+        "plot_number": plot,
+        "latitude": lat,
+        "longitude": lon,
+        "elevation_m": elevation,
+    }
+
+
+def test_coordinates_and_elevation_in_range_produce_no_warnings():
+    assert validate_coordinates([_plot_entry()]) == []
+
+
+def test_missing_elevation_warns_without_blocking_coordinates():
+    warnings = validate_coordinates([_plot_entry(elevation="")])
+    assert warnings == ["Plot 1: elevation is missing"]
+
+
+def test_non_numeric_elevation_warns():
+    warnings = validate_coordinates([_plot_entry(elevation="128 m")])
+    assert warnings == ["Plot 1: elevation is not numeric ('128 m')"]
+
+
+def test_out_of_range_elevation_warns():
+    # A plausible unit mix-up: feet entered into a metres column.
+    warnings = validate_coordinates([_plot_entry(elevation="9500")])
+    assert warnings == ["Plot 1: elevation 9500.0 m is outside expected study area bounds"]
+
+
+def test_elevation_is_reported_alongside_a_bad_coordinate_pair():
+    warnings = validate_coordinates([_plot_entry(lat="", lon="", elevation="")])
+    assert warnings == [
+        "Plot 1: coordinates are missing",
+        "Plot 1: elevation is missing",
+    ]
+
+
+def test_elevation_warning_is_deduplicated_per_plot():
+    entries = [_plot_entry(elevation=""), _plot_entry(elevation=""), _plot_entry(plot="2")]
+    assert validate_coordinates(entries) == ["Plot 1: elevation is missing"]

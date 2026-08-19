@@ -398,6 +398,7 @@ def build_inventory_record(
         'recorded_datetime': recorded_datetime,
         'latitude': plot_metadata.get('plot_latitude') or '',
         'longitude': plot_metadata.get('plot_longitude') or '',
+        'elevation_m': plot_metadata.get('elevation_m') or '',
         'camera_make': exif_data.get('Make', ''),
         'camera_model': exif_data.get('Model', ''),
         'sequence_trigger_type': trigger_type or '',
@@ -526,18 +527,21 @@ def generate_session_summary(
         lines.append(f"  {label}: {count} files")
     lines.append("")
 
-    # Coordinate list (unique plot → first seen lat/lon)
+    # Coordinate list (unique plot → first seen lat/lon, plus elevation when
+    # plots.csv carries one — the column is optional, so it is appended only
+    # when present rather than printed as a bare trailing comma.)
     plot_coords: dict[str, tuple] = {}
     for entry in file_inventory:
         p = entry.get("plot_number", "")
         lat = entry.get("latitude", "")
         lon = entry.get("longitude", "")
         if p and lat and lon and p not in plot_coords:
-            plot_coords[p] = (lat, lon)
+            plot_coords[p] = (lat, lon, entry.get("elevation_m", ""))
     if plot_coords:
         lines.append("Plot coordinates (first seen):")
-        for plot, (lat, lon) in sorted(plot_coords.items()):
-            lines.append(f"  Plot {plot}: {lat}, {lon}")
+        for plot, (lat, lon, elev) in sorted(plot_coords.items()):
+            elev_suffix = f", {elev} m" if str(elev).strip() else ""
+            lines.append(f"  Plot {plot}: {lat}, {lon}{elev_suffix}")
         lines.append("")
 
     # QC summary
