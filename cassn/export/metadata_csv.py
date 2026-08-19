@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, LOCAL_DATA_DIR, VERSION
+from cassn.core.audio_metadata import normalize_gain
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
 from cassn.export.wildlife_insights import deployment_event_name, subproject_for
 
@@ -203,7 +204,13 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'ARU_make':              entry.get('ARU_make', '') or soundhub_config.get('ARU_make', ''),
                 'ARU_model':             entry.get('ARU_model', '') or soundhub_config.get('ARU_model', ''),
                 'sample_rate_hz':        entry.get('sample_rate_hz', '') or soundhub_config.get(f'sample_rate_hz_{dev_type}', ''),
-                'gain':                  entry.get('gain', ''),
+                # Normalized again here, not only at extraction: gain is written
+                # into session.json per file as the card is copied, so a
+                # deployment part-copied under an older build carries the
+                # device's raw lower-case spelling in records this run did not
+                # produce. Re-normalizing at projection makes the CSV uniform
+                # without rewriting the inventory.
+                'gain':                  normalize_gain(entry.get('gain', '')),
                 'filter_type_khz':       entry.get('filter_type_khz', ''),
                 'battery_voltage':       entry.get('battery_voltage', ''),
                 'temperature_c':         entry.get('temperature_c', ''),

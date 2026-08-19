@@ -14,6 +14,10 @@ Sources, in order of precedence for the fields each provides:
   cutoffs, and device ID;
 * the WAV ``ICMT`` comment chunk holds per-file battery voltage, temperature,
   gain, and filter settings.
+
+Gain is normalized to one capitalization here, at the point of extraction, so
+every consumer downstream sees a single spelling regardless of which of the two
+device outputs supplied it.
 """
 
 from __future__ import annotations
@@ -35,6 +39,31 @@ def hz_to_khz(val) -> str:
         return str(round(float(val) / 1000, 4)).rstrip("0").rstrip(".")
     except (ValueError, TypeError):
         return str(val)
+
+
+# AudioMoth reports the same gain setting with two different capitalizations:
+# CONFIG.TXT writes the configuration vocabulary ("Gain : High") while the WAV
+# ICMT comment writes it mid-sentence in lower case ("at high gain"). Both are
+# the device's own output, so neither is wrong — but a deployment ends up with
+# "High" on its CONFIG row and "high" on every audio row, and that inconsistency
+# reaches the SoundHub deployment.csv sent to partners. The CONFIG.TXT form is
+# canonical: it matches the AudioMoth configuration app, soundhub_config.json,
+# and the SoundHub template's own example value.
+GAIN_SETTINGS = ("Low", "Low-Medium", "Medium", "Medium-High", "High")
+_GAIN_BY_LOWER = {value.lower(): value for value in GAIN_SETTINGS}
+
+
+def normalize_gain(value) -> str:
+    """Return an AudioMoth gain setting in its canonical capitalization.
+
+    Values outside the known vocabulary are returned stripped but otherwise
+    unchanged — a future firmware setting or a numeric gain from another
+    recorder should pass through rather than be reshaped by a guess.
+    """
+    if not value:
+        return ""
+    text = str(value).strip()
+    return _GAIN_BY_LOWER.get(text.lower(), text)
 
 
 def parse_audiomoth_recorded_datetime(original_filename) -> str:
@@ -87,7 +116,7 @@ def parse_audiomoth_config_file(config_path: Path) -> dict:
             elif key == "Sample rate (Hz)":
                 result["sample_rate_hz"] = val if val != "-" else ""
             elif key == "Gain":
-                result["gain_setting"] = val if val != "-" else ""
+                result["gain_setting"] = normalize_gain(val) if val != "-" else ""
             elif key == "Filter":
                 if val == "-":
                     result["low_pass_filter_hz"] = ""
@@ -217,7 +246,7 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
 
         m = re.search(r"at (\w[\w\s-]*?) gain", comment, re.IGNORECASE)
         if m:
-            result["gain_setting"] = m.group(1).strip()
+            result["gain_setting"] = normalize_gain(m.group(1))
 
         m = re.search(r"by AudioMoth ([0-9A-Fa-f]+)", comment)
         if m:
