@@ -20,6 +20,7 @@ finished by re-running it.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,6 +31,12 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
 )
 from cassn.core import hashing
+
+
+# A deployment id is an identity (org, site, plot, device) plus the date the
+# device was retrieved. The two halves matter separately during validation: the
+# identity must agree with the filenames, the date must not be assumed to.
+_DEPLOYMENT_ID_RE = re.compile(rf"^(?P<identity>.+_{SOUNDHUB_DEVICE_TYPE})_(?P<date>\d{{8}})$")
 
 
 class SoundHubStagingError(Exception):
@@ -59,6 +66,11 @@ def validate_deployment_id(rows: list[dict]) -> str:
     does not re-derive the id from folder or file names. What it does check is
     that the value is internally consistent and correctly shaped, because a
     malformed id becomes an S3 prefix that cannot be deleted afterwards.
+
+    Only the *identity* half of the id is checked against the filenames. The
+    trailing date is the device's retrieval date from Survey123, while the
+    filenames carry the deployment event's date, and the two legitimately differ
+    when a recorder was collected on a different day from the rest of the event.
     """
     ids = {r.get("deployment_id", "") for r in rows}
     if not ids:
@@ -76,22 +88,26 @@ def validate_deployment_id(rows: list[dict]) -> str:
             "device row is missing. Refresh the lookups and regenerate metadata."
         )
 
-    expected_suffix = f"_{SOUNDHUB_DEVICE_TYPE}_"
-    if expected_suffix not in deployment_id:
+    match = _DEPLOYMENT_ID_RE.match(deployment_id)
+    if match is None:
         raise SoundHubStagingError(
-            f"deployment_id {deployment_id!r} is not a {SOUNDHUB_DEVICE_TYPE} "
-            "deployment. Only bird recorders are submitted to SoundHub."
+            f"deployment_id {deployment_id!r} is not a well-formed "
+            f"{SOUNDHUB_DEVICE_TYPE} deployment id "
+            f"(expected <org>_<site>_plot<n>_{SOUNDHUB_DEVICE_TYPE}_<YYYYMMDD>). "
+            "Only bird recorders are submitted to SoundHub."
         )
+    identity = match.group("identity")
 
-    # Every file in a deployment is named from the same components as the id, so
-    # the id must prefix each filename. Catches rows spliced in from another
-    # device far more reliably than re-parsing the folder name would.
+    # Files are named from the same org/site/plot/device components as the id, so
+    # that prefix must match. Catches rows spliced in from another plot or device
+    # far more reliably than re-parsing the folder name would.
     for row in rows:
         filename = row.get("filename", "")
-        if not filename.startswith(deployment_id + "_"):
+        if not filename.startswith(identity + "_"):
             raise SoundHubStagingError(
                 f"File {filename!r} does not belong to deployment "
-                f"{deployment_id!r}. Refusing to stage a mismatched inventory."
+                f"{deployment_id!r} — expected it to start with {identity + '_'!r}. "
+                "Refusing to stage a mismatched inventory."
             )
     return deployment_id
 

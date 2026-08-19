@@ -89,7 +89,8 @@ def deployment(tmp_path):
         audio_row("UC_StrathearnRanch_plot1_BD_20260714", "00002",
                   recorded_datetime="2026-05-11T20:00:00-07:00"),
         audio_row("UC_StrathearnRanch_plot2_BD_20260713", "00001",
-                  placename="StrathearnRanch_plot2"),
+                  placename="StrathearnRanch_plot2",
+                  filename="UC_StrathearnRanch_plot2_BD_20260714_00001.wav"),
         audio_row("UC_StrathearnRanch_plot1_BT_20260714", "00001", device_type="BT"),
         audio_row("UC_StrathearnRanch_plot1_BD_20260714", "CONFIG_01", file_type="config"),
     ]
@@ -146,7 +147,30 @@ def test_validate_rejects_blank_id():
 
 def test_validate_rejects_non_bd_device():
     rows = [audio_row("UC_QuailRidge_plot1_BT_20260118", "00001")]
-    with pytest.raises(SoundHubStagingError, match="not a BD deployment"):
+    with pytest.raises(SoundHubStagingError, match="not a well-formed BD"):
+        validate_deployment_id(rows)
+
+
+def test_validate_rejects_malformed_id():
+    rows = [audio_row("UC_QuailRidge_plot1_BD", "00001",
+                      filename="UC_QuailRidge_plot1_BD_00001.wav")]
+    with pytest.raises(SoundHubStagingError, match="not a well-formed BD"):
+        validate_deployment_id(rows)
+
+
+def test_validate_allows_a_filename_date_differing_from_the_id_date():
+    """The id's date is the device's Survey123 retrieval date; the filename's is
+    the deployment event's. A recorder collected a day early makes them differ,
+    and that is normal — only the identity half has to match."""
+    rows = [audio_row("UC_StrathearnRanch_plot2_BD_20260713", "00001",
+                      filename="UC_StrathearnRanch_plot2_BD_20260714_00001.wav")]
+    assert validate_deployment_id(rows) == "UC_StrathearnRanch_plot2_BD_20260713"
+
+
+def test_validate_still_rejects_a_different_plot():
+    rows = [audio_row("UC_StrathearnRanch_plot2_BD_20260713", "00001",
+                      filename="UC_StrathearnRanch_plot3_BD_20260714_00001.wav")]
+    with pytest.raises(SoundHubStagingError, match="does not belong"):
         validate_deployment_id(rows)
 
 
