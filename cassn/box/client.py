@@ -211,12 +211,13 @@ class BoxStorage:
     def should_upload_file(file_path: Path) -> bool:
         """Skip macOS/Finder junk and internal app files from Box uploads.
 
-        Excludes dotfiles/AppleDouble files, the local ``session.json``, and
-        retired per-device ``*_manifest.json`` sidecars that may still exist in
-        historical ``raw_data/`` folders.
+        Excludes dotfiles/AppleDouble files, the local ``session.json`` and any
+        sidecar of it (the ``.json.tmp`` an interrupted save leaves behind, plus
+        ad-hoc ``.bak`` copies), and retired per-device ``*_manifest.json``
+        sidecars that may still exist in historical ``raw_data/`` folders.
         """
         name = file_path.name
-        if name.startswith(".") or name.startswith("._") or name == "session.json":
+        if name.startswith(".") or name.startswith("._") or name.startswith("session.json"):
             return False
         if name.endswith("_manifest.json") and "raw_data" in file_path.parts:
             return False
