@@ -473,19 +473,17 @@ fallbacks.
 ### Example and historical lookup files
 
 The tracked `example_lookups/sites.csv` and `example_lookups/plots.csv` document
-the current canonical site schema. Historical camera and ARU examples remain
-for reference only; neither the app nor the Survey123 transformer reads them:
+the current canonical site schema. The historical ARU example remains for
+reference only; neither the app nor the Survey123 transformer reads it:
 
 - `example_lookups/sites.csv`
 - `example_lookups/plots.csv`
-- `example_lookups/cameras.csv`
 - `example_lookups/wi_config.json`
 - `example_lookups/soundhub_config.json`
 - `example_lookups/ARUs.csv`
 
 Field notes:
 
-- **`cameras.csv`**: Retired historical format. Camera compatibility views are built from Survey123-derived device-level `deployments.csv`.
 - **`wi_config.json`**: Wildlife Insights project IDs and upload defaults. Edit `project_id_ML` and `project_id_SA` to match your project IDs in Wildlife Insights.
 - **`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_make`, `ARU_model`, `ARU_microphone`, container types, sample rates, and schedule. Values are copied into `audio_file_metadata.csv` at processing time.
 - **`ARUs.csv`**: Retired historical format. ARU compatibility views are built from Survey123-derived device-level `deployments.csv`.
@@ -517,7 +515,6 @@ cassn-field-data-manager/
 ├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
 │   ├── sites.csv
 │   ├── plots.csv
-│   ├── cameras.csv
 │   ├── wi_config.json
 │   ├── soundhub_config.json
 │   └── ARUs.csv

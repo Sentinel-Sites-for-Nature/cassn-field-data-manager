@@ -1,5 +1,0 @@
-site_code,plot_number,device_type,camera_id,feature_type,sensor_height,sensor_orientation
-ExampleSite,1,ML,12345678,Road dirt,Knee height,Parallel
-ExampleSite,1,SA,23456789,Road dirt,Knee height,Pointed Downward
-ExampleSite,2,ML,34567890,Trail game,Knee height,Parallel
-ExampleSite,2,SA,45678901,Trail game,Knee height,Pointed Downward

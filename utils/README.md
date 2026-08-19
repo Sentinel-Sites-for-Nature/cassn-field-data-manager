@@ -237,11 +237,9 @@ want committed.
 #### 1. `local_data/cameras.csv`
 
 Maps each site + plot + camera type to the camera used there, plus the few WI
-fields this script needs. Create it from the example:
-
-```bash
-cp example_lookups/cameras.csv local_data/cameras.csv
-```
+fields this script needs. The script writes a skeleton from `local_data/plots.csv`
+on first run when the file is absent, leaving `camera_id` and `feature_type`
+blank for you to fill in.
 
 #### 2. `local_data/wi_config.json`
 
