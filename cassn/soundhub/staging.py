@@ -112,17 +112,42 @@ def validate_deployment_id(rows: list[dict]) -> str:
     return deployment_id
 
 
-def _source_wav(deployment_folder: Path, row: dict) -> Path:
-    """Locate a row's WAV under the deployment folder.
+def _index_source_wavs(deployment_folder: Path) -> dict[str, Path]:
+    """Map every source WAV's filename to its path with a shallow scan.
 
+    Audio is never split, so each WAV sits directly inside its device folder.
     Device folders sit under ``raw_data/`` at most sites but directly under the
-    deployment folder at others, and the WI split can nest camera files further
-    down. Audio is never split, but the search stays general rather than assuming
-    one layout.
+    deployment folder at others, so both are scanned one level deep. This
+    deliberately does *not* walk the whole event tree: at camera sites that tree
+    holds hundreds of thousands of images, and a per-file recursive search turns
+    staging into minutes of directory I/O per recording over a network mount.
+    """
+    index: dict[str, Path] = {}
+    for root in (deployment_folder / "raw_data", deployment_folder):
+        if not root.is_dir():
+            continue
+        for device_dir in root.iterdir():
+            if not device_dir.is_dir():
+                continue
+            for path in device_dir.iterdir():
+                if path.is_file() and path.suffix.lower() == ".wav":
+                    index.setdefault(path.name, path)
+    return index
+
+
+def _source_wav(deployment_folder: Path, row: dict, index: dict[str, Path]) -> Path:
+    """Locate a row's WAV, preferring the prebuilt index over a tree walk.
+
+    ``index`` comes from :func:`_index_source_wavs`. A miss falls back to a
+    single targeted ``rglob`` for that one file — covering unusual layouts (e.g.
+    a WI-nested tree) without walking the tree once per recording.
     """
     filename = row.get("filename", "")
     if not filename:
         raise SoundHubStagingError("Inventory row with no filename.")
+    match = index.get(filename)
+    if match is not None:
+        return match
     matches = sorted(Path(deployment_folder).rglob(filename))
     if not matches:
         raise SoundHubStagingError(
@@ -203,6 +228,9 @@ def stage_deployment(
     # plot cannot leave the first plot's FLACs half-written.
     deployment_ids = {key: validate_deployment_id(rows) for key, rows in groups.items()}
 
+    # Scan the device folders once up front rather than searching per file.
+    wav_index = _index_source_wavs(deployment_folder)
+
     staged: list[dict] = []
     converted = skipped = 0
     total = len(audio_rows)
@@ -225,7 +253,7 @@ def stage_deployment(
                 }
 
             index += 1
-            src = _source_wav(deployment_folder, row)
+            src = _source_wav(deployment_folder, row, wav_index)
             dst = out_dir / (src.stem + ".flac")
 
             if progress is not None:

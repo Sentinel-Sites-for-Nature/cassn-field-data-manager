@@ -368,6 +368,37 @@ def test_stage_rejects_a_missing_source_wav(deployment, tmp_path):
         stage_deployment(deployment, read_bd_audio_rows(deployment), tmp_path / "s")
 
 
+@needs_flac
+def test_stage_does_not_walk_the_event_tree(deployment, tmp_path, monkeypatch):
+    """A flat layout resolves entirely from the prebuilt index.
+
+    Walking the event tree per file is what made staging crawl at camera sites,
+    so guard that the common case never calls ``rglob`` on the deployment.
+    """
+    original = Path.rglob
+    walked: list[str] = []
+
+    def tracked(self, pattern):
+        if str(deployment) in str(self):
+            walked.append(f"{self} :: {pattern}")
+        return original(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", tracked)
+    stage_deployment(deployment, read_bd_audio_rows(deployment), tmp_path / "staging")
+    assert not walked, f"stage walked the event tree: {walked}"
+
+
+@needs_flac
+def test_stage_falls_back_to_search_for_a_nested_wav(deployment, tmp_path):
+    """A WAV outside the flat device folders still resolves via the fallback."""
+    src = deployment / "raw_data" / "p2_BD" / "UC_StrathearnRanch_plot2_BD_20260714_00001.wav"
+    nested = deployment / "raw_data" / "p2_BD" / "nested" / "deeper" / src.name
+    nested.parent.mkdir(parents=True)
+    src.rename(nested)
+    result = stage_deployment(deployment, read_bd_audio_rows(deployment), tmp_path / "staging")
+    assert result["converted"] == 3
+
+
 # ---------------------------------------------------------------------------
 # S3 key layout
 # ---------------------------------------------------------------------------
