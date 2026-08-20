@@ -156,6 +156,54 @@ def _source_wav(deployment_folder: Path, row: dict, index: dict[str, Path]) -> P
     return matches[0]
 
 
+def _wav_missing_final_pad(src: Path) -> bool:
+    """True when the file's last RIFF chunk is odd-sized and unpadded.
+
+    RIFF requires every odd-sized chunk to be followed by a pad byte, but the
+    AudioMoth firmware omits it after the trailing GUANO chunk when that chunk's
+    text happens to be an odd length. ``flac --keep-foreign-metadata`` then hits
+    EOF one byte early while copying chunks and aborts with ``read failed
+    (011)``. Only a few chunk headers are read, so this is cheap even over a
+    network mount.
+    """
+    try:
+        file_size = src.stat().st_size
+        with open(src, "rb") as f:
+            header = f.read(12)
+            if len(header) < 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+                return False
+            while True:
+                raw = f.read(8)
+                if len(raw) < 8:
+                    return False
+                size = int.from_bytes(raw[4:8], "little")
+                end = f.tell() + size
+                if size % 2 and end == file_size:
+                    return True  # odd chunk runs to EOF with no room for a pad
+                f.seek(end + (size % 2))
+                if f.tell() >= file_size:
+                    return False
+    except OSError:
+        return False
+
+
+def _padded_copy(src: Path, dst: Path) -> None:
+    """Copy ``src`` with the missing final pad byte appended.
+
+    The RIFF size field is bumped to count the pad, making the copy the file the
+    recorder should have written. The audio samples are untouched, so
+    ``flac --verify`` still checks the encode against the same signal.
+    """
+    shutil.copyfile(src, dst)
+    with open(dst, "r+b") as f:
+        f.seek(4)
+        riff_size = int.from_bytes(f.read(4), "little")
+        f.seek(4)
+        f.write((riff_size + 1).to_bytes(4, "little"))
+        f.seek(0, 2)
+        f.write(b"\x00")
+
+
 def convert_wav_to_flac(src: Path, dst: Path, *, level: int = FLAC_COMPRESSION_LEVEL) -> None:
     """Encode one WAV to FLAC, verifying the result during the encode.
 
@@ -164,25 +212,40 @@ def convert_wav_to_flac(src: Path, dst: Path, *, level: int = FLAC_COMPRESSION_L
     ``--keep-foreign-metadata`` carries the AudioMoth RIFF comment across in an
     APPLICATION block; it does *not* preserve the GUANO chunk, which is why the
     WAVs remain the archival copy on Box.
+
+    A WAV whose trailing chunk lacks its RIFF pad byte (an AudioMoth firmware
+    quirk) is first copied locally with the pad restored, since flac refuses the
+    unpadded original; the source WAV is never modified.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     partial = dst.with_suffix(dst.suffix + ".partial")
     partial.unlink(missing_ok=True)
 
-    result = subprocess.run(
-        [
-            "flac",
-            f"-{level}",
-            "--silent",
-            "--verify",
-            "--keep-foreign-metadata",
-            "--output-name",
-            str(partial),
-            str(src),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    # Dot-prefixed so a leftover from an interrupted run can never be staged.
+    repaired = dst.parent / f".{src.name}.padded"
+    encode_src = src
+    if _wav_missing_final_pad(src):
+        _padded_copy(src, repaired)
+        encode_src = repaired
+
+    try:
+        result = subprocess.run(
+            [
+                "flac",
+                f"-{level}",
+                "--silent",
+                "--verify",
+                "--keep-foreign-metadata",
+                "--output-name",
+                str(partial),
+                str(encode_src),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        repaired.unlink(missing_ok=True)
+
     if result.returncode != 0:
         partial.unlink(missing_ok=True)
         raise SoundHubStagingError(

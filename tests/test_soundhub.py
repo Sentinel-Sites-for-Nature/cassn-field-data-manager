@@ -26,6 +26,7 @@ from cassn.soundhub.export import (
 )
 from cassn.soundhub.staging import (
     SoundHubStagingError,
+    _wav_missing_final_pad,
     flac_available,
     project_root,
     stage_deployment,
@@ -46,6 +47,22 @@ def make_wav(path: Path, seconds: float = 0.05) -> None:
         w.setsampwidth(2)
         w.setframerate(48000)
         w.writeframes(b"".join(struct.pack("<h", i % 1000) for i in range(frames)))
+
+
+def append_unpadded_guano(path: Path, text: bytes = b"GUANO|odd") -> None:
+    """Append an odd-sized GUANO chunk with no pad byte, as the AudioMoth does.
+
+    The RIFF size field counts the chunk but not the (absent) pad, reproducing
+    the firmware's spec violation byte for byte.
+    """
+    assert len(text) % 2 == 1, "the quirk only occurs for odd-sized chunks"
+    with open(path, "r+b") as f:
+        f.seek(4)
+        riff_size = int.from_bytes(f.read(4), "little")
+        f.seek(4)
+        f.write((riff_size + 8 + len(text)).to_bytes(4, "little"))
+        f.seek(0, 2)
+        f.write(b"guan" + len(text).to_bytes(4, "little") + text)
 
 
 def audio_row(deployment_id: str, seq: str, **overrides) -> dict:
@@ -386,6 +403,49 @@ def test_stage_does_not_walk_the_event_tree(deployment, tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "rglob", tracked)
     stage_deployment(deployment, read_bd_audio_rows(deployment), tmp_path / "staging")
     assert not walked, f"stage walked the event tree: {walked}"
+
+
+def test_pad_detector_flags_an_unpadded_odd_chunk(tmp_path):
+    wav = tmp_path / "odd.wav"
+    make_wav(wav)
+    assert not _wav_missing_final_pad(wav)
+    append_unpadded_guano(wav)
+    assert _wav_missing_final_pad(wav)
+
+
+def test_pad_detector_accepts_a_properly_padded_chunk(tmp_path):
+    wav = tmp_path / "padded.wav"
+    make_wav(wav)
+    append_unpadded_guano(wav)
+    # Restore the pad byte the recorder should have written.
+    with open(wav, "r+b") as f:
+        f.seek(4)
+        riff_size = int.from_bytes(f.read(4), "little")
+        f.seek(4)
+        f.write((riff_size + 1).to_bytes(4, "little"))
+        f.seek(0, 2)
+        f.write(b"\x00")
+    assert not _wav_missing_final_pad(wav)
+
+
+@needs_flac
+def test_stage_converts_a_wav_with_an_unpadded_guano_chunk(deployment, tmp_path):
+    """The AudioMoth's unpadded trailing GUANO chunk must not abort the encode.
+
+    Sources stay byte-identical: the pad is restored on a local copy only.
+    """
+    wavs = sorted((deployment / "raw_data" / "p1_BD").glob("*.wav"))
+    for wav in wavs:
+        append_unpadded_guano(wav)
+    before = {p: p.read_bytes() for p in wavs}
+
+    staging = tmp_path / "staging"
+    result = stage_deployment(deployment, read_bd_audio_rows(deployment), staging)
+
+    assert result["converted"] == 3
+    assert {p: p.read_bytes() for p in wavs} == before
+    leftovers = [p for p in staging.rglob("*") if p.name.endswith(".padded")]
+    assert not leftovers
 
 
 @needs_flac
