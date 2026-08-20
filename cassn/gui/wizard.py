@@ -491,9 +491,9 @@ class FieldDataWizard(QMainWindow):
         self.site_short_name_edit.setText(self.metadata.get("site_short_name", ""))
         self.site_code_edit.setText(self.metadata.get("site_code", ""))
 
-        # Restore the exact new-system round. Older saved sessions did not store
-        # the round ID, so map their dates to a Survey123 round without consulting
-        # legacy device files.
+        # Restore the exact curated event. Older saved sessions did not store
+        # the internal round key, so an exact curated event ID or exact date pair
+        # remains a compatibility match.
         round_id = self.metadata.get("deployment_round_id", "")
         event_id = self.metadata.get("deployment_event_id", "")
         for combo_index in range(self.deploy_event_combo.count()):
@@ -511,6 +511,8 @@ class FieldDataWizard(QMainWindow):
                 self.on_deploy_event_changed(combo_index)
                 self.metadata["deployment_round_id"] = event["deployment_round_id"]
                 self.metadata["deployment_event_id"] = event["deployment_event_id"]
+                self.metadata["deployment_start"] = event["deployment_start"]
+                self.metadata["deployment_end"] = event["deployment_end"]
                 break
 
         start = QDate.fromString(self.metadata.get("deployment_start", ""), "yyyy-MM-dd")
@@ -662,16 +664,15 @@ class FieldDataWizard(QMainWindow):
         self.site_code_edit.setReadOnly(True)
         form_layout.addRow("Site Code:", self.site_code_edit)
 
-        # Survey123 deployment-round picker. Device availability and placement
-        # metadata are scoped to this selection; there is no legacy/manual
-        # device-lookup fallback.
+        # Curated deployment-event picker. Device availability and placement
+        # metadata are scoped to this selection.
         self.deploy_event_combo = QComboBox()
         self.deploy_event_combo.setToolTip(
-            "Pick the Survey123 card-return round. The device grid and metadata "
-            "will use only placements in that round."
+            "Pick the curated card-return event. The device grid and metadata "
+            "will use only placements assigned to that event."
         )
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
-        form_layout.addRow("Returned-Card Round:", self.deploy_event_combo)
+        form_layout.addRow("Returned-Card Event:", self.deploy_event_combo)
 
         # Open placements are useful field context, but they are not actionable
         # downloads and must never supply an invented retrieval/end date.
@@ -681,18 +682,20 @@ class FieldDataWizard(QMainWindow):
             Qt.TextSelectableByMouse
         )
         self.current_deployment_status_label.setToolTip(
-            "Read-only Survey123 inventory for devices that remain in the field."
+            "Read-only curated inventory for devices that remain in the field."
         )
         form_layout.addRow("Currently Deployed (read only):", self.current_deployment_status_label)
 
         # Deployment dates
         self.deploy_start_date = QDateEdit()
-        self.deploy_start_date.setCalendarPopup(True)
+        self.deploy_start_date.setReadOnly(True)
+        self.deploy_start_date.setCalendarPopup(False)
         self.deploy_start_date.setDate(QDate.currentDate())
         form_layout.addRow("Deployment Event Start Date:", self.deploy_start_date)
 
         self.deploy_end_date = QDateEdit()
-        self.deploy_end_date.setCalendarPopup(True)
+        self.deploy_end_date.setReadOnly(True)
+        self.deploy_end_date.setCalendarPopup(False)
         self.deploy_end_date.setDate(QDate.currentDate())
         form_layout.addRow("Deployment Event End Date:", self.deploy_end_date)
 
@@ -1123,7 +1126,7 @@ class FieldDataWizard(QMainWindow):
         self._populate_deploy_events("")
 
     def _populate_deploy_events(self, site_short_name):
-        """Show returned-card rounds separately from read-only open placements."""
+        """Show curated returned-card events and read-only open placements."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
@@ -1133,10 +1136,10 @@ class FieldDataWizard(QMainWindow):
         for ev in events:
             start, end = ev["deployment_start"], ev["deployment_end"]
             count = ev["device_count"]
-            label = f"{start} → {end}  ({count} devices)"
+            label = f"{ev['deployment_event_id']} — {start} → {end}  ({count} devices)"
             combo.addItem(label, ev)
         if not events:
-            combo.addItem("— No returned-card rounds —", None)
+            combo.addItem("— No returned-card events —", None)
         combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
@@ -1220,7 +1223,7 @@ class FieldDataWizard(QMainWindow):
                 cb.setEnabled(is_available)
                 cb.setChecked(is_available)
                 if not is_available:
-                    cb.setToolTip("No Survey123 device placement in the selected round")
+                    cb.setToolTip("No curated device placement in the selected event")
                 self.device_checkboxes[plot_num][dev_code] = cb
                 self.grid_layout.addWidget(cb, row_idx, col, Qt.AlignCenter)
                 col += 1
@@ -1273,9 +1276,8 @@ class FieldDataWizard(QMainWindow):
         if not selected_event:
             QMessageBox.warning(
                 self,
-                "Missing Deployment Round",
-                "This site has no selectable Survey123 deployment round. "
-                "The app will not use the old camera or ARU lookup files.",
+                "Missing Deployment Event",
+                "This site has no selectable curated deployment event.",
             )
             return
 
@@ -1291,8 +1293,8 @@ class FieldDataWizard(QMainWindow):
             "site_code": site_code,
             "deployment_round_id": selected_event["deployment_round_id"],
             "deployment_event_id": selected_event["deployment_event_id"],
-            "deployment_start": self.deploy_start_date.date().toString("yyyy-MM-dd"),
-            "deployment_end": self.deploy_end_date.date().toString("yyyy-MM-dd"),
+            "deployment_start": selected_event["deployment_start"],
+            "deployment_end": selected_event["deployment_end"],
             "observer": self.observer_other_edit.text() if observer == "Other" else observer,
         }
 
@@ -1608,7 +1610,7 @@ class FieldDataWizard(QMainWindow):
             if not device_id:
                 self.log(
                     f"  Warning: camera_id missing for {site_short_name} plot {plot_num} "
-                    f"{dev_code} in the selected Survey123 deployment round"
+                    f"{dev_code} in the selected curated deployment event"
                 )
 
         # CONFIG.TXT — parse once per device folder (audio only; fast, critical for schedule fields)
@@ -1996,7 +1998,7 @@ class FieldDataWizard(QMainWindow):
         ))
 
         # Plot picker — authoritative plots only. Device placement must also
-        # exist in the selected Survey123 round (validated below).
+        # exist in the selected curated event (validated below).
         plot_row = QHBoxLayout()
         plot_row.addWidget(QLabel("Plot:"))
         plot_combo = QComboBox()
@@ -2052,8 +2054,8 @@ class FieldDataWizard(QMainWindow):
         if (site_short_name, plot_num, dev_code) not in self.lookups.available_device_keys():
             QMessageBox.warning(
                 self,
-                "Device Not in Deployment Round",
-                f"{device_label} has no placement in the selected Survey123 round.",
+                "Device Not in Deployment Event",
+                f"{device_label} has no placement in the selected curated event.",
             )
             return
 

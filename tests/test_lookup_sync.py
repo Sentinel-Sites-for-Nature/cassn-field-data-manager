@@ -76,7 +76,7 @@ class FakeBoxClient:
         return [self.content[file_id]]
 
 
-def test_pair_validation_rejects_noncanonical_deployment_id(tmp_path):
+def test_pair_validation_preserves_curated_deployment_id(tmp_path):
     _canonical_files(tmp_path)
     path = tmp_path / "deployments.csv"
     text = path.read_text(encoding="utf-8")
@@ -85,7 +85,46 @@ def test_pair_validation_rejects_noncanonical_deployment_id(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="non-canonical deployment_id"):
+    result = validate_device_lookup_pair(tmp_path / "devices.csv", path)
+    assert result.deployments == 1
+
+
+def test_pair_validation_requires_event_id_for_closed_placement(tmp_path):
+    _canonical_files(tmp_path)
+    path = tmp_path / "deployments.csv"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    rows[0]["deployment_event_id"] = ""
+    _write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="closed placement.*without"):
+        validate_device_lookup_pair(tmp_path / "devices.csv", path)
+
+
+def test_pair_validation_rejects_duplicate_event_slot(tmp_path):
+    _canonical_files(tmp_path)
+    path = tmp_path / "deployments.csv"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    duplicate = {**rows[0], "deployment_id": "another-curated-id"}
+    _write_csv(path, fields, [rows[0], duplicate])
+
+    with pytest.raises(ValueError, match="duplicate plot/device slot"):
+        validate_device_lookup_pair(tmp_path / "devices.csv", path)
+
+
+def test_pair_validation_rejects_reversed_interval(tmp_path):
+    _canonical_files(tmp_path)
+    path = tmp_path / "deployments.csv"
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    fields = list(rows[0])
+    rows[0]["deployment_end_date"] = "2025-12-31"
+    _write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="date precedes"):
         validate_device_lookup_pair(tmp_path / "devices.csv", path)
 
 
@@ -167,7 +206,7 @@ def test_invalid_downloaded_pair_never_replaces_valid_cache(tmp_path):
 
 
 def test_no_box_and_no_valid_cache_stops_with_actionable_error(tmp_path):
-    with pytest.raises(LookupBootstrapError, match="Connect to Box or run the Survey123 refresh"):
+    with pytest.raises(LookupBootstrapError, match="repair the curated lookup files"):
         bootstrap_lookup_tables(
             BoxConfig(app_config_folder_id="folder-1"),
             tmp_path / "missing-cache",

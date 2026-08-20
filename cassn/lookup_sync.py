@@ -23,10 +23,8 @@ from cassn.lookups import (
     WI_CONFIG_JSON,
     LookupSchemaError,
     LookupTables,
-    canonical_deployment_ids,
     load_device_deployments,
     load_devices,
-    placement_key,
 )
 
 
@@ -73,7 +71,7 @@ def validate_device_lookup_pair(
     devices_path: Path,
     deployments_path: Path,
 ) -> LookupValidation:
-    """Validate the two Survey123 files as one relational snapshot."""
+    """Validate the two curated files as one relational snapshot."""
     devices = load_devices(devices_path)
     deployments = load_device_deployments(deployments_path)
 
@@ -83,11 +81,17 @@ def validate_device_lookup_pair(
     if len(device_ids) != len(set(device_ids)):
         raise LookupSchemaError("devices.csv contains duplicate device_record_id values")
 
-    closed_without_id = [
-        row for row in deployments if row.get("deployment_end_date") and not row["deployment_id"]
+    closed_without_ids = [
+        row
+        for row in deployments
+        if row.get("deployment_end_date")
+        and (not row["deployment_id"] or not row["deployment_event_id"])
     ]
-    if closed_without_id:
-        raise LookupSchemaError("deployments.csv has a closed placement without deployment_id")
+    if closed_without_ids:
+        raise LookupSchemaError(
+            f"deployments.csv has {len(closed_without_ids)} closed placement(s) "
+            "without deployment_id or deployment_event_id"
+        )
     named_open = [
         row for row in deployments if not row.get("deployment_end_date") and row["deployment_id"]
     ]
@@ -117,16 +121,50 @@ def validate_device_lookup_pair(
     if len(deployment_ids) != len(set(deployment_ids)):
         raise LookupSchemaError("deployments.csv contains duplicate deployment_id values")
 
-    expected_ids = canonical_deployment_ids(deployments)
-    noncanonical = [
-        row["deployment_id"]
+    reversed_intervals = [
+        row
         for row in deployments
-        if row["deployment_id"] != expected_ids.get(placement_key(row), "")
+        if row.get("deployment_end_date")
+        and row["deployment_end_date"] < row["deployment_start_date"]
     ]
-    if noncanonical:
+    if reversed_intervals:
         raise LookupSchemaError(
-            "deployments.csv contains non-canonical deployment_id values; expected "
-            "UC_<site_short_name>_plotN_<device_type>_<YYYYMMDDend>"
+            f"deployments.csv has {len(reversed_intervals)} placement(s) whose end "
+            "date precedes the start date"
+        )
+
+    event_sites: dict[str, set[str]] = {}
+    event_slots: set[tuple[str, str, int, str]] = set()
+    duplicate_slots: set[tuple[str, str, int, str]] = set()
+    for row in deployments:
+        event_id = row.get("deployment_event_id", "")
+        if not event_id:
+            continue
+        event_sites.setdefault(event_id, set()).add(row["site_short_name"])
+        slot = (
+            event_id,
+            row["site_short_name"],
+            int(row["plot_number"]),
+            row["device_type"],
+        )
+        if slot in event_slots:
+            duplicate_slots.add(slot)
+        event_slots.add(slot)
+    multi_site_events = [event for event, sites in event_sites.items() if len(sites) > 1]
+    if multi_site_events:
+        examples = ", ".join(sorted(multi_site_events)[:5])
+        raise LookupSchemaError(
+            "deployments.csv assigns deployment_event_id values to multiple sites; "
+            f"examples: {examples}"
+        )
+    if duplicate_slots:
+        examples = ", ".join(
+            f"{event_id}/{site}/plot{plot}/{device_type}"
+            for event_id, site, plot, device_type in sorted(duplicate_slots)[:5]
+        )
+        raise LookupSchemaError(
+            f"deployments.csv has {len(duplicate_slots)} duplicate plot/device "
+            f"slot(s) within a deployment event; examples: {examples}"
         )
 
     known_devices = set(device_ids)
@@ -299,7 +337,7 @@ def bootstrap_lookup_tables(
     except Exception as cache_exc:
         raise LookupBootstrapError(
             "Could not load a valid lookup snapshot from Box or the local cache. "
-            "Connect to Box or run the Survey123 refresh command, then relaunch. "
+            "Connect to Box or repair the curated lookup files, then relaunch. "
             f"Box: {box_error}. Cache: {cache_exc}."
         ) from cache_exc
 

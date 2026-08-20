@@ -16,11 +16,11 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Data Integrity**: SHA-256 and SHA-1 checksums recorded for each file. SHA-256 is the primary archival checksum; SHA-1 supports fast comparison with Box-reported hashes.
 - **AudioMoth Parsing**: Recording schedule, gain, filter cutoff, and sample rate extracted from CONFIG.TXT; per-file battery voltage, temperature, and gain parsed from WAV comment headers.
 - **Reconyx MakerNote Parsing**: Sequence position, trigger type (Motion/Time-lapse), sequence total, ambient temperature, moon phase, battery voltage, and battery type extracted directly from Reconyx HYPERFIRE HP4K EXIF MakerNote via ExifTool.
-- **Device Identification**: Historical physical-device assignments come from the selected Survey123 round in device-level `deployments.csv`. AudioMoth IDs read from the card are used when present and the deployment lookup supplies the ID when CONFIG.TXT is absent.
+- **Device Identification**: Historical physical-device assignments come from the selected curated event in device-level `deployments.csv`. AudioMoth IDs read from the card are used when present and the deployment lookup supplies the ID when CONFIG.TXT is absent.
 - **Timestamps**: `recorded_datetime` stored as ISO 8601 with UTC offset (e.g. `2025-12-04T15:48:05-08:00`), sourced from EXIF for cameras and AudioMoth filename for audio; DST-aware via `zoneinfo`
 - **Cloud Storage**: Upload to Box with progress tracking and OAuth token refresh. Transfers are started by hand from the grouped action menus on the final tab — nothing uploads on its own.
 - **Multi-Format File Support**: Images (JPG, PNG, TIF, RAW), audio (WAV, MP3, FLAC)
-- **Lookup Authority**: Survey123 is upstream of the validated device snapshot; the refresh command publishes that snapshot to Box `app_config`, and every app installation synchronizes the complete Box configuration into its offline cache before loading.
+- **Lookup Authority**: A manually curated `devices.csv` / `deployments.csv` pair is distributed with the complete Box `app_config` snapshot. Every app installation validates the snapshot before replacing its offline cache.
 - **Wildlife Insights Export**: Generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, using event-scoped camera metadata from `deployments.csv` and defaults from `wi_config.json`.
 - **Wildlife Insights Image Batching**: Before the first Box upload, camera folders above 15,000 images are automatically organized into verified, burst-preserving numbered parts. The operation is visible, cancellable, and resumable.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
@@ -154,24 +154,24 @@ together, validates their canonical `site_short_name` joins, and only then
 replaces the local cache. A fresh authenticated installation therefore
 bootstraps entirely from Box. If Box is unavailable, the app continues only
 when the complete local cache is valid and shows an offline-cache warning. If
-neither source is valid, startup stops with instructions to reconnect or run
-the Survey123 refresh. Legacy camera/ARU files are never loaded.
+neither source is valid, startup stops with instructions to reconnect or repair
+the curated lookup files. Legacy camera/ARU files are never loaded.
 
-### Refresh Survey123 device data
+### Validate curated lookup data
 
-Close the app, then run one command from the repository root:
+Before distributing a manually edited lookup snapshot, run the read-only
+validator from the repository root:
 
 ```bash
-.venv/bin/python utils/sync_survey123_lookups.py refresh
+.venv/bin/python utils/validate_curated_lookups.py /path/to/lookup_directory
 ```
 
-The command creates a verified read-only Survey123 snapshot, transforms it, and
-validates the canonical pair and authoritative plot references before any Box
-write. It then creates or versions `devices.csv` and device-level
-`deployments.csv` in the configured Box `app_config` folder, verifies the
-downloaded Box hashes, and finally updates the local offline cache with backup,
-atomic replacement, and hash verification. The obsolete Box
-`deployments.csv` remains recoverable through Box file version history.
+The directory must contain the complete runtime snapshot, including
+`sites.csv`, `plots.csv`, `devices.csv`, device-level `deployments.csv`, and the
+required JSON configuration files. The validator checks schemas, site/plot and
+device relationships, event uniqueness, and placement date ordering. It never
+copies, installs, or publishes files. Distribution to Box remains a deliberate
+manual operation.
 
 ### 3. Workflow
 
@@ -180,7 +180,7 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 #### Step 1: Deployment Metadata
 - Select your organization (driven by the synced `program_config.json`)
 - Choose the formal site name from the dropdown; the stable short name and acronym fill automatically
-- Choose a returned-card deployment round; its dates and deployed devices load automatically
+- Choose a returned-card deployment event; its read-only dates and deployed devices load automatically
 - Review the separate read-only summary of devices still deployed in the field
 - Select who is downloading the data
 - Check which devices (ML, SA, BD, BT) for each plot
@@ -601,22 +601,23 @@ A few cross-cutting behaviors that aren't single QC checks but support them:
 
 ### Lookup Tables
 
-The app runs against authoritative site/plot references, Survey123-derived
+The app runs against authoritative site/plot references, manually curated
 device history, and export defaults:
 
 - `sites.csv` — `site_name,site_short_name,site_code`, where the values are the formal name, stable relational/deployment-ID token, and acronym
 - `plots.csv` — plot names, numbers, coordinates, and hand-entered `elevation_m`, joined to sites by `site_short_name`
-- `devices.csv` — physical camera and ARU inventory derived from Survey123
-- `deployments.csv` — one Survey123-derived row per device placement interval, joined to sites by `site_short_name`, including event, plot, hardware identity, survey observations, retrieval provenance, and export fields
+- `devices.csv` — curated physical camera and ARU inventory
+- `deployments.csv` — one curated row per device placement interval, joined to sites by `site_short_name`, including explicit event and deployment IDs, plot, hardware identity, observations, and export fields
 - `wi_config.json` — Wildlife Insights project IDs and upload defaults
 - `soundhub_config.json` — ARU hardware defaults (make, model, microphone, containers)
 - `program_config.json` — organization label(s) and observer names for the dropdowns
 
-**How the app gets them:** Survey123 produces the upstream device history. The
-refresh utility validates and publishes `devices.csv` plus device-level
-`deployments.csv` to Box. Box `app_config` is the canonical current snapshot
-for all installations; `~/.cassn_config/lookup_tables/` is only a validated
-offline cache. Startup synchronizes Box before constructing `LookupTables`.
+**How the app gets them:** Maintainers curate `devices.csv` and device-level
+`deployments.csv`, validate the complete directory with
+`utils/validate_curated_lookups.py`, and deliberately place the accepted files
+in Box `app_config`. Box is the distributed current snapshot for all
+installations; `~/.cassn_config/lookup_tables/` is only a validated offline
+cache. Startup synchronizes Box before constructing `LookupTables`.
 `cameras.csv`, `ARUs.csv`, and event-only `deployments.csv` are not runtime
 fallbacks.
 
@@ -624,7 +625,7 @@ fallbacks.
 
 The tracked `example_lookups/sites.csv` and `example_lookups/plots.csv` document
 the current canonical site schema. The historical ARU example remains for
-reference only; neither the app nor the Survey123 transformer reads it:
+reference only; the app does not read it:
 
 - `example_lookups/sites.csv`
 - `example_lookups/plots.csv`
@@ -636,7 +637,7 @@ Field notes:
 
 - **`wi_config.json`**: Wildlife Insights project IDs and upload defaults. Edit `project_id_ML` and `project_id_SA` to match your project IDs in Wildlife Insights.
 - **`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_make`, `ARU_model`, `ARU_microphone`, container types, sample rates, and schedule. Values are copied into `audio_file_metadata.csv` at processing time.
-- **`ARUs.csv`**: Retired historical format. ARU compatibility views are built from Survey123-derived device-level `deployments.csv`.
+- **`ARUs.csv`**: Retired historical format. ARU compatibility views are built from curated device-level `deployments.csv`.
 
 > The standalone CLI tools in `utils/` (e.g. `generate_wi_deployments.py`) read
 > their lookup tables from a repo-local `local_data/` folder instead of the

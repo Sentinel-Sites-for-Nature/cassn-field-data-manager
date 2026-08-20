@@ -1,4 +1,4 @@
-"""Contract tests for Survey123-derived device and deployment lookups."""
+"""Contract tests for curated device and deployment lookups."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ FIELDS = [
     "site_short_name",
     "plot_number",
     "device_type",
+    "device_record_id",
     "device_id",
     "deployment_start_date",
     "deployment_start_datetime",
@@ -57,6 +58,7 @@ def placement(**changes) -> dict:
         "site_short_name": "TestSite",
         "plot_number": "1",
         "device_type": "ML",
+        "device_record_id": "ML:CAM-OLD",
         "device_id": "CAM-OLD",
         "deployment_start_date": "2026-01-08",
         "deployment_start_datetime": "2026-01-08T10:00:00-08:00",
@@ -97,7 +99,7 @@ def test_canonical_site_and_plot_loaders_join_on_short_name(tmp_path):
 
 
 def test_plots_without_names_are_still_selectable(tmp_path):
-    """Survey123-sourced plots.csv leaves plot_name blank for many sites; those
+    """Curated plots.csv leaves plot_name blank for many sites; those
     plots must still reach the wizard's device grid (keyed on plot number)."""
     plots_path = tmp_path / "plots.csv"
     write_csv(
@@ -192,11 +194,12 @@ def test_metadata_schemas_expose_only_canonical_site_fields():
         assert "label_code" not in fields
 
 
-def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path):
+def test_events_follow_curated_id_and_activate_historical_devices(tmp_path):
     rows = [
         placement(),
         placement(
             deployment_id="dep-aru",
+            device_record_id="BD:ARU-1",
             device_type="BD",
             device_id="ARU-1",
             deployment_start_date="2026-03-04",
@@ -207,6 +210,8 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
         ),
         placement(
             deployment_id="dep-new-camera",
+            deployment_event_id="curated-may-event",
+            device_record_id="ML:CAM-NEW",
             device_id="CAM-NEW",
             camera_id="CAM-NEW",
             deployment_start_date="2026-04-24",
@@ -215,6 +220,8 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
         ),
         placement(
             deployment_id="dep-current-camera",
+            deployment_event_id="",
+            device_record_id="ML:CAM-CURRENT",
             device_id="CAM-CURRENT",
             camera_id="CAM-CURRENT",
             deployment_start_date="2026-05-06",
@@ -232,8 +239,9 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
     may = next(event for event in events["TestSite"] if event["deployment_end"] == "2026-05-06")
     assert april["deployment_start"] == "2026-01-08"
     assert april["device_count"] == 2
-    assert april["deployment_event_id"] == "UC_TestSite_20260424"
+    assert april["deployment_event_id"] == "source-event"
     assert may["device_count"] == 1
+    assert may["deployment_event_id"] == "curated-may-event"
 
     lookups = LookupTables(
         deployments=events,
@@ -256,11 +264,41 @@ def test_rounds_follow_card_return_date_and_activate_historical_devices(tmp_path
     assert not lookups.arus
 
 
+def test_adjacent_dates_do_not_merge_distinct_curated_events(tmp_path):
+    rows = [
+        placement(
+            deployment_id="curated-one",
+            deployment_event_id="event-one",
+            deployment_end_date="2026-04-24",
+        ),
+        placement(
+            deployment_id="curated-two",
+            deployment_event_id="event-two",
+            device_record_id="BD:ARU-1",
+            device_type="BD",
+            device_id="ARU-1",
+            camera_id="",
+            deployment_end_date="2026-04-25",
+        ),
+    ]
+    path = tmp_path / "deployments.csv"
+    write_csv(path, FIELDS, rows)
+
+    events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
+
+    assert {event["deployment_event_id"] for event in events["TestSite"]} == {
+        "event-one",
+        "event-two",
+    }
+    assert sorted(len(rows) for rows in rows_by_round.values()) == [1, 1]
+
+
 def test_metadata_uses_each_device_placement_interval(tmp_path):
     rows = [
         placement(),
         placement(
             deployment_id="dep-aru",
+            device_record_id="BD:ARU-1",
             device_type="BD",
             device_id="ARU-1",
             deployment_start_date="2026-03-04",
@@ -348,6 +386,8 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         placement(),
         placement(
             deployment_id="dep-current-camera",
+            deployment_event_id="",
+            device_record_id="ML:CAM-CURRENT",
             device_id="CAM-CURRENT",
             camera_id="CAM-CURRENT",
             deployment_start_date="2026-04-24",
@@ -375,6 +415,8 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         assert window.site_code_edit.text() == "TST"
         assert window.deploy_event_combo.count() == 1
         assert window.deploy_event_combo.currentData()["deployment_end"] == "2026-04-24"
+        assert window.deploy_start_date.isReadOnly()
+        assert window.deploy_end_date.isReadOnly()
         assert "Since 2026-04-24" in window.current_deployment_status_label.text()
         assert "1 device in the field" in window.current_deployment_status_label.text()
     finally:

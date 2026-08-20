@@ -45,7 +45,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     observer = metadata.get('observer', '')
     deployment_event_id = metadata.get("deployment_event_id", "")
     if not deployment_event_id:
-        raise ValueError("No Survey123 deployment_event_id is active")
+        raise ValueError("No curated deployment_event_id is active")
     subproject = subproject_for(site_short_name, end)
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -83,7 +83,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
 
         # Event-scoped placement lookup from the new device-level
         # deployments.csv. The compatibility views are populated only after a
-        # Survey123 round has been selected.
+        # curated event has been selected.
         placement_key = (site_short_name, plot_num_int, dev_type)
         if dev_type in {"ML", "SA"}:
             placement_row = lookups.cameras.get(placement_key, {})
@@ -94,14 +94,14 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         deployment_id = placement_row.get("deployment_id", "")
         if not deployment_id:
             raise ValueError(
-                f"No Survey123 deployment row for {site_short_name} "
+                f"No curated deployment row for {site_short_name} "
                 f"plot {plot_num} {dev_type}"
             )
         placement_start = placement_row.get("deployment_start_date", "")
         placement_end = placement_row.get("deployment_end_date", "")
         if not placement_start or not placement_end:
             raise ValueError(
-                f"Incomplete Survey123 placement interval for "
+                f"Incomplete curated placement interval for "
                 f"{site_short_name} plot {plot_num} {dev_type}"
             )
 
@@ -194,7 +194,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         else:  # audio or config
             # Actual recording range: CONFIG.TXT dates first, else the device's
             # earliest/latest recorded-file date. ``date_installed`` below uses
-            # this device placement's Survey123 start date.
+            # this device placement's curated start date.
             dev_min, dev_max = dev_date_range.get(entry.get('device_label', ''), ('', ''))
             row = {**base,
                 'deployment_start_date': entry.get('deployment_start_date') or dev_min,

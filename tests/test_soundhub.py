@@ -205,7 +205,7 @@ def test_validate_rejects_malformed_id():
 
 
 def test_validate_allows_a_filename_date_differing_from_the_id_date():
-    """The id's date is the device's Survey123 retrieval date; the filename's is
+    """The id's date is the device's curated retrieval date; the filename's is
     the deployment event's. A recorder collected a day early makes them differ,
     and that is normal — only the identity half has to match."""
     rows = [audio_row("UC_StrathearnRanch_plot2_BD_20260713", "00001",

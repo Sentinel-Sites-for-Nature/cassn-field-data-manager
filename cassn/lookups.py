@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import csv
 import json
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -230,6 +230,7 @@ DEVICE_DEPLOYMENT_REQUIRED_FIELDS = frozenset({
     "site_short_name",
     "plot_number",
     "device_type",
+    "device_record_id",
     "device_id",
     "deployment_start_date",
     "deployment_end_date",
@@ -261,12 +262,12 @@ def _load_required_csv(csv_path: Path, required_fields: frozenset[str]) -> list[
 
 
 def load_devices(csv_path: Path) -> list[dict]:
-    """Load the Survey123-derived physical-device inventory."""
+    """Load the curated physical-device inventory."""
     return _load_required_csv(csv_path, DEVICE_REQUIRED_FIELDS)
 
 
 def load_device_deployments(csv_path: Path) -> list[dict]:
-    """Load Survey123-derived device-placement intervals."""
+    """Load curated device-placement intervals."""
     rows = _load_required_csv(csv_path, DEVICE_DEPLOYMENT_REQUIRED_FIELDS)
     for row_number, row in enumerate(rows, start=2):
         try:
@@ -286,86 +287,15 @@ def load_device_deployments(csv_path: Path) -> list[dict]:
     return rows
 
 
-def placement_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
-    """Identity of one device placement, independent of the ID assigned to it.
-
-    Used to look a row up in the ID map without depending on ``deployment_id``,
-    which is the value being computed.
-    """
-    return (
-        str(row.get("site_short_name", "") or "").strip(),
-        str(row.get("plot_number", "") or "").strip(),
-        str(row.get("device_type", "") or "").strip(),
-        str(row.get("deployment_start_date", "") or "").strip(),
-        str(row.get("deployment_end_date", "") or "").strip(),
-    )
-
-
-def canonical_deployment_id(row: dict[str, str], identity_date: str) -> str:
-    """Build the deployment ID for one placement from an explicit identity date.
-
-    ``identity_date`` is the **round's** end date — the last day anything was
-    retrieved at that site on that visit — not the individual device's retrieval
-    date. Cameras and ARUs from one visit routinely come back across two days,
-    and every other identifier the app produces (the deployment folder name in
-    :func:`~cassn.lookups.build_deployment_rounds`, and every renamed file) uses
-    the round's date. Deriving this one from the device's own date instead made
-    22% of placements disagree with their own filenames.
-
-    The date is passed in rather than read off the row because a single row does
-    not know which round it belongs to; use :func:`canonical_deployment_ids` to
-    resolve a whole table at once.
-    """
-    if not identity_date:
-        return ""
-    try:
-        plot_number = str(int(row.get("plot_number", "")))
-        date_token = date.fromisoformat(identity_date).strftime("%Y%m%d")
-    except (TypeError, ValueError) as exc:
-        raise LookupSchemaError(
-            "deployments.csv needs a valid plot_number and deployment date"
-        ) from exc
-    return (
-        f"UC_{row.get('site_short_name', '')}_plot{plot_number}_"
-        f"{row.get('device_type', '')}_{date_token}"
-    )
-
-
-def canonical_deployment_ids(rows: list[dict[str, str]]) -> dict[tuple, str]:
-    """Map every closed placement in ``rows`` to its canonical deployment ID.
-
-    Groups the table into download rounds exactly as the wizard does, then dates
-    every placement in a round by that round's last retrieval. Open placements
-    are absent from the result: they have no end date and deliberately get no ID
-    until the placement closes.
-    """
-    _events, rows_by_round = build_deployment_rounds(rows)
-    resolved: dict[tuple, str] = {}
-    for round_rows in rows_by_round.values():
-        end_dates = [
-            r.get("deployment_end_date", "")
-            for r in round_rows
-            if r.get("deployment_end_date", "")
-        ]
-        if not end_dates:
-            continue
-        round_end = max(end_dates)
-        for row in round_rows:
-            if row.get("deployment_end_date", ""):
-                resolved[placement_key(row)] = canonical_deployment_id(row, round_end)
-    return resolved
-
-
 def build_deployment_rounds(
-    rows: list[dict], *, max_visit_gap_days: int = 2
+    rows: list[dict],
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
-    """Build selectable SD-card download rounds from device intervals.
+    """Build selectable events from explicitly curated placement identifiers.
 
-    Closed placements are grouped by nearby *retrieval* dates: those are the
-    cards physically coming back from a reserve together, even when cameras and
-    ARUs were installed on different dates. Open placements are grouped by
-    nearby deployment dates so the currently deployed inventory remains
-    inspectable without merging a later redeployment into an older card set.
+    A closed placement belongs to exactly the ``deployment_event_id`` stored in
+    ``deployments.csv``. No date-gap clustering, majority vote, or identifier
+    reconstruction occurs here. Open placements have no event ID and are grouped
+    only by their exact start date for the read-only field-inventory display.
     """
     by_site: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
@@ -373,51 +303,23 @@ def build_deployment_rounds(
 
     events_by_site: dict[str, list[dict]] = {}
     rows_by_round: dict[str, list[dict]] = {}
-    gap = timedelta(days=max_visit_gap_days)
-
-    def cluster_rows(cluster_rows: list[dict], field_name: str) -> list[list[dict]]:
-        ordered_days = sorted({date.fromisoformat(r[field_name]) for r in cluster_rows})
-        day_clusters: list[list[date]] = []
-        for day in ordered_days:
-            if not day_clusters or day - day_clusters[-1][-1] > gap:
-                day_clusters.append([day])
-            else:
-                day_clusters[-1].append(day)
-        return [
-            [r for r in cluster_rows if date.fromisoformat(r[field_name]) in days]
-            for days in (set(cluster) for cluster in day_clusters)
-        ]
-
     for site_short_name, site_rows in by_site.items():
-        closed_rows = [row for row in site_rows if row["deployment_end_date"]]
-        open_rows = [row for row in site_rows if not row["deployment_end_date"]]
-        round_groups = cluster_rows(closed_rows, "deployment_end_date")
-        round_groups += cluster_rows(open_rows, "deployment_start_date")
+        grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for row in site_rows:
+            if row["deployment_end_date"]:
+                grouped[("closed", row["deployment_event_id"])].append(row)
+            else:
+                grouped[("open", row["deployment_start_date"])].append(row)
+
         site_events: list[dict] = []
-        for round_rows in round_groups:
+        for (state, group_id), round_rows in grouped.items():
             start = min(r["deployment_start_date"] for r in round_rows)
             end_dates = [r["deployment_end_date"] for r in round_rows if r["deployment_end_date"]]
             end = max(end_dates) if end_dates else ""
-            round_id = (
-                f"{site_short_name}:"
-                f"{'closed-' + end if end else 'open-' + start}"
-            )
-            source_ids = [
-                r["deployment_event_id"]
-                for r in round_rows
-                if r["deployment_event_id"]
-                and not r["deployment_event_id"].startswith(("INFERRED_", "OPEN_"))
-            ]
-            source_event_id = Counter(source_ids).most_common(1)[0][0] if source_ids else ""
-            metadata_event_id = (
-                f"UC_{site_short_name}_{end.replace('-', '')}"
-                if end
-                else ""
-            )
+            round_id = f"{site_short_name}:{state}:{group_id}"
             event = {
                 "deployment_round_id": round_id,
-                "deployment_event_id": metadata_event_id,
-                "source_deployment_event_id": source_event_id,
+                "deployment_event_id": group_id if state == "closed" else "",
                 "deployment_start": start,
                 "deployment_end": end,
                 "device_count": len(round_rows),
@@ -452,9 +354,9 @@ SOUNDHUB_JSON = "soundhub_config.json"
 WI_CONFIG_JSON = "wi_config.json"
 PROGRAM_CONFIG_JSON = "program_config.json"
 
-# Box is the canonical distribution point for the complete validated runtime
-# snapshot. Survey123 remains upstream of the device pair, but every app
-# installation bootstraps and refreshes its offline cache from Box.
+# Box is the distribution point for the complete validated, curated runtime
+# snapshot. Every app installation bootstraps and refreshes its offline cache
+# from that snapshot.
 BOX_MANAGED_FILENAMES = frozenset({
     SITES_CSV,
     PLOTS_CSV,
@@ -519,15 +421,17 @@ class LookupTables:
             raise LookupSchemaError(f"Unknown deployment round: {round_id}")
 
         chosen: dict[tuple, dict] = {}
-        for row in sorted(
-            self._deployment_rows_by_round[round_id],
-            key=lambda r: (r["deployment_start_date"], r.get("deployment_start_datetime", "")),
-        ):
+        for row in self._deployment_rows_by_round[round_id]:
             key = (
                 row["site_short_name"],
                 int(row["plot_number"]),
                 row["device_type"],
             )
+            if key in chosen:
+                raise LookupSchemaError(
+                    "Curated deployment event contains duplicate site/plot/device slots: "
+                    f"{round_id} {key}"
+                )
             chosen[key] = row
 
         cameras: dict[tuple, dict] = {}

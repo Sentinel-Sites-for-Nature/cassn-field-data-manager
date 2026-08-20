@@ -62,13 +62,13 @@ def validate_deployment_id(rows: list[dict]) -> str:
     """Return the single ``deployment_id`` shared by one group of BD rows.
 
     ``audio_file_metadata.csv`` carries the deployment id straight from the
-    Survey123 device row, which is the only authority for it — this deliberately
+    curated device row, which is the only authority for it — this deliberately
     does not re-derive the id from folder or file names. What it does check is
     that the value is internally consistent and correctly shaped, because a
     malformed id becomes an S3 prefix that cannot be deleted afterwards.
 
     Only the *identity* half of the id is checked against the filenames. The
-    trailing date is the device's retrieval date from Survey123, while the
+    trailing date is the device's curated retrieval date, while the
     filenames carry the deployment event's date, and the two legitimately differ
     when a recorder was collected on a different day from the rest of the event.
     """
@@ -84,7 +84,7 @@ def validate_deployment_id(rows: list[dict]) -> str:
     deployment_id = ids.pop()
     if not deployment_id:
         raise SoundHubStagingError(
-            "Blank deployment_id in audio_file_metadata.csv — the Survey123 "
+            "Blank deployment_id in audio_file_metadata.csv — the curated "
             "device row is missing. Refresh the lookups and regenerate metadata."
         )
 

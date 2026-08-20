@@ -3,31 +3,22 @@
 Helper scripts for maintenance and data recovery tasks.
 
 The active lookup contract uses `site_name,site_short_name,site_code` in
-`sites.csv`; `plots.csv` and Survey123-derived device-level `deployments.csv`
-join by `site_short_name`. `devices.csv` has no site key. Retired
-`cameras.csv`, `ARUs.csv`, and event-only `deployments.csv` are not inputs to
-the app or the Survey123 refresh transformer.
+`sites.csv`; `plots.csv` and curated device-level `deployments.csv` join by
+`site_short_name`. `devices.csv` has no site key. Retired `cameras.csv`,
+`ARUs.csv`, and event-only `deployments.csv` are not app inputs.
 
-## `sync_survey123_lookups.py refresh`
+## `validate_curated_lookups.py`
 
-This is the only supported publisher for the active device lookup pair:
-
-```text
-Survey123 → validated CSV snapshot → Box app_config → local offline caches
-```
-
-Run it with the field-data-manager closed:
+Read-only validation for a complete candidate runtime lookup directory:
 
 ```bash
-.venv/bin/python utils/sync_survey123_lookups.py refresh
+.venv/bin/python utils/validate_curated_lookups.py /path/to/lookup_directory
 ```
 
-The command validates both CSVs and their relational references before the
-first Box write. Existing canonical Box files receive new versions, preserving
-the prior content in Box version history; missing files are created. The Box
-copies are downloaded and hash-verified before the local cache is replaced.
-Box credentials and `app_config_folder_id` come from
-`~/.cassn_config/config.json`.
+The command validates both curated CSVs, their event/device relationships, and
+their authoritative site/plot references. It prints row counts and SHA-256
+hashes. It does not authenticate, publish, install, copy, or modify anything.
+If the path is omitted it checks the normal local lookup cache.
 
 ---
 
@@ -527,7 +518,7 @@ the organization prefix (`StrathearnRanch_plot1_BD_...` instead of
 `UC_StrathearnRanch_plot1_BD_...`). Since the SoundHub IAM role has no
 `DeleteObject` permission, that would have written S3 keys nobody on our side
 could remove. The deployment id now comes from `audio_file_metadata.csv`, which
-carries it straight from the Survey123 device row.
+carries it straight from the curated device row.
 
 ### When to use
 

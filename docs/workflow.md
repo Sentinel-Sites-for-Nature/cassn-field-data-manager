@@ -4,10 +4,10 @@
 flowchart TD
     A["Launch app"] --> B["Load config from ~/.cassn_config"]
     B --> D["Sync authoritative sites, plots, and config defaults from Box"]
-    D --> E["Strictly load Survey123 devices.csv and device-level deployments.csv"]
+    D --> E["Strictly load curated devices.csv and device-level deployments.csv"]
     E --> F["Offer to reopen an existing session"]
     F --> G["Enter deployment metadata"]
-    G --> H["Select returned-card round; view current field inventory read-only"]
+    G --> H["Select curated returned-card event; view current field inventory read-only"]
     H --> I["Create deployment folder and session.json"]
     I --> J["Choose a device row"]
     J --> K["Select SD card folder"]
@@ -43,14 +43,14 @@ flowchart TD
 
 1. **Startup and lookup tables**
    - On launch the app reads `~/.cassn_config/config.json` and syncs authoritative sites, plots, SoundHub, Wildlife Insights, and program config files from Box.
-   - The app then strictly loads Survey123-derived `devices.csv` and device-level `deployments.csv`. Box startup sync cannot overwrite them, and legacy camera/ARU files are not fallbacks.
-   - If Box is unreachable, cached static files may be reused after confirmation; the two Survey123 files must still pass schema validation.
+   - The app then strictly loads curated `devices.csv` and device-level `deployments.csv`; legacy camera/ARU files are not fallbacks.
+   - If Box is unreachable, the complete last validated local cache may be reused with a warning; the curated pair must still pass relational validation.
 
 2. **Deployment setup**
-   - The user selects organization, reserve, returned-card round, observer, and staging location.
-   - The round supplies the deployment window and enables only the historical device placements returned in that field visit. The user may uncheck devices that are not being downloaded in the current session.
+   - The user selects organization, reserve, curated returned-card event, observer, and staging location.
+   - The explicit event ID supplies a read-only deployment window and enables only the placement rows assigned to it. The user may uncheck devices that are not being downloaded in the current session.
    - Open/current placements are displayed separately as read-only field inventory and cannot be selected as a card-download event.
-   - The app creates the deployment-event folder and saves its round/event IDs in resumable `session.json` state.
+   - The app creates the deployment-event folder and saves its curated event ID and internal selection key in resumable `session.json` state.
 
 3. **Per-device SD card processing**
    - The user processes one device at a time.
