@@ -36,11 +36,32 @@ DEPLOYMENT_CSV = "deployment.csv"
 RECORDING_CSV = "recording.csv"
 
 
+# An AudioMoth WAV that failed before any audio was written (e.g. an SD card
+# write error) is header-only: RIFF + fmt + LIST + an empty data chunk, under
+# 500 bytes in practice. The shortest real recording is orders of magnitude
+# larger, so anything below this holds no audio.
+_MIN_AUDIO_WAV_BYTES = 4096
+
+
+def _holds_audio(row: dict) -> bool:
+    """False for a recording known from its size to contain no audio.
+
+    Only a parseable ``file_size_bytes`` below the header-only threshold
+    excludes a row; a blank or malformed size keeps it, so a genuinely empty
+    file that slips through still fails loudly at the encode step rather than
+    being silently dropped.
+    """
+    size = str(row.get("file_size_bytes", "") or "")
+    return not (size.isdigit() and int(size) < _MIN_AUDIO_WAV_BYTES)
+
+
 def read_bd_audio_rows(deployment_folder) -> list[dict]:
     """Return the BD *audio* rows of a deployment's ``audio_file_metadata.csv``.
 
-    Excludes bat (BT) devices, which go to NABat rather than SoundHub, and the
-    ``CONFIG.TXT`` sidecar rows, which are not recordings.
+    Excludes bat (BT) devices, which go to NABat rather than SoundHub, the
+    ``CONFIG.TXT`` sidecar rows, which are not recordings, and header-only WAVs
+    from failed recordings, which contain no audio to submit — the failure
+    itself stays documented in ``audio_file_metadata.csv``.
     """
     csv_path = Path(deployment_folder) / "audio_file_metadata.csv"
     if not csv_path.exists():
@@ -52,7 +73,9 @@ def read_bd_audio_rows(deployment_folder) -> list[dict]:
         rows = list(csv.DictReader(f))
     return [
         r for r in rows
-        if r.get("device_type") == SOUNDHUB_DEVICE_TYPE and r.get("file_type") == "audio"
+        if r.get("device_type") == SOUNDHUB_DEVICE_TYPE
+        and r.get("file_type") == "audio"
+        and _holds_audio(r)
     ]
 
 

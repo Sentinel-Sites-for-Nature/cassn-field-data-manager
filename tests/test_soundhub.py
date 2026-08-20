@@ -134,6 +134,34 @@ def test_read_bd_audio_rows_excludes_bat_and_config(deployment):
     assert {r["file_type"] for r in rows} == {"audio"}
 
 
+def test_read_bd_audio_rows_excludes_header_only_recordings(deployment):
+    """A failed recording (empty data chunk, ~488 bytes) has no audio to submit."""
+    rows = read_bd_audio_rows(deployment)
+    empty = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714", "00003",
+        file_size_bytes="488", recording_duration_sec="",
+        recording_stop_reason="SD card write error",
+    )
+    kept = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714", "00004",
+        file_size_bytes="339840785",
+    )
+    blank_size = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714", "00005",
+        file_size_bytes="",
+    )
+    fieldnames = sorted({k for r in (*rows, empty, kept, blank_size) for k in r})
+    with open(deployment / "audio_file_metadata.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows([*rows, empty, kept, blank_size])
+
+    names = {r["filename"] for r in read_bd_audio_rows(deployment)}
+    assert empty["filename"] not in names, "header-only recording must be excluded"
+    assert kept["filename"] in names
+    assert blank_size["filename"] in names, "an unknown size must not exclude a row"
+
+
 def test_read_bd_audio_rows_requires_metadata(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_bd_audio_rows(tmp_path)
