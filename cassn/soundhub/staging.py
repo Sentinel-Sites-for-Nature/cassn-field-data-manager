@@ -113,21 +113,24 @@ def validate_deployment_id(rows: list[dict]) -> str:
 
 
 def _index_source_wavs(deployment_folder: Path) -> dict[str, Path]:
-    """Map every source WAV's filename to its path with a shallow scan.
+    """Map every BD WAV's filename to its path with a shallow scan.
 
     Audio is never split, so each WAV sits directly inside its device folder.
     Device folders sit under ``raw_data/`` at most sites but directly under the
-    deployment folder at others, so both are scanned one level deep. This
-    deliberately does *not* walk the whole event tree: at camera sites that tree
-    holds hundreds of thousands of images, and a per-file recursive search turns
-    staging into minutes of directory I/O per recording over a network mount.
+    deployment folder at others, so both are scanned one level deep — and only
+    the ``*_BD`` device folders are entered, since those are the only ones
+    holding SoundHub audio. Camera folders can hold hundreds of thousands of
+    files at their top level, so even listing them once over a network mount
+    costs minutes; anything not indexed still resolves through the
+    :func:`_source_wav` fallback.
     """
+    suffix = f"_{SOUNDHUB_DEVICE_TYPE}"
     index: dict[str, Path] = {}
     for root in (deployment_folder / "raw_data", deployment_folder):
         if not root.is_dir():
             continue
         for device_dir in root.iterdir():
-            if not device_dir.is_dir():
+            if not device_dir.is_dir() or not device_dir.name.endswith(suffix):
                 continue
             for path in device_dir.iterdir():
                 if path.is_file() and path.suffix.lower() == ".wav":

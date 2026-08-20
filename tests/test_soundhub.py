@@ -26,6 +26,7 @@ from cassn.soundhub.export import (
 )
 from cassn.soundhub.staging import (
     SoundHubStagingError,
+    _index_source_wavs,
     _wav_missing_final_pad,
     flac_available,
     project_root,
@@ -431,6 +432,16 @@ def test_stage_does_not_walk_the_event_tree(deployment, tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "rglob", tracked)
     stage_deployment(deployment, read_bd_audio_rows(deployment), tmp_path / "staging")
     assert not walked, f"stage walked the event tree: {walked}"
+
+
+def test_wav_index_enters_only_bd_device_folders(deployment):
+    """Camera folders can hold hundreds of thousands of top-level files, so the
+    index must not even list them; their contents resolve via the fallback."""
+    decoy = deployment / "raw_data" / "p1_ML" / "camera_noise.wav"
+    make_wav(decoy)
+    index = _index_source_wavs(deployment)
+    assert "camera_noise.wav" not in index
+    assert "UC_StrathearnRanch_plot1_BD_20260714_00001.wav" in index
 
 
 def test_pad_detector_flags_an_unpadded_odd_chunk(tmp_path):
