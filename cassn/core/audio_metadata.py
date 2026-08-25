@@ -213,8 +213,29 @@ def read_wav_duration_sec(wav_path: Path) -> int | None:
 
 
 def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
-    """Extract AudioMoth metadata from a WAV ICMT comment chunk."""
+    """Extract AudioMoth metadata from a WAV ICMT comment chunk.
+
+    Sample rate and duration are read *before* any comment parsing. Both come
+    from the RIFF ``fmt``/``data`` headers rather than from ICMT, so gating them
+    behind the comment costs real data whenever the chunk is absent or simply
+    sits past the 4 KB scanned below — a layout the missing-pad-byte repair can
+    produce. ``recording_duration_sec`` is what gives SoundHub's
+    ``recording.csv`` its ``end`` timestamp, and that field degrades to an empty
+    string rather than an error when the duration is missing, so a skipped read
+    here surfaces only as blank metadata at submission time.
+    """
     result: dict = {}
+
+    dur = read_wav_duration_sec(wav_path)
+    if dur is not None:
+        result["recording_duration_sec"] = dur
+
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            result["sample_rate_hz"] = str(wf.getframerate())
+    except Exception:
+        pass
+
     try:
         with open(wav_path, "rb") as f:
             data = f.read(4096)
@@ -233,16 +254,6 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
                 comment = data[icmt_pos:icmt_pos + 500].decode("latin-1", errors="replace")
         except Exception:
             return result
-
-        try:
-            with wave.open(str(wav_path), "rb") as wf:
-                result["sample_rate_hz"] = str(wf.getframerate())
-        except Exception:
-            pass
-
-        dur = read_wav_duration_sec(wav_path)
-        if dur is not None:
-            result["recording_duration_sec"] = dur
 
         m = re.search(r"at (\w[\w\s-]*?) gain", comment, re.IGNORECASE)
         if m:

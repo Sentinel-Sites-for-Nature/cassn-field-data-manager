@@ -30,7 +30,7 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
     SOUNDHUB_RECORDING_FIELDS,
 )
-from cassn.soundhub.staging import fragments_root, project_root
+from cassn.soundhub.staging import SoundHubStagingError, fragments_root, project_root
 
 DEPLOYMENT_CSV = "deployment.csv"
 RECORDING_CSV = "recording.csv"
@@ -128,21 +128,41 @@ def build_recording_rows(audio_rows: list[dict]) -> list[dict]:
     ``start`` is the GUANO-derived recording timestamp; ``end`` is that plus the
     recording's measured duration. The filename is the *staged* name — SoundHub
     receives ``.flac``, while the app's inventory names the source ``.wav``.
+
+    A row that carries a ``start`` but no usable duration is refused rather than
+    written with a blank ``end``. ``recording.csv`` exists precisely to supply
+    the per-file timestamps SoundHub cannot recover from our renamed files, so a
+    blank ``end`` is a silently incomplete submission — and the landing zone
+    cannot be deleted from once written. Header-only WAVs are already dropped by
+    ``read_bd_audio_rows``, so every row reaching here holds audio and has a
+    duration to find.
     """
     out: list[dict] = []
+    missing: list[str] = []
     for row in audio_rows:
         start = row.get("recorded_datetime", "")
+        name = Path(row.get("filename", "")).with_suffix(".flac").name
         try:
             duration = float(row.get("recording_duration_sec") or 0)
         except (TypeError, ValueError):
             duration = 0.0
+        if start and not duration:
+            missing.append(name)
         out.append(
             {
-                "filename": Path(row.get("filename", "")).with_suffix(".flac").name,
+                "filename": name,
                 "deployment_id": row.get("deployment_id", ""),
                 "start": _format_datetime(start),
                 "end": _format_datetime(start, duration) if duration else "",
             }
+        )
+    if missing:
+        shown = ", ".join(missing[:5])
+        more = f" (and {len(missing) - 5} more)" if len(missing) > 5 else ""
+        raise SoundHubStagingError(
+            f"{len(missing)} recording(s) have a start timestamp but no usable "
+            f"recording_duration_sec, which would stage an incomplete "
+            f"recording.csv: {shown}{more}"
         )
     return out
 

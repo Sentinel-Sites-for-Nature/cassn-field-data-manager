@@ -139,3 +139,70 @@ def test_csv_projection_normalizes_legacy_inventory_gain():
 
     assert projection_normalize("high") == "High"
     assert projection_normalize("medium") == "Medium"
+
+
+# ---------------------------------------------------------------------------
+# Duration is independent of the comment chunk
+# ---------------------------------------------------------------------------
+
+def write_wav(path, *, comment: str | None = None, junk_bytes: int = 0) -> None:
+    """A real WAV, optionally with an ICMT comment and optional leading padding.
+
+    ``junk_bytes`` inserts a JUNK chunk ahead of the comment, pushing ICMT past
+    the 4 KiB the reader scans — the layout a repaired pad byte can produce.
+    Every chunk is padded to even length, as RIFF requires.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(b"\x00\x00" * 48000)  # exactly one second
+
+    def chunk(cid: bytes, body: bytes) -> bytes:
+        return cid + struct.pack("<I", len(body)) + body + (b"\x00" if len(body) % 2 else b"")
+
+    splice = b""
+    if junk_bytes:
+        splice += chunk(b"JUNK", b"\x00" * junk_bytes)
+    if comment is not None:
+        splice += chunk(b"ICMT", comment.encode("latin-1") + b"\x00")
+
+    data = bytearray(path.read_bytes())
+    data[12:12] = splice
+    struct.pack_into("<I", data, 4, len(data) - 8)
+    path.write_bytes(bytes(data))
+
+
+def test_duration_is_read_when_the_comment_chunk_is_absent(tmp_path):
+    """Duration comes from the RIFF headers, so a missing ICMT must not hide it.
+
+    It previously did: the duration read sat below the comment-parsing bail-out,
+    so a WAV with no ICMT yielded no ``recording_duration_sec`` — which is what
+    left 48 AnzaBorrego rows with a blank SoundHub ``end`` timestamp.
+    """
+    wav = tmp_path / "UC_Site_plot1_BD_20260714_00001.wav"
+    write_wav(wav, comment=None)
+
+    result = parse_audiomoth_wav_comment(wav)
+    assert result["recording_duration_sec"] == 1
+    assert result["sample_rate_hz"] == "48000"
+    assert "gain_setting" not in result  # nothing to parse, and nothing invented
+
+
+def test_duration_is_read_when_the_comment_sits_past_the_scan_window(tmp_path):
+    """Only the first 4 KiB is scanned for ICMT; duration must not depend on that."""
+    wav = tmp_path / "UC_Site_plot1_BD_20260714_00002.wav"
+    write_wav(wav, comment=REAL_COMMENT, junk_bytes=8000)
+
+    assert parse_audiomoth_wav_comment(wav)["recording_duration_sec"] == 1
+
+
+def test_comment_fields_still_parse_alongside_duration(tmp_path):
+    """The ungating must not cost the comment-derived fields when ICMT is present."""
+    wav = tmp_path / "UC_Site_plot1_BD_20260714_00003.wav"
+    write_wav(wav, comment=REAL_COMMENT)
+
+    result = parse_audiomoth_wav_comment(wav)
+    assert result["recording_duration_sec"] == 1
+    assert result["gain_setting"] == "High"

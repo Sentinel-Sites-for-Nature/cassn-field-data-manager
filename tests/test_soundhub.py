@@ -258,12 +258,19 @@ def test_recording_rows_use_flac_names_and_offsets(deployment):
     assert rows[0]["end"] == "2026-05-11 01:00:00-07:00"
 
 
-def test_recording_end_blank_without_duration():
-    rows = build_recording_rows(
-        [audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", recording_duration_sec="")]
-    )
-    assert rows[0]["start"] == "2026-05-11 00:00:00-07:00"
-    assert rows[0]["end"] == ""
+def test_recording_without_duration_is_refused_not_blanked():
+    """A timestamped recording with no duration must fail, not stage a blank ``end``.
+
+    ``recording.csv`` exists to carry the per-file timestamps SoundHub cannot
+    recover from our renamed files, so an empty ``end`` is a silently incomplete
+    submission — and the landing zone cannot be deleted from once written. This
+    previously returned a blank field, which is how 48 AnzaBorrego rows reached
+    staging without end timestamps.
+    """
+    with pytest.raises(SoundHubStagingError, match="recording_duration_sec"):
+        build_recording_rows(
+            [audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", recording_duration_sec="")]
+        )
 
 
 def test_recording_blank_timestamp_is_not_invented():
