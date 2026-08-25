@@ -355,7 +355,7 @@ Both steps are on the **Review & Finalize** tab and are operator-initiated.
 2. **Uploads → Upload Bird Data to SoundHub** preflights the whole waiting
    batch, shows its exact scope for confirmation, uploads only recordings not
    already recorded as submitted on Box, verifies them immediately, then stamps
-   the exact Box rows and writes the batch receipt.
+   the exact Box rows and writes the submission report.
 
 **QC Checks → Check SoundHub Landing Zone** is a diagnostic for the currently
 pending batch. Successful uploads are verified automatically; a later empty
@@ -391,9 +391,23 @@ finished by simply running the command again. Both GUI and backlog uploads map
 each staged FLAC to its exact Box `audio_file_metadata.csv` row before S3 is touched.
 After immediate S3 verification it stamps `is_submitted_to_soundhub`,
 `soundhub_submitter`, and `soundhub_submission_datetime` on those rows only and
-writes the same Markdown batch receipt into the `soundhub/` folder of every
-affected Box deployment event. Previously submitted deployments are excluded
-from later uploads even after SoundHub drains the landing zone.
+writes the same Markdown submission report into the `soundhub/` folder of every
+affected Box deployment event. Completed and pending recordings are never
+allowed in the same submission batch.
+
+Staging is cumulative **within one submission batch**, not across completed
+submissions. Once every staged recording is recorded as submitted, the GUI
+refuses to add another deployment to those completed manifests. After SoundHub
+acceptance is confirmed, use the dry-run-first maintenance command to clear only
+the derived local FLAC staging copy and begin a fresh batch:
+
+```bash
+python utils/prep_soundhub.py clear-completed
+python utils/prep_soundhub.py clear-completed --apply
+```
+
+Cleanup removes the local project mirror and its `.cassn_fragments` rebuild
+inputs. It never changes Box, S3, source WAVs, or event-local submission reports.
 
 The submitter defaults to `Imperato, John`. The Box year folder is inferred from
 the staged deployment IDs and the standard Box Drive location—2027 deployments

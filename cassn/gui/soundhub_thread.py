@@ -149,7 +149,7 @@ class SoundHubUploadThread(QThread):
                 f"{check['checked']} object(s), and recorded "
                 f"{provenance.changed_rows} Box metadata row(s) across "
                 f"{provenance.changed_files} deployment event(s). Keep Box Drive "
-                "running until the updated metadata and receipts finish syncing.",
+                "running until the updated metadata and submission reports finish syncing.",
                 result,
             )
         except SoundHubSubmissionError as exc:

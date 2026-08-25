@@ -13,7 +13,8 @@ Layers, bottom up:
 * :mod:`cassn.soundhub.export` — ``deployment.csv`` and ``recording.csv``,
   projected from ``audio_file_metadata.csv``;
 * :mod:`cassn.soundhub.upload` — the boto3 push and its verification.
-* :mod:`cassn.soundhub.submission` — the shared safe preflight-to-receipt
+* :mod:`cassn.soundhub.lifecycle` — guarded rollover of completed local batches.
+* :mod:`cassn.soundhub.submission` — the shared safe preflight-to-report
   workflow used by both the CLI and GUI.
 
 None of these import Qt. The GUI wrappers live in

@@ -576,6 +576,8 @@ python utils/prep_soundhub.py upload --verify-only
 | `upload --preflight-only` | Validate exact staged-FLAC coverage in Box metadata without S3 or Box writes. |
 | `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `field_data/<year>` folder. |
 | `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
+| `clear-completed` | Read-only cleanup preflight for a fully submitted local batch. |
+| `clear-completed --apply` | Delete the preflighted derived staging project after SoundHub acceptance. |
 
 ### Output
 
@@ -616,8 +618,16 @@ so the submission travels to Box alongside the raw data.
   tree containing multiple years is rejected; `--box-year-root` is only for a
   nonstandard Box location, not routine year selection.
 - **No accidental historical re-upload.** Backlog media already marked as
-  submitted on Box is excluded from later batches. The two cumulative project
-  manifests are still sent with each batch.
+  submitted on Box closes the current local batch. The GUI and CLI refuse to
+  append new deployments until that completed batch has been deliberately
+  cleared, so a later submission cannot mix pending media with old manifests.
+- **Guarded local rollover.** `clear-completed` verifies zero pending rows, exact
+  Box provenance, one shared verified report across every represented event,
+  the cleanup path, file count, and bytes. It is a dry run unless `--apply` is
+  supplied, and it revalidates immediately before deleting both the local
+  project mirror and `.cassn_fragments` rebuild inputs. It does not confirm
+  SoundHub ingestion, so apply it only after acceptance is confirmed. Box, S3,
+  source WAVs, and reports are untouched.
 - **Uploads cannot be undone.** The role has `PutObject` and `ListBucket` but no
   `DeleteObject`. Use `status` before `upload`, and push one deployment first
   when the structure is in any doubt.

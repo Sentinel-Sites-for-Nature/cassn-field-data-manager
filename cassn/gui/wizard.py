@@ -71,7 +71,8 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.soundhub.export import read_bd_audio_rows, write_deployment_copy
-from cassn.soundhub.staging import flac_available, project_root
+from cassn.soundhub.lifecycle import plan_completed_batch_cleanup
+from cassn.soundhub.staging import flac_available, fragments_root, project_root
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -2961,6 +2962,41 @@ class FieldDataWizard(QMainWindow):
 
         staging_root = self._soundhub_staging_root()
         root = project_root(staging_root)
+        if root.exists() or fragments_root(staging_root).exists():
+            try:
+                lifecycle = plan_completed_batch_cleanup(staging_root)
+            except Exception as e:
+                QMessageBox.warning(
+                    self, "SoundHub Staging Check Failed", str(e)
+                )
+                return
+            if lifecycle.closed:
+                detail = ""
+                if lifecycle.errors:
+                    detail = "\n\nCleanup is currently blocked:\n" + "\n".join(
+                        f"• {error}" for error in lifecycle.errors
+                    )
+                QMessageBox.information(
+                    self,
+                    "Completed SoundHub Batch Still Staged",
+                    f"The existing batch contains {lifecycle.recording_count} "
+                    "recording(s), and all are already recorded as submitted. "
+                    "A new deployment cannot be added to its completed manifests.\n\n"
+                    "After SoundHub acceptance is confirmed, use the maintenance "
+                    "utility in Terminal:\n\n"
+                    "python utils/prep_soundhub.py clear-completed\n"
+                    "python utils/prep_soundhub.py clear-completed --apply"
+                    f"{detail}",
+                )
+                return
+            if lifecycle.errors:
+                QMessageBox.warning(
+                    self,
+                    "Existing SoundHub Batch Needs Attention",
+                    "The existing staging batch cannot be safely extended:\n\n"
+                    + "\n".join(f"• {error}" for error in lifecycle.errors),
+                )
+                return
 
         def row_count(name):
             path = root / name
@@ -3031,10 +3067,12 @@ class FieldDataWizard(QMainWindow):
         if not provenance.pending_keys:
             QMessageBox.information(
                 self,
-                "Nothing New to Upload",
+                "Completed SoundHub Batch",
                 f"All {len(provenance.submitted_keys)} staged recording(s) are "
-                "already recorded as submitted on Box. Add more deployment "
-                "events to staging before starting another SoundHub batch.",
+                "already recorded as submitted on Box. Do not add new deployment "
+                "events to these completed manifests. After SoundHub acceptance "
+                "is confirmed, clear the local batch with "
+                "python utils/prep_soundhub.py clear-completed.",
             )
             return
 

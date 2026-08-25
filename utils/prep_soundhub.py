@@ -21,6 +21,10 @@ Bird (BD) audio only. Source WAVs are never modified.
     # Push to the bucket, then verify:
     python utils/prep_soundhub.py upload
 
+    # After SoundHub acceptance, preview and clear the completed local batch:
+    python utils/prep_soundhub.py clear-completed
+    python utils/prep_soundhub.py clear-completed --apply
+
 Replaces the earlier ``convert_to_flac.py`` and ``verify_flac_conversion.py``,
 which rebuilt each deployment_id by parsing folder names — a derivation that
 dropped the organization prefix and would have written unfixable S3 keys, since
@@ -41,6 +45,11 @@ from cassn.soundhub.export import (  # noqa: E402
     write_deployment_copy,
     write_deployment_fragments,
 )
+from cassn.soundhub.lifecycle import (  # noqa: E402
+    SoundHubLifecycleError,
+    clear_completed_batch,
+    plan_completed_batch_cleanup,
+)
 from cassn.soundhub.provenance import (  # noqa: E402
     DEFAULT_SUBMITTER,
 )
@@ -52,6 +61,7 @@ from cassn.soundhub.submission import (  # noqa: E402
 from cassn.soundhub.staging import (  # noqa: E402
     SoundHubStagingError,
     flac_available,
+    fragments_root,
     project_root,
     stage_deployment,
 )
@@ -78,6 +88,26 @@ def cmd_stage(args) -> int:
 
     settings = load_soundhub_config()
     staging_root = Path(args.staging or settings["staging_root"])
+    root = project_root(staging_root)
+    if root.exists() or fragments_root(staging_root).exists():
+        lifecycle = plan_completed_batch_cleanup(
+            staging_root,
+            getattr(args, "box_year_root", None),
+        )
+        if lifecycle.closed:
+            print("STAGING BLOCKED — the existing SoundHub batch is completed.")
+            print(f"  Completed recordings: {lifecycle.recording_count}")
+            print(f"  Local batch folder:   {lifecycle.project_root}")
+            print(
+                "Review and clear it before starting a new batch:\n"
+                "  python utils/prep_soundhub.py clear-completed"
+            )
+            return 1
+        if lifecycle.errors:
+            print("STAGING BLOCKED — the existing SoundHub batch is invalid:")
+            for error in lifecycle.errors:
+                print(f"  - {error}")
+            return 1
 
     if args.deployment:
         deployments = [Path(args.deployment)]
@@ -207,7 +237,11 @@ def cmd_upload(args) -> int:
             print("No unsubmitted recordings remain; a live upload would not start.")
         return 0
     if not plan.provenance.pending_keys:
-        print("\nNOTHING TO UPLOAD — all staged recordings are already recorded as submitted.")
+        print("\nBATCH COMPLETE — all staged recordings are recorded as submitted.")
+        print(
+            "After SoundHub confirms acceptance, preview local cleanup with:\n"
+            "  python utils/prep_soundhub.py clear-completed"
+        )
         return 1
 
     print(f"\nUploading to s3://{settings['bucket']}/{project_prefix(settings)}/\n")
@@ -243,10 +277,74 @@ def cmd_upload(args) -> int:
         f"\nBox submission record updated: {provenance.changed_rows} metadata "
         f"row(s) across {provenance.changed_files} deployment event(s)."
     )
-    print(f"Batch receipt saved with {len(reports)} Box deployment event(s):")
+    print(f"Submission report saved with {len(reports)} Box deployment event(s):")
     for report in reports:
         print(f"  {report}")
     print("\nSOUNDHUB SUBMISSION COMPLETE")
+    return 0
+
+
+def cmd_clear_completed(args) -> int:
+    """Preview or apply deletion of one fully submitted local staging batch."""
+    settings = load_soundhub_config()
+    staging_root = Path(args.staging or settings["staging_root"])
+    try:
+        plan = plan_completed_batch_cleanup(
+            staging_root,
+            args.box_year_root,
+        )
+    except Exception as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    print("Completed SoundHub batch cleanup preflight")
+    print(f"  Local project folder:     {plan.project_root}")
+    print(f"  Local fragment folder:    {plan.fragments_root}")
+    print(f"  Deployment events:        {plan.event_count}")
+    print(f"  SoundHub deployments:     {plan.deployment_count}")
+    print(f"  Recordings:               {plan.recording_count}")
+    print(f"  Pending recordings:       {plan.pending_count}")
+    print(f"  Local files to remove:    {plan.local_file_count}")
+    print(f"  Local data to remove:     {plan.local_bytes / 1e9:.2f} GB")
+    print(f"  Shared verified report:   {plan.report_name or '(not confirmed)'}")
+
+    if not plan.closed:
+        print("\nCLEANUP BLOCKED — this staging batch is not fully submitted.")
+        for error in plan.errors:
+            print(f"  - {error}")
+        return 1
+    if plan.errors:
+        print("\nCLEANUP BLOCKED")
+        for error in plan.errors:
+            print(f"  - {error}")
+        return 1
+
+    if not args.apply:
+        print("\nDRY RUN PASSED — nothing was deleted.")
+        print(
+            "This verifies local staging and Box Drive records; it does not "
+            "confirm SoundHub ingestion."
+        )
+        print(
+            "After SoundHub acceptance is confirmed, delete this derived local "
+            "batch with:\n"
+            "  python utils/prep_soundhub.py clear-completed --apply"
+        )
+        return 0
+
+    try:
+        result = clear_completed_batch(plan)
+    except SoundHubLifecycleError as exc:
+        print(f"\nCLEANUP FAILED — {exc}")
+        return 1
+
+    print("\nCOMPLETED SOUNDHUB BATCH CLEARED")
+    print(f"  Removed project folder:  {result.removed_project_root}")
+    if result.removed_fragments_root is not None:
+        print(f"  Removed fragment folder: {result.removed_fragments_root}")
+    print(f"  Removed files:           {result.removed_files}")
+    print(f"  Freed data:              {result.removed_bytes / 1e9:.2f} GB")
+    print("  Box data, source WAVs, submission reports, and S3 were not changed.")
     return 0
 
 
@@ -306,6 +404,10 @@ def main() -> int:
     target.add_argument(
         "--root", help="Find and add deployment-event folders below this directory"
     )
+    p_stage.add_argument(
+        "--box-year-root",
+        help="Override Box field_data/<year> only when checking an existing batch",
+    )
     p_stage.set_defaults(func=cmd_stage)
 
     p_status = sub.add_parser(
@@ -338,6 +440,21 @@ def main() -> int:
         help=f"SoundHub submitter written to Box (default: {DEFAULT_SUBMITTER})",
     )
     p_upload.set_defaults(func=cmd_upload)
+
+    p_clear = sub.add_parser(
+        "clear-completed",
+        help="Preview or clear a completed local staging batch after acceptance",
+    )
+    p_clear.add_argument(
+        "--apply",
+        action="store_true",
+        help="Delete the preflighted derived local batch (default is dry run)",
+    )
+    p_clear.add_argument(
+        "--box-year-root",
+        help="Override the automatically inferred Box field_data/<year> folder",
+    )
+    p_clear.set_defaults(func=cmd_clear_completed)
 
     args = parser.parse_args()
     return args.func(args)

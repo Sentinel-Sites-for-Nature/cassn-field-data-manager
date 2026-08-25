@@ -240,11 +240,8 @@ def test_selection_and_markdown_report_cover_planned_batch(tmp_path):
     assert "Box metadata files updated | 2" in text
 
 
-def test_cumulative_submission_selects_and_reports_only_pending_events(
-    tmp_path, monkeypatch
-):
-    """Earlier staged events stay in the manifests but are not re-submitted."""
-    staging, box_year, event_1, event_2 = _fixture(tmp_path)
+def test_submission_blocks_completed_and_pending_batches_mixed_together(tmp_path):
+    staging, box_year, event_1, _ = _fixture(tmp_path)
     fields, rows = _read_csv(event_1)
     rows[0].update(
         is_submitted_to_soundhub="True",
@@ -261,49 +258,14 @@ def test_cumulative_submission_selects_and_reports_only_pending_events(
         staging, settings=settings, box_year_root=box_year
     )
 
-    assert plan.ok
+    assert not plan.ok
     assert plan.provenance.pending_keys == {
         (DEPLOYMENT_2, f"{DEPLOYMENT_2}_00001.flac")
     }
     assert plan.provenance.pending_event_ids == {"UC_Beta_20260710"}
     assert plan.provenance.pending_file_count == 1
-    assert {item["relative"] for item in plan.objects} == {
-        "deployment.csv",
-        "recording.csv",
-        f"{DEPLOYMENT_2}/{DEPLOYMENT_2}_00001.flac",
-    }
-
-    monkeypatch.setattr(
-        "cassn.soundhub.submission.upload_project",
-        lambda *args, **kwargs: {
-            "cancelled": False,
-            "uploaded": 3,
-            "skipped": 0,
-            "uploaded_bytes": plan.total_bytes,
-            "total": 3,
-        },
-    )
-    monkeypatch.setattr(
-        "cassn.soundhub.submission.verify_project",
-        lambda *args, **kwargs: {
-            "ok": True,
-            "checked": 3,
-            "present": 3,
-            "missing": [],
-            "mismatched": [],
-        },
-    )
-
-    result = execute_soundhub_submission(plan)
-
-    assert result["success"] is True
-    assert len(result["reports"]) == 1
-    assert result["reports"][0].parent.parent == event_2.parent
-    report = result["reports"][0].read_text(encoding="utf-8")
-    assert "UC_Beta_20260710" in report
-    assert "UC_Alpha_20260610" not in report
-    assert "| Deployment events | 1 |" in report
-    assert not (event_1.parent / "soundhub").exists()
+    assert not plan.objects
+    assert any("mixes recordings from a completed submission" in error for error in plan.errors)
 
 
 def test_verification_failure_leaves_box_provenance_unchanged(tmp_path, monkeypatch):

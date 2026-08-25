@@ -69,6 +69,12 @@ def plan_soundhub_submission(
         provenance=provenance,
         errors=list(provenance.errors),
     )
+    if provenance.submitted_keys and provenance.pending_keys:
+        plan.errors.append(
+            "staging mixes recordings from a completed submission with new "
+            "pending recordings; clear the completed batch and stage the new "
+            "deployment events again"
+        )
     if plan.errors or not provenance.pending_keys:
         return plan
 
