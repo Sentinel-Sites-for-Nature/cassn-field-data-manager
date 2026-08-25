@@ -14,7 +14,12 @@ from cassn.soundhub.export import (
     write_deployment_fragments,
 )
 from cassn.soundhub.staging import stage_deployment
-from cassn.soundhub.upload import load_soundhub_config, upload_project, verify_project
+from cassn.soundhub.provenance import DEFAULT_SUBMITTER
+from cassn.soundhub.submission import (
+    SoundHubSubmissionError,
+    SoundHubSubmissionPlan,
+    execute_soundhub_submission,
+)
 
 
 class SoundHubStageThread(QThread):
@@ -86,14 +91,19 @@ class SoundHubStageThread(QThread):
 
 
 class SoundHubUploadThread(QThread):
-    """Push the staged project tree to S3, then verify what landed."""
+    """Run the shared upload, verification, and Box-provenance workflow."""
 
     progress = Signal(int, int, str)
     completed = Signal(bool, bool, str, dict)  # success, cancelled, message, result
 
-    def __init__(self, staging_root):
+    def __init__(
+        self,
+        submission_plan: SoundHubSubmissionPlan,
+        submitter: str = DEFAULT_SUBMITTER,
+    ):
         super().__init__()
-        self.staging_root = Path(staging_root)
+        self.submission_plan = submission_plan
+        self.submitter = submitter
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -101,29 +111,25 @@ class SoundHubUploadThread(QThread):
 
     def run(self):
         try:
-            settings = load_soundhub_config()
-            result = upload_project(
-                self.staging_root,
-                settings=settings,
+            result = execute_soundhub_submission(
+                self.submission_plan,
+                submitter=self.submitter,
                 progress=self.progress.emit,
                 is_cancelled=self._cancel_event.is_set,
             )
 
             if result["cancelled"]:
+                upload = result["upload"]
                 self.completed.emit(
                     False, True,
-                    f"Upload cancelled after {result['uploaded']} object(s). "
+                    f"Upload cancelled after {upload['uploaded']} object(s). "
                     "Objects already sent stay in the bucket; re-run to resume.",
                     result,
                 )
                 return
 
-            # Verification has to run now: SoundHub drains the landing zone once
-            # it ingests a submission, after which a listing shows nothing.
-            check = verify_project(self.staging_root, settings=settings)
-            result["verification"] = check
-
-            if not check["ok"]:
+            if not result["success"]:
+                check = result["verification"]
                 self.completed.emit(
                     False, False,
                     f"Upload finished but verification failed: "
@@ -133,12 +139,27 @@ class SoundHubUploadThread(QThread):
                 )
                 return
 
+            upload = result["upload"]
+            check = result["verification"]
+            provenance = result["provenance"]
             self.completed.emit(
                 True, False,
-                f"Uploaded {result['uploaded']} object(s) "
-                f"({result['skipped']} already present) and verified all "
-                f"{check['checked']} against the bucket.",
+                f"Uploaded {upload['uploaded']} object(s) "
+                f"({upload['skipped']} already present), verified all "
+                f"{check['checked']} object(s), and recorded "
+                f"{provenance.changed_rows} Box metadata row(s) across "
+                f"{provenance.changed_files} deployment event(s). Keep Box Drive "
+                "running until the updated metadata and receipts finish syncing.",
                 result,
             )
+        except SoundHubSubmissionError as exc:
+            if exc.phase == "box_provenance":
+                message = (
+                    "S3 upload verified, but the Box submission record failed: "
+                    f"{exc}. Do not upload again; repair the Box record instead."
+                )
+            else:
+                message = f"SoundHub {exc.phase.replace('_', ' ')} failed: {exc}"
+            self.completed.emit(False, False, message, exc.result)
         except Exception as exc:
             self.completed.emit(False, False, f"SoundHub upload failed: {exc}", {})

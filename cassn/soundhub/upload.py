@@ -98,7 +98,12 @@ def project_prefix(settings: dict) -> str:
     return f"{settings['upload_prefix']}/{settings['project_short_name']}"
 
 
-def staged_objects(staging_root, settings: dict) -> list[dict]:
+def staged_objects(
+    staging_root,
+    settings: dict,
+    *,
+    deployment_ids: set[str] | None = None,
+) -> list[dict]:
     """Every staged file paired with the S3 key it will occupy.
 
     The key is the file's path relative to the project directory, so the local
@@ -113,6 +118,10 @@ def staged_objects(staging_root, settings: dict) -> list[dict]:
         if not path.is_file() or path.name.startswith("."):
             continue
         relative = path.relative_to(root).as_posix()
+        if deployment_ids is not None and "/" in relative:
+            deployment_id = relative.split("/", 1)[0]
+            if deployment_id not in deployment_ids:
+                continue
         objects.append(
             {
                 "path": path,
@@ -142,6 +151,7 @@ def upload_project(
     settings: dict | None = None,
     progress=None,
     is_cancelled=None,
+    deployment_ids: set[str] | None = None,
 ) -> dict:
     """Push the staged project tree to the SoundHub bucket.
 
@@ -154,7 +164,9 @@ def upload_project(
     staging_root = staging_root or settings["staging_root"]
     client = _client(settings)
 
-    objects = staged_objects(staging_root, settings)
+    objects = staged_objects(
+        staging_root, settings, deployment_ids=deployment_ids
+    )
     already = _existing_sizes(client, settings)
 
     uploaded = skipped = 0
@@ -203,7 +215,12 @@ def upload_project(
     }
 
 
-def verify_project(staging_root=None, *, settings: dict | None = None) -> dict:
+def verify_project(
+    staging_root=None,
+    *,
+    settings: dict | None = None,
+    deployment_ids: set[str] | None = None,
+) -> dict:
     """Reconcile the staged tree against what is actually in the bucket.
 
     Run this immediately after :func:`upload_project`. A later run will report
@@ -214,7 +231,9 @@ def verify_project(staging_root=None, *, settings: dict | None = None) -> dict:
     staging_root = staging_root or settings["staging_root"]
     client = _client(settings)
 
-    objects = staged_objects(staging_root, settings)
+    objects = staged_objects(
+        staging_root, settings, deployment_ids=deployment_ids
+    )
     already = _existing_sizes(client, settings)
 
     missing = [o["key"] for o in objects if o["key"] not in already]

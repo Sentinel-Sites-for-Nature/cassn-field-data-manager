@@ -506,11 +506,12 @@ python utils/split_for_wi.py \
 
 ## `prep_soundhub.py`
 
-Stages and uploads **bird (BD)** audio to Wildlife SoundHub. The application does
-this automatically for deployments it ingests; this CLI covers the backlog —
-deployments downloaded and pushed to Box before the SoundHub step existed. Both
-paths call the same code in `cassn/soundhub/`, so a deployment prepared here is
-identical to one prepared in the GUI.
+Stages and uploads **bird (BD)** audio to Wildlife SoundHub. The application can
+add deployment events to the cumulative local batch as they are processed, then
+wait until the desired group is ready for one transfer. This CLI provides the
+same workflow for the backlog—deployments downloaded and pushed to Box before
+the SoundHub step existed. Both paths call the same submission code in
+`cassn/soundhub/`.
 
 Replaces the retired `convert_to_flac.py` and `verify_flac_conversion.py`. Those
 rebuilt each `deployment_id` by parsing folder names, a derivation that dropped
@@ -554,7 +555,10 @@ python utils/prep_soundhub.py stage --root "/path/to/2026"
 # Review what is staged and where it will land in S3
 python utils/prep_soundhub.py status
 
-# Push to the bucket, then verify what landed
+# Validate staged-to-Box provenance mapping without S3 or Box writes
+python utils/prep_soundhub.py upload --preflight-only
+
+# Push, verify, update Box provenance, and write a Markdown submission report
 python utils/prep_soundhub.py upload
 
 # Reconcile staging against the bucket without transferring anything
@@ -569,6 +573,9 @@ python utils/prep_soundhub.py upload --verify-only
 | `stage --deployment PATH` | One deployment folder. |
 | `stage --root PATH` | Scan below this folder for every deployment with an `audio_file_metadata.csv`. |
 | `upload --verify-only` | Skip the transfer; only reconcile staging against the bucket. |
+| `upload --preflight-only` | Validate exact staged-FLAC coverage in Box metadata without S3 or Box writes. |
+| `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `field_data/<year>` folder. |
+| `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
 
 ### Output
 
@@ -598,9 +605,98 @@ so the submission travels to Box alongside the raw data.
   once it ingests a submission, so a later listing shows nothing. That is normal
   and is not an upload failure — the durable record is the
   `is_submitted_to_soundhub` column in `audio_file_metadata.csv`.
+- **Exact Box provenance.** Before upload, every staged FLAC must map to exactly
+  one BD audio row in Box. After verification, only those rows receive the
+  SoundHub submission fields. Header-only failures and other unstaged rows stay
+  unsubmitted. The same concise Markdown report is saved into every affected
+  Box deployment event's `soundhub/` folder with the destination, counts,
+  manifest hashes, and verification result.
+- **Automatic year selection.** The normal Box Drive `field_data/<year>` folder
+  is inferred from the staged deployment IDs, including future years. A staging
+  tree containing multiple years is rejected; `--box-year-root` is only for a
+  nonstandard Box location, not routine year selection.
+- **No accidental historical re-upload.** Backlog media already marked as
+  submitted on Box is excluded from later batches. The two cumulative project
+  manifests are still sent with each batch.
 - **Uploads cannot be undone.** The role has `PutObject` and `ListBucket` but no
   `DeleteObject`. Use `status` before `upload`, and push one deployment first
   when the structure is in any doubt.
+
+---
+
+## `normalize_soundhub_coordinates.py`
+
+Normalizes latitude and longitude to exactly eight decimal places in an
+existing SoundHub staging tree. The utility updates both the cumulative project
+`deployment.csv` and its durable per-deployment copies under
+`.cassn_fragments/`; otherwise a later manifest rebuild would restore the old
+coordinates. The hidden fragment directory is outside the S3 mirror and is
+never uploaded.
+
+The default is a read-only dry run. Blank, invalid, non-finite, or out-of-range
+coordinates are blocking errors, as are schema problems or any non-coordinate
+difference between the project manifest and its fragments.
+
+```bash
+# Preview the configured SoundHub staging tree:
+python utils/normalize_soundhub_coordinates.py
+
+# Preview an explicitly selected staging tree:
+python utils/normalize_soundhub_coordinates.py \
+  --staging /Users/example/cassn/soundhub/s3_upload_staging
+
+# Apply the reported coordinate-only changes atomically:
+python utils/normalize_soundhub_coordinates.py --apply
+```
+
+Fragment files are replaced first and the cumulative project manifest last, so
+an interrupted run is safely resumable. `recording.csv`, staged FLACs, Box
+deployment copies, source metadata, canonical lookups, and the ingest app are
+not modified. Rerun the dry run after applying and require zero pending changes
+before uploading.
+
+---
+
+## `backfill_soundhub_fields.py`
+
+Repairs the approved pre-upload SoundHub metadata fields in one synchronized,
+dry-run-first operation. It updates the cumulative and fragment deployment
+manifests plus the matching Box Drive `audio_file_metadata.csv` and
+event-local `soundhub/deployment.csv` copies. The repair standardizes
+`subproject`, writes the literal subproject naming methodology, fills the
+Survey123-supported `metal_pole` mounting value, and restores the four known
+Anza-Borrego BD sensor heights. It never opens or changes media or
+`recording.csv`.
+
+```bash
+python utils/backfill_soundhub_fields.py \
+  --box-year-root "/path/to/Box/CASSN/field_data/2026"
+
+python utils/backfill_soundhub_fields.py \
+  --box-year-root "/path/to/Box/CASSN/field_data/2026" \
+  --apply
+```
+
+## `backfill_anza_soundhub_durations.py`
+
+Recovers the 48 missing legacy Anza-Borrego recording durations directly from
+the staged FLAC STREAMINFO headers. It synchronizes the duration column in the
+Box event's `audio_file_metadata.csv` with the `end` values in the cumulative
+staging manifest, four per-deployment fragments, and Box event-local SoundHub
+copy. The three 488-byte header-only WAV failures remain documented but blank.
+Audio bytes, filenames, identifiers, starts, and deployment dates are untouched.
+
+The default is a dry run:
+
+```bash
+python utils/backfill_anza_soundhub_durations.py \
+  --box-event-root "/path/to/UC_AnzaBorrego_20260516"
+python utils/backfill_anza_soundhub_durations.py \
+  --box-event-root "/path/to/UC_AnzaBorrego_20260516" \
+  --apply
+```
+
+Rerun the dry run after applying and require zero pending changes.
 
 ---
 

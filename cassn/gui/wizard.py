@@ -71,12 +71,12 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.soundhub.export import read_bd_audio_rows, write_deployment_copy
-from cassn.soundhub.staging import flac_available
+from cassn.soundhub.staging import flac_available, project_root
+from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
     load_soundhub_config,
     project_prefix,
-    staged_objects,
     verify_project,
 )
 from cassn.gui.wi_split_thread import WISplitThread
@@ -92,7 +92,6 @@ from cassn.config import (
     IMAGE_FIELDS,
     LOCAL_DATA_DIR,
     ORGANIZATIONS,
-    SOUNDHUB_DEVICE_TYPE,
 )
 from cassn.core.audio_metadata import (
     parse_audiomoth_config_file,
@@ -1003,10 +1002,10 @@ class FieldDataWizard(QMainWindow):
             enabled=self.box_authenticated,
         )
         self.soundhub_stage_btn = self._menu_action(
-            "Prepare Bird Audio for SoundHub…",
+            "Add Bird Audio to SoundHub Staging…",
             self.stage_for_soundhub,
-            "Convert this deployment's bird (BD) WAVs to FLAC and build the "
-            "SoundHub deployment.csv and recording.csv. Source WAVs are not modified.",
+            "Add or refresh this deployment event in the cumulative SoundHub "
+            "staging batch. Source WAVs are not modified and nothing is uploaded.",
         )
         self.soundhub_upload_btn = self._menu_action(
             "Upload Bird Data to SoundHub",
@@ -1028,11 +1027,10 @@ class FieldDataWizard(QMainWindow):
             "SHA-1 against the SHA-1 reported by Box.",
         )
         self.soundhub_verify_btn = self._menu_action(
-            "Verify SoundHub Upload",
+            "Check SoundHub Landing Zone",
             self.verify_soundhub,
-            "Reconcile the staged SoundHub tree against the S3 bucket. Only "
-            "meaningful right after an upload — SoundHub empties the landing "
-            "zone once it ingests a submission.",
+            "Diagnostic only: compare the currently pending batch with the S3 "
+            "landing zone. Successful uploads are verified automatically.",
         )
 
         self.open_btn = self._menu_action(
@@ -2947,7 +2945,7 @@ class FieldDataWizard(QMainWindow):
         self.exit_btn.setEnabled(enabled)
 
     def stage_for_soundhub(self):
-        """Transcode this deployment's bird audio to FLAC and build the CSVs."""
+        """Add or refresh this event in the cumulative local SoundHub batch."""
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Data", "No deployment data to prepare.")
             return
@@ -2962,12 +2960,28 @@ class FieldDataWizard(QMainWindow):
             return
 
         staging_root = self._soundhub_staging_root()
+        root = project_root(staging_root)
+
+        def row_count(name):
+            path = root / name
+            if not path.exists():
+                return 0
+            with open(path, newline="", encoding="utf-8-sig") as stream:
+                return sum(1 for _ in csv.DictReader(stream))
+
+        existing_deployments = row_count("deployment.csv")
+        existing_recordings = row_count("recording.csv")
         confirm = QMessageBox.question(
-            self, "Prepare Bird Audio for SoundHub",
-            f"Convert this deployment's bird (BD) WAVs to FLAC?\n\n"
+            self, "Add Bird Audio to SoundHub Staging",
+            "Add or refresh this deployment event in the cumulative SoundHub "
+            "staging batch?\n\n"
+            f"Currently staged: {existing_deployments} SoundHub deployment(s), "
+            f"{existing_recordings} recording(s)\n"
             f"Staging to: {staging_root}\n\n"
-            "Source WAVs are not modified. Bat (BT) audio is not included. "
-            "This can take several minutes per plot.",
+            "Bird (BD) WAVs will be converted to FLAC and the two cumulative "
+            "CSV manifests will be rebuilt. Existing staged deployments remain; "
+            "re-staging the same deployment IDs refreshes them. Source WAVs are "
+            "not modified, bat audio is excluded, and nothing is uploaded.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
         )
         if confirm != QMessageBox.Yes:
@@ -2990,7 +3004,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_stage_thread.start()
 
     def upload_to_soundhub(self):
-        """Push the staged SoundHub tree to the S3 bucket."""
+        """Submit the exact pending cumulative batch and record provenance."""
         if self._soundhub_busy():
             return
         if not boto3_available():
@@ -3002,20 +3016,46 @@ class FieldDataWizard(QMainWindow):
 
         staging_root = self._soundhub_staging_root()
         try:
-            settings = load_soundhub_config()
-            objects = staged_objects(staging_root, settings)
+            plan = plan_soundhub_submission(staging_root)
         except Exception as e:
-            QMessageBox.warning(self, "Nothing Staged", str(e))
+            QMessageBox.warning(self, "SoundHub Preflight Failed", str(e))
+            return
+        if plan.errors:
+            QMessageBox.warning(
+                self,
+                "SoundHub Preflight Failed",
+                "The upload is blocked:\n\n" + "\n".join(f"• {e}" for e in plan.errors),
+            )
+            return
+        provenance = plan.provenance
+        if not provenance.pending_keys:
+            QMessageBox.information(
+                self,
+                "Nothing New to Upload",
+                f"All {len(provenance.submitted_keys)} staged recording(s) are "
+                "already recorded as submitted on Box. Add more deployment "
+                "events to staging before starting another SoundHub batch.",
+            )
             return
 
-        total_gb = sum(o["size"] for o in objects) / 1e9
+        total_gb = plan.total_bytes / 1e9
+        settings = plan.settings
         confirm = QMessageBox.question(
             self, "Upload Bird Data to SoundHub",
-            f"Upload {len(objects)} object(s) ({total_gb:.2f} GB) to\n"
-            f"s3://{settings['bucket']}/{project_prefix(settings)}/ ?\n\n"
+            "Submit the pending SoundHub batch?\n\n"
+            f"Deployment events: {len(provenance.pending_event_ids)}\n"
+            f"SoundHub deployments: {len(provenance.pending_deployment_ids)}\n"
+            f"FLAC recordings: {len(provenance.pending_keys)}\n"
+            f"S3 objects (including two manifests): {len(plan.objects)}\n"
+            f"Data: {total_gb:.2f} GB\n"
+            f"Already submitted recordings left out: "
+            f"{len(provenance.submitted_keys)}\n"
+            f"Box metadata CSVs to update after verification: "
+            f"{provenance.pending_file_count}\n"
+            f"Destination: s3://{settings['bucket']}/{project_prefix(settings)}/\n\n"
             "The SoundHub account cannot delete objects, so anything sent must "
-            "be removed by hand on their side. Objects already in the bucket "
-            "are skipped.",
+            "be removed by hand on their side. The app will upload only the "
+            "pending batch, verify it immediately, and then update Box.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if confirm != QMessageBox.Yes:
@@ -3030,31 +3070,55 @@ class FieldDataWizard(QMainWindow):
         self.cancel_soundhub_btn.show()
         self._set_soundhub_actions_enabled(False)
 
-        self.soundhub_upload_thread = SoundHubUploadThread(staging_root)
+        self.soundhub_upload_thread = SoundHubUploadThread(plan)
         self.soundhub_upload_thread.progress.connect(self.on_soundhub_progress)
         self.soundhub_upload_thread.completed.connect(self.on_soundhub_upload_complete)
         self.soundhub_upload_thread.start()
 
     def verify_soundhub(self):
-        """Reconcile the staged SoundHub tree against the bucket."""
+        """Compare the pending batch with the current S3 landing-zone state."""
         if self._soundhub_busy():
             return
         try:
-            check = verify_project(self._soundhub_staging_root())
+            plan = plan_soundhub_submission(self._soundhub_staging_root())
         except Exception as e:
             QMessageBox.warning(self, "Verification Failed", str(e))
+            return
+        if plan.errors:
+            QMessageBox.warning(
+                self, "SoundHub Preflight Failed", "\n".join(plan.errors)
+            )
+            return
+        if not plan.provenance.pending_keys:
+            QMessageBox.information(
+                self,
+                "No Pending SoundHub Batch",
+                "All staged recordings are already recorded as submitted on Box. "
+                "SoundHub may already have drained them from the landing zone, "
+                "so a later bucket check would not be meaningful.",
+            )
+            return
+        try:
+            check = verify_project(
+                plan.staging_root,
+                settings=plan.settings,
+                deployment_ids=plan.provenance.pending_deployment_ids,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Landing-Zone Check Failed", str(e))
             return
 
         if check["ok"]:
             QMessageBox.information(
-                self, "SoundHub Verified",
-                f"All {check['checked']} staged object(s) are present in the bucket.",
+                self, "Pending Batch Found in Landing Zone",
+                f"All {check['checked']} pending object(s) are present. Do not "
+                "upload them again; confirm whether Box provenance recovery is needed.",
             )
             return
 
         QMessageBox.warning(
-            self, "SoundHub Verification",
-            f"{check['present']}/{check['checked']} staged object(s) found in the "
+            self, "SoundHub Landing-Zone Check",
+            f"{check['present']}/{check['checked']} pending object(s) found in the "
             f"bucket.\n\n{len(check['missing'])} missing, "
             f"{len(check['mismatched'])} size mismatch(es).\n\n"
             "If SoundHub has already ingested this submission the landing zone "
@@ -3110,7 +3174,6 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")
-            self._write_soundhub_provenance()
             QMessageBox.information(self, "SoundHub Upload Complete", message)
             return
 
@@ -3120,38 +3183,6 @@ class FieldDataWizard(QMainWindow):
         )
         if not cancelled:
             QMessageBox.warning(self, "SoundHub Upload Failed", message)
-
-    def _write_soundhub_provenance(self):
-        """Stamp the SoundHub submission columns on this deployment's BD rows.
-
-        This is the durable record that the submission happened. SoundHub drains
-        its S3 landing zone once it ingests a batch, so the bucket cannot be
-        asked after the fact — only these columns can answer it.
-        """
-        if not self.current_deployment_folder:
-            return
-        csv_path = self.current_deployment_folder / "audio_file_metadata.csv"
-        if not csv_path.exists():
-            return
-
-        observer = self.metadata.get("observer", "")
-        submitted_at = datetime.now(timezone.utc).isoformat()
-        try:
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
-            for row in rows:
-                if row.get("device_type") != SOUNDHUB_DEVICE_TYPE:
-                    continue
-                row["is_submitted_to_soundhub"] = True
-                row["soundhub_submitter"] = observer
-                row["soundhub_submission_datetime"] = submitted_at
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=AUDIO_FIELDS, extrasaction="ignore")
-                writer.writeheader()
-                writer.writerows(rows)
-            self.log(f"Recorded SoundHub submission provenance in {csv_path.name}")
-        except Exception as e:
-            self.log(f"Warning: could not record SoundHub provenance: {e}")
 
     def open_soundhub_folder(self):
         """Reveal the local tree that mirrors the SoundHub bucket."""

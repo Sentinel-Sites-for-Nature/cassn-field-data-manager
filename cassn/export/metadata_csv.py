@@ -26,7 +26,11 @@ from typing import Callable
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, LOCAL_DATA_DIR, VERSION
 from cassn.core.audio_metadata import normalize_gain
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
-from cassn.export.wildlife_insights import deployment_event_name, subproject_for
+from cassn.export.wildlife_insights import (
+    SUBPROJECT_DESIGN,
+    deployment_event_name,
+    subproject_for,
+)
 
 
 def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[list[dict], list[dict]]:
@@ -109,7 +113,11 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         aru_container = soundhub_config.get(f'ARU_container_{dev_type}', '')
         aru_microphone = soundhub_config.get('ARU_microphone', '')
         sh_feature_type = soundhub_config.get('feature_type', '')
-        sh_mounted_on = soundhub_config.get('mounted_on', '')
+        sh_mounted_on = (
+            aru_row.get('mounted_on', '')
+            or aru_row.get('survey_mounted_on', '')
+            or soundhub_config.get('mounted_on', '')
+        )
 
         base = {
             'filename':           entry.get('new_filename', ''),
@@ -121,7 +129,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'site_short_name':    site_short_name,
             'site_code':          site_code,
             'subproject':         subproject,
-            'subproject_design':  '',
+            'subproject_design':  SUBPROJECT_DESIGN,
             'placename':          placename,
             'event_name':         deployment_event_name(placement_start, placement_end),
             'event_description':  '',

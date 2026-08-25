@@ -344,16 +344,22 @@ Unlike the deployment dates, `start` and `end` **do** carry a UTC offset:
 
 Both steps are on the **Review & Finalize** tab and are operator-initiated.
 
-1. **Uploads → Prepare Bird Audio for SoundHub…** transcodes this deployment's BD
-   WAVs to FLAC (level 5, `--verify`, `--keep-foreign-metadata`) into the staging
-   tree, then rebuilds the project CSVs. Source WAVs are never touched. Progress is
+1. **Uploads → Add Bird Audio to SoundHub Staging…** transcodes the open
+   deployment event's BD WAVs to FLAC (level 5, `--verify`,
+   `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
+   local staging batch. Existing staged events remain, the two project CSVs are
+   rebuilt, and nothing is uploaded. Source WAVs are never touched. Progress is
    per-file and the job is cancellable; completed files are kept, so re-running
-   resumes. A copy of both CSVs is also written to the deployment's `soundhub/`
-   subfolder so the submission travels to Box alongside the raw data.
-2. **Uploads → Upload Bird Data to SoundHub** pushes the staged tree to S3 and
-   verifies it, then stamps the submission provenance columns on the BD rows.
+   resumes. A copy of both CSVs is also written to the event's `soundhub/`
+   subfolder so the metadata travels to Box alongside the raw data.
+2. **Uploads → Upload Bird Data to SoundHub** preflights the whole waiting
+   batch, shows its exact scope for confirmation, uploads only recordings not
+   already recorded as submitted on Box, verifies them immediately, then stamps
+   the exact Box rows and writes the batch receipt.
 
-**QC Checks → Verify SoundHub Upload** re-runs the reconciliation on demand.
+**QC Checks → Check SoundHub Landing Zone** is a diagnostic for the currently
+pending batch. Successful uploads are verified automatically; a later empty
+landing zone is expected after SoundHub ingests the batch.
 
 ### Preparing previously-downloaded deployments
 
@@ -371,14 +377,29 @@ python utils/prep_soundhub.py stage --root "/path/to/2026"
 # Review what is staged and where it will land
 python utils/prep_soundhub.py status
 
-# Push, then verify
+# Validate exact staged-to-Box provenance coverage without writing anything
+python utils/prep_soundhub.py upload --preflight-only
+
+# Push, verify, update Box provenance, and write the submission report
 python utils/prep_soundhub.py upload
 ```
 
 Staging is idempotent: an existing FLAC is left alone and a re-staged deployment
 replaces its own rows in the project CSVs rather than duplicating them. Uploads
 skip objects already present at the same size, so an interrupted transfer is
-finished by simply running the command again.
+finished by simply running the command again. Both GUI and backlog uploads map
+each staged FLAC to its exact Box `audio_file_metadata.csv` row before S3 is touched.
+After immediate S3 verification it stamps `is_submitted_to_soundhub`,
+`soundhub_submitter`, and `soundhub_submission_datetime` on those rows only and
+writes the same Markdown batch receipt into the `soundhub/` folder of every
+affected Box deployment event. Previously submitted deployments are excluded
+from later uploads even after SoundHub drains the landing zone.
+
+The submitter defaults to `Imperato, John`. The Box year folder is inferred from
+the staged deployment IDs and the standard Box Drive location—2027 deployments
+automatically resolve to `field_data/2027`; CLI overrides remain available for
+a different submitter or Box location. Mixed-year staging is rejected so each
+submission has one unambiguous Box source root.
 
 ### Configuration
 

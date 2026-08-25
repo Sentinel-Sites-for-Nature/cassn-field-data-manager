@@ -13,6 +13,8 @@ Layers, bottom up:
 * :mod:`cassn.soundhub.export` — ``deployment.csv`` and ``recording.csv``,
   projected from ``audio_file_metadata.csv``;
 * :mod:`cassn.soundhub.upload` — the boto3 push and its verification.
+* :mod:`cassn.soundhub.submission` — the shared safe preflight-to-receipt
+  workflow used by both the CLI and GUI.
 
 None of these import Qt. The GUI wrappers live in
 :mod:`cassn.gui.soundhub_thread`.
@@ -33,6 +35,11 @@ from cassn.soundhub.staging import (
     stage_deployment,
     validate_deployment_id,
 )
+from cassn.soundhub.submission import (
+    SoundHubSubmissionError,
+    execute_soundhub_submission,
+    plan_soundhub_submission,
+)
 from cassn.soundhub.upload import (
     SoundHubUploadError,
     boto3_available,
@@ -43,13 +50,16 @@ from cassn.soundhub.upload import (
 
 __all__ = [
     "SoundHubStagingError",
+    "SoundHubSubmissionError",
     "SoundHubUploadError",
     "boto3_available",
     "build_deployment_rows",
     "build_recording_rows",
+    "execute_soundhub_submission",
     "flac_available",
     "load_soundhub_config",
     "project_root",
+    "plan_soundhub_submission",
     "read_bd_audio_rows",
     "refresh_project_csvs",
     "stage_deployment",

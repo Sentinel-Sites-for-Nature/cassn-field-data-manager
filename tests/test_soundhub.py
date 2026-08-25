@@ -34,7 +34,7 @@ from cassn.soundhub.staging import (
     validate_deployment_id,
 )
 from cassn.box.verification import is_orphan_on_box
-from cassn.soundhub.upload import project_prefix, staged_objects
+from cassn.soundhub.upload import project_prefix, staged_objects, upload_project
 
 needs_flac = pytest.mark.skipif(not flac_available(), reason="requires the flac encoder")
 
@@ -533,6 +533,77 @@ def test_staged_keys_mirror_the_local_tree(deployment, tmp_path):
     ) in keys
     # The fragments directory is a sibling of the project root, never uploaded.
     assert not any("fragment" in k for k in keys)
+
+
+@needs_flac
+def test_staged_keys_can_select_one_submission_batch(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    stage_deployment(deployment, rows, staging)
+    write_deployment_fragments(staging, rows)
+    refresh_project_csvs(staging)
+    settings = {
+        "bucket": "casoundhub",
+        "upload_prefix": "upload",
+        "project_short_name": SOUNDHUB_PROJECT_SHORT_NAME,
+    }
+    selected = {rows[0]["deployment_id"]}
+
+    objects = staged_objects(staging, settings, deployment_ids=selected)
+
+    relatives = {item["relative"] for item in objects}
+    assert "deployment.csv" in relatives
+    assert "recording.csv" in relatives
+    assert all(
+        "/" not in relative or relative.split("/", 1)[0] in selected
+        for relative in relatives
+    )
+
+
+def test_interrupted_upload_resumes_media_and_refreshes_manifests(
+    tmp_path, monkeypatch
+):
+    """Existing media is skipped, while both cumulative CSVs are always re-put."""
+    staging = tmp_path / "staging"
+    root = project_root(staging)
+    deployment_id = "UC_Alpha_plot1_BD_20260610"
+    root.mkdir(parents=True)
+    (root / "deployment.csv").write_bytes(b"deployment manifest")
+    (root / "recording.csv").write_bytes(b"recording manifest")
+    first = root / deployment_id / "first.flac"
+    second = root / deployment_id / "second.flac"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    settings = {
+        "bucket": "casoundhub",
+        "upload_prefix": "upload",
+        "project_short_name": SOUNDHUB_PROJECT_SHORT_NAME,
+    }
+    uploaded: list[str] = []
+
+    class FakeClient:
+        def upload_file(self, path, bucket, key, ExtraArgs):
+            uploaded.append(key)
+
+    monkeypatch.setattr("cassn.soundhub.upload._client", lambda settings: FakeClient())
+    monkeypatch.setattr(
+        "cassn.soundhub.upload._existing_sizes",
+        lambda client, settings: {
+            f"upload/{SOUNDHUB_PROJECT_SHORT_NAME}/{deployment_id}/first.flac": 5
+        },
+    )
+
+    result = upload_project(
+        staging, settings=settings, deployment_ids={deployment_id}
+    )
+
+    assert result["skipped"] == 1
+    assert result["uploaded"] == 3
+    assert any(key.endswith("deployment.csv") for key in uploaded)
+    assert any(key.endswith("recording.csv") for key in uploaded)
+    assert any(key.endswith("second.flac") for key in uploaded)
+    assert not any(key.endswith("first.flac") for key in uploaded)
 
 
 # ---------------------------------------------------------------------------

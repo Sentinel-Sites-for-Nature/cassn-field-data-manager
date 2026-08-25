@@ -43,6 +43,11 @@ WI_COLUMNS = [
 
 WI_COORDINATE_QUANTUM = Decimal("0.00000001")
 
+# Literal description of the convention implemented by :func:`subproject_for`.
+# This is methodology text for downstream templates, not a per-row subproject
+# value.
+SUBPROJECT_DESIGN = "<Site>_<SamplingYear>"
+
 
 def format_wi_coordinate(value: object) -> str:
     """Return a coordinate with exactly eight digits after the decimal.
