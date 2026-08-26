@@ -22,7 +22,23 @@ from cassn.box.auth import BOX_AVAILABLE, load_box_config
 from cassn.config import LOCAL_DATA_DIR
 from cassn.core.image_metadata import EXIF_AVAILABLE
 from cassn.gui import FieldDataWizard
-from cassn.lookup_sync import LookupBootstrapError, bootstrap_lookup_tables
+from cassn.lookup_sync import (
+    LookupBootstrapError,
+    LookupBootstrapResult,
+    bootstrap_lookup_tables,
+)
+
+
+def _lookup_status_message(result: LookupBootstrapResult) -> str:
+    """Return one concise terminal summary for the startup lookup snapshot."""
+    if result.source == "box":
+        count = len(result.synced_files)
+        noun = "file" if count == 1 else "files"
+        return (
+            f"Lookup tables: downloaded {count} {noun} from Box "
+            "and validated successfully."
+        )
+    return "Lookup tables: using the last validated offline cache."
 
 
 def main() -> None:
@@ -52,6 +68,7 @@ def main() -> None:
             str(exc),
         )
         raise SystemExit(1) from exc
+    print(_lookup_status_message(bootstrap), flush=True)
     if bootstrap.warning:
         QMessageBox.warning(None, "Using Offline Lookup Cache", bootstrap.warning)
 
