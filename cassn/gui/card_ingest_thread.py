@@ -220,10 +220,17 @@ class CardIngestThread(QThread):
             }
         except Exception as exc:
             context.emit_checkpoint()
+            error = str(exc)
+            if not self.source_dir.exists():
+                error = (
+                    f"Source card disconnected or unmounted while copying from "
+                    f"{self.source_dir}. Reconnect it and retry; completed files "
+                    f"have been saved. Technical details: {exc}"
+                )
             result = {
                 "ok": False,
                 "cancelled": False,
-                "error": str(exc),
+                "error": error,
                 "expected_file_count": self.expected_file_count,
                 "source_dir": str(self.source_dir),
             }

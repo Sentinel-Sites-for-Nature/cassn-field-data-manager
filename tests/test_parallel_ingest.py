@@ -246,6 +246,38 @@ def test_failed_card_worker_does_not_report_success(tmp_path, monkeypatch):
     assert registry.reserve("uncommitted-hash", "image")
 
 
+def test_disconnected_source_reports_retryable_explanation(tmp_path, monkeypatch):
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _DummyReconyx)
+    source = tmp_path / "card"
+    source.mkdir()
+
+    def processor(*_args):
+        source.rmdir()
+        raise FileNotFoundError("source file vanished")
+
+    worker = CardIngestThread(
+        processor=processor,
+        source_dir=source,
+        deployment_folder=tmp_path / "event",
+        plot_num=1,
+        plot_label="Plot 1",
+        device_code="ML",
+        device_label="p1_ML",
+        metadata={},
+        lookups=object(),
+        inventory=[],
+        hash_registry=IngestHashRegistry(),
+    )
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+
+    worker.run()
+
+    assert results[0]["ok"] is False
+    assert "Source card disconnected or unmounted" in results[0]["error"]
+    assert "completed files have been saved" in results[0]["error"]
+
+
 def test_two_device_copy_engines_run_concurrently_without_state_collisions(
     tmp_path, monkeypatch
 ):

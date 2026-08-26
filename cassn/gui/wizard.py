@@ -1521,6 +1521,15 @@ class FieldDataWizard(QMainWindow):
             del self.card_ingest_panels[label]
             return
 
+    def _remove_card_panel(self, device_label: str) -> None:
+        """Remove a finished card's transient job panel and compact the grid."""
+        panel = self.card_ingest_panels.pop(device_label, None)
+        if panel is None:
+            return
+        panel["group"].setParent(None)
+        panel["group"].deleteLater()
+        self._reflow_card_panels()
+
     def _create_card_panel(self, device_label: str, source_dir: Path) -> None:
         existing = self.card_ingest_panels.pop(device_label, None)
         if existing:
@@ -1786,6 +1795,7 @@ class FieldDataWizard(QMainWindow):
                 )
             except Exception as exc:
                 self.log(f"Warning: could not refresh metadata after card ingests: {exc}")
+        self._remove_card_panel(device_label)
         self._update_copy_action()
 
     def _release_finished_card_thread(self, worker: CardIngestThread) -> None:

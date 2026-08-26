@@ -740,10 +740,8 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
             "p1_ML",
             "p2_ML",
         }
-        assert all(
-            panel["status"].text() == "Complete — safe to eject card"
-            for panel in window.card_ingest_panels.values()
-        )
+        assert not window.card_ingest_panels
+        assert not window.card_jobs_group.isVisible()
         assert window.copy_btn.isEnabled()
     finally:
         window.current_deployment_folder = None
