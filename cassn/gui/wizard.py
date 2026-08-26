@@ -124,6 +124,7 @@ from cassn.core.inventory import (
     build_deployment_filename,
     build_inventory_record,
     deduplicate_exact_storage_entries,
+    format_staged_event_tree,
     generate_session_summary,
     index_inventory_by_storage_relpath,
     inventory_by_source_relpath,
@@ -940,7 +941,7 @@ class FieldDataWizard(QMainWindow):
         layout = QVBoxLayout(tab)
 
         # Title
-        title = QLabel("Deployment Summary")
+        title = QLabel("Ingestion Summary")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
 
@@ -2232,11 +2233,11 @@ class FieldDataWizard(QMainWindow):
         """Update review summary"""
         summary = []
         summary.append("=" * 60)
-        summary.append("DEPLOYMENT SUMMARY")
+        summary.append("INGESTION SUMMARY")
         summary.append("=" * 60)
         summary.append("")
 
-        summary.append("DEPLOYMENT INFORMATION")
+        summary.append("DEPLOYMENT EVENT INFORMATION")
         summary.append("-" * 60)
         summary.append(f"Organization: {self.metadata['organization']}")
         summary.append(f"Site Name: {self.metadata['site_name']}")
@@ -2250,7 +2251,7 @@ class FieldDataWizard(QMainWindow):
         summary.append(f"Observer: {self.metadata['observer']}")
         summary.append("")
 
-        summary.append("DEVICES COLLECTED")
+        summary.append("SENSOR DEPLOYMENTS")
         summary.append("-" * 60)
         for plot_num, plot_label, dev_code, device_label in self.devices:
             device_files = [f for f in self.file_inventory if f["device_label"] == device_label]
@@ -2277,33 +2278,38 @@ class FieldDataWizard(QMainWindow):
             summary.append(f"  {ftype}: {count}")
         summary.append("")
 
-        summary.append("OUTPUT LOCATION")
+        summary.append("STAGED DEPLOYMENT EVENT")
         summary.append("-" * 60)
         summary.append(f"Local Staging: {self.current_deployment_folder}")
         summary.append("")
-        summary.append("Files generated:")
-        summary.append("  - deployment_event_record.json")
-        summary.append("  - file_metadata.csv")
-        summary.append(f"  - raw_data/ ({total_files} files in device subfolders)")
+        summary.extend(
+            format_staged_event_tree(
+                self.current_deployment_folder,
+                self.file_inventory,
+            ).splitlines()
+        )
         summary.append("")
 
-        summary.append("WILDLIFE INSIGHTS")
-        summary.append("-" * 60)
-        wi_lines = getattr(self, "_wi_status_lines", [])
-        if wi_lines:
-            for line in wi_lines:
-                summary.append(line)
-        else:
-            summary.append("  Skipped (wi_config.json not found in local_data/)")
-        summary.append("")
-
-        summary.append("")
         summary.append("=" * 60)
         summary.append("NEXT STEPS")
         summary.append("=" * 60)
-        summary.append("1. Review the files in the staging folder")
-        summary.append("2. Verify Box upload completed successfully")
-        summary.append("3. Keep a backup of the original SD cards until transfer is verified")
+        summary.append("1. Review the staged event tree and resolve any QC findings.")
+        summary.append(
+            "2. If bird audio was ingested, choose Uploads → Add Bird Audio to "
+            "SoundHub Staging. This adds it to the pending batch; it does not upload to S3."
+        )
+        summary.append(
+            "3. Choose Uploads → Upload to Box Now and let the automatic file-list "
+            "and hash verification finish."
+        )
+        summary.append(
+            "4. Keep the original SD cards until Box verification passes and all QC "
+            "issues are resolved."
+        )
+        summary.append(
+            "5. Submit the cumulative SoundHub batch later, when enough deployments "
+            "have been staged."
+        )
 
         self.summary_text.setText("\n".join(summary))
 

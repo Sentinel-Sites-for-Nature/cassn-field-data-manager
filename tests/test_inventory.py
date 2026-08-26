@@ -10,6 +10,7 @@ from cassn.core.inventory import (
     count_expected_files,
     deduplicate_exact_storage_entries,
     default_storage_relpath,
+    format_staged_event_tree,
     index_inventory_by_storage_relpath,
     inventory_by_source_relpath,
     inventory_storage_relpath,
@@ -20,6 +21,43 @@ from cassn.core.inventory import (
     sorted_walk,
     write_session,
 )
+
+
+def test_staged_event_tree_shows_generated_structure_without_listing_media(tmp_path):
+    event = tmp_path / "UC_TestSite_20260801"
+    raw = event / "raw_data"
+    bird = raw / "p1_BD"
+    camera = raw / "p2_ML"
+    bird.mkdir(parents=True)
+    camera.mkdir()
+    (bird / "recording.wav").write_bytes(b"audio")
+    (camera / "image.jpg").write_bytes(b"image")
+    wi = event / "WI_metadata"
+    wi.mkdir()
+    (wi / "wildlife_insights_ML_deployments.csv").write_text("header\n")
+    soundhub = event / "soundhub"
+    soundhub.mkdir()
+    (soundhub / "deployment.csv").write_text("header\n")
+    (event / "deployment_event_record.json").write_text("{}")
+
+    tree = format_staged_event_tree(
+        event,
+        [
+            {"device_label": "p1_BD"},
+            {"device_label": "p1_BD"},
+            {"device_label": "p2_ML"},
+        ],
+    )
+
+    assert tree.startswith("UC_TestSite_20260801/\n")
+    assert "WI_metadata/" in tree
+    assert "wildlife_insights_ML_deployments.csv" in tree
+    assert "soundhub/" in tree
+    assert "deployment.csv" in tree
+    assert "p1_BD/ (2 inventoried files)" in tree
+    assert "p2_ML/ (1 inventoried file)" in tree
+    assert "recording.wav" not in tree
+    assert "image.jpg" not in tree
 
 
 def test_prospective_filename_preserves_deployment_sequence_suffix():

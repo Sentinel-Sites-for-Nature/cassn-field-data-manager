@@ -16,6 +16,8 @@ a physical card:
   and SoundHub lookups, applying the exact source-precedence the original used.
 * :func:`refresh_legacy_device_manifest` — refreshes an existing, retired
   per-device sidecar for compatibility with historical deployments.
+* :func:`format_staged_event_tree` — a bounded, human-readable view of the
+  staged deployment-event directory without enumerating every media file.
 * :func:`generate_session_summary` — the human-readable deployment digest.
 * :func:`write_session` / :func:`find_all_sessions` — crash-safe session.json
   persistence and the staging-wide scan used to resume or reopen deployments.
@@ -512,6 +514,75 @@ def refresh_legacy_device_manifest(
 # ---------------------------------------------------------------------------
 # Deployment summary
 # ---------------------------------------------------------------------------
+
+def format_staged_event_tree(
+    deployment_folder: Path,
+    file_inventory: list[dict],
+    *,
+    max_children: int = 20,
+) -> str:
+    """Return a compact two-level tree of one staged deployment event.
+
+    Media directories can contain tens of thousands of files, so ``raw_data``
+    device folders use inventory counts and are never enumerated recursively.
+    Other top-level directories show their immediate generated artifacts only.
+    Hidden implementation files are omitted from the operator-facing summary.
+    """
+    root = Path(deployment_folder)
+    root_label = root.name or str(root)
+    if not root.is_dir():
+        return f"{root_label}/ (not found)"
+
+    device_counts: dict[str, int] = {}
+    for entry in file_inventory:
+        label = str(entry.get("device_label", "") or "").strip()
+        if label:
+            device_counts[label] = device_counts.get(label, 0) + 1
+
+    def visible_children(folder: Path) -> list[Path]:
+        try:
+            children = [path for path in folder.iterdir() if not path.name.startswith(".")]
+        except OSError:
+            return []
+        return sorted(children, key=lambda path: (not path.is_dir(), path.name.casefold()))
+
+    top_level = visible_children(root)
+    lines = [f"{root_label}/"]
+    for top_index, path in enumerate(top_level):
+        top_last = top_index == len(top_level) - 1
+        top_connector = "└── " if top_last else "├── "
+        if not path.is_dir():
+            lines.append(f"{top_connector}{path.name}")
+            continue
+
+        children = visible_children(path)
+        suffix = " (empty)" if not children else ""
+        lines.append(f"{top_connector}{path.name}/{suffix}")
+        child_prefix = "    " if top_last else "│   "
+
+        if path.name == "raw_data":
+            # A device directory is the useful unit here; listing its media
+            # would make the review summary unusable for large camera cards.
+            child_items = [child for child in children if child.is_dir()]
+        else:
+            child_items = children
+
+        displayed = child_items[:max_children]
+        omitted = len(child_items) - len(displayed)
+        for child_index, child in enumerate(displayed):
+            child_last = child_index == len(displayed) - 1 and omitted == 0
+            child_connector = "└── " if child_last else "├── "
+            child_suffix = "/" if child.is_dir() else ""
+            if path.name == "raw_data" and child.is_dir():
+                count = device_counts.get(child.name, 0)
+                noun = "file" if count == 1 else "files"
+                child_suffix += f" ({count:,} inventoried {noun})"
+            lines.append(f"{child_prefix}{child_connector}{child.name}{child_suffix}")
+        if omitted:
+            lines.append(f"{child_prefix}└── … {omitted} more entries")
+
+    return "\n".join(lines)
+
 
 def generate_session_summary(
     deployment_folder: Path,
