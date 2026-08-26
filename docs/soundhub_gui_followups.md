@@ -2,8 +2,9 @@
 
 The shared cumulative staging and verified-submission workflow was implemented,
 tested, committed as `449f628`, and pushed to the feature branch on 2026-08-25.
-It is exercised with mocked S3 and temporary Box fixtures; no additional live
-SoundHub upload is required before the next real batch.
+It is exercised with mocked S3 and temporary Box fixtures. The Strathearn GUI
+run below provides real staging evidence without requiring a redundant live
+SoundHub upload.
 
 The backlog CLI already has the reference behavior in
 `cassn/soundhub/provenance.py` and `utils/prep_soundhub.py`: exact filename-level
@@ -67,11 +68,37 @@ provenance stamping, and event-local submission reports.
 - CLI output describes the same scope consistently without requiring knowledge
   of the internal provenance implementation.
 
+## Strathearn real-stage evidence — 2026-08-25
+
+- GUI staging completed for two deployment IDs: 13 plot-1 recordings and 11
+  plot-2 recordings.
+- All 24 FLAC files exist and expose readable headers whose measured durations
+  match the `recording.csv` intervals.
+- Project manifests contain two unique deployment rows and 24 unique recording
+  rows; upload preflight selects 26 S3 objects totaling 23.01 GB and performs
+  no writes.
+- Two 488-byte plot-2 WAV failures were correctly excluded. The missing
+  filename sequence numbers are therefore expected and auditable in
+  `audio_file_metadata.csv`.
+- The run exposed blank `subproject_design` and `mounted_on` because staging
+  projected an older `audio_file_metadata.csv` without refreshing fields whose
+  authority is the current lookup/config. Staging now enriches those fields at
+  the boundary and validates them before reporting success.
+- The run exposed a cumulative `deployment.csv` that differed from its
+  per-deployment fragments in date/time text formatting. Stage completion and
+  upload preflight now both require exact cumulative/fragment parity and ISO
+  deployment date/time formats.
+- The existing Box event-level `soundhub/recording.csv` is stale at 26 rows and
+  still contains the two header-only failures with blank end timestamps. GUI
+  staging refreshed the local copy but did not synchronize it to Box.
+
+The stage-time Box backup gap and the recommended deployment-centric storage
+model are specified in `docs/deployment_centric_box_architecture.md`.
+
 ## Next real batch
 
-After SoundHub accepts the previous submission, run `python
-utils/prep_soundhub.py clear-completed` and review its read-only result before
-using `--apply`. Then use the GUI repeatedly to add deployment events to the new
-batch. When the desired batch is ready, review the GUI preflight carefully
-before approving the one live transfer. That normal batch is the appropriate
-end-to-end confirmation; do not perform a redundant test upload.
+Keep the verified Strathearn batch staged and add future deployments as they
+become ready. Before the eventual live transfer, confirm a current
+per-deployment Box backup and review GUI preflight carefully. That normal batch
+is the appropriate end-to-end confirmation; do not perform a redundant test
+upload.

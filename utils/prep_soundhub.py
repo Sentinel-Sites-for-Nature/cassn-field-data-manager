@@ -40,11 +40,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cassn.soundhub.export import (  # noqa: E402
+    enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
+    validate_staging_manifests,
     write_deployment_copy,
     write_deployment_fragments,
 )
+from cassn.config import LOCAL_DATA_DIR  # noqa: E402
+from cassn.lookups import LookupTables  # noqa: E402
 from cassn.soundhub.lifecycle import (  # noqa: E402
     SoundHubLifecycleError,
     clear_completed_batch,
@@ -87,6 +91,7 @@ def cmd_stage(args) -> int:
         return 1
 
     settings = load_soundhub_config()
+    lookups = LookupTables.load(LOCAL_DATA_DIR)
     staging_root = Path(args.staging or settings["staging_root"])
     root = project_root(staging_root)
     if root.exists() or fragments_root(staging_root).exists():
@@ -124,7 +129,7 @@ def cmd_stage(args) -> int:
     failures = 0
     for folder in deployments:
         try:
-            audio_rows = read_bd_audio_rows(folder)
+            audio_rows = enrich_audio_rows(read_bd_audio_rows(folder), lookups)
         except FileNotFoundError as e:
             print(f"[{folder.name}] SKIP — {e}")
             failures += 1
@@ -152,6 +157,11 @@ def cmd_stage(args) -> int:
         )
 
     csvs = refresh_project_csvs(staging_root)
+    try:
+        validate_staging_manifests(staging_root)
+    except SoundHubStagingError as e:
+        print(f"STAGING INVALID — {e}")
+        return 1
     print(
         f"Cumulative project manifests rebuilt: "
         f"{csvs['deployment_count']} SoundHub deployment(s), "
@@ -159,6 +169,7 @@ def cmd_stage(args) -> int:
     )
     print(f"  {csvs['deployment_csv']}")
     print(f"  {csvs['recording_csv']}")
+    print("STAGING VALIDATED — manifests and FLACs are upload-ready.")
     return 1 if failures else 0
 
 

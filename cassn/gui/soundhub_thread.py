@@ -8,8 +8,10 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from cassn.soundhub.export import (
+    enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
+    validate_staging_manifests,
     write_deployment_copy,
     write_deployment_fragments,
 )
@@ -33,10 +35,11 @@ class SoundHubStageThread(QThread):
     progress = Signal(int, int, str)
     completed = Signal(bool, bool, str, dict)  # success, cancelled, message, result
 
-    def __init__(self, deployment_folder, staging_root):
+    def __init__(self, deployment_folder, staging_root, lookups):
         super().__init__()
         self.deployment_folder = Path(deployment_folder)
         self.staging_root = Path(staging_root)
+        self.lookups = lookups
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -44,7 +47,9 @@ class SoundHubStageThread(QThread):
 
     def run(self):
         try:
-            audio_rows = read_bd_audio_rows(self.deployment_folder)
+            audio_rows = enrich_audio_rows(
+                read_bd_audio_rows(self.deployment_folder), self.lookups
+            )
             if not audio_rows:
                 self.completed.emit(
                     False, False,
@@ -75,11 +80,14 @@ class SoundHubStageThread(QThread):
             write_deployment_fragments(self.staging_root, audio_rows)
             write_deployment_copy(self.deployment_folder, audio_rows)
             csvs = refresh_project_csvs(self.staging_root)
+            validation = validate_staging_manifests(self.staging_root)
             result["csvs"] = csvs
+            result["validation"] = validation
 
             self.completed.emit(
                 True, False,
-                f"Staged {', '.join(result['deployment_ids'])}: "
+                f"Staged and validated as upload-ready "
+                f"{', '.join(result['deployment_ids'])}: "
                 f"{result['converted']} converted, "
                 f"{result['skipped']} already present. Project manifests now list "
                 f"{csvs['deployment_count']} deployment(s) and "

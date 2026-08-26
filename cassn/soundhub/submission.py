@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cassn.soundhub.export import validate_staging_manifests
+
 from cassn.soundhub.provenance import (
     DEFAULT_SUBMITTER,
     ProvenancePlan,
@@ -19,6 +21,7 @@ from cassn.soundhub.upload import (
     upload_project,
     verify_project,
 )
+from cassn.soundhub.staging import SoundHubStagingError
 
 
 class SoundHubSubmissionError(Exception):
@@ -62,12 +65,17 @@ def plan_soundhub_submission(
     """Validate and describe the next pending batch without writing anywhere."""
     settings = dict(settings or load_soundhub_config())
     staging_root = Path(staging_root or settings["staging_root"]).expanduser().resolve()
+    validation_errors: list[str] = []
+    try:
+        validate_staging_manifests(staging_root)
+    except SoundHubStagingError as exc:
+        validation_errors.append(str(exc))
     provenance = plan_submission_provenance(staging_root, box_year_root)
     plan = SoundHubSubmissionPlan(
         staging_root=staging_root,
         settings=settings,
         provenance=provenance,
-        errors=list(provenance.errors),
+        errors=validation_errors + list(provenance.errors),
     )
     if provenance.submitted_keys and provenance.pending_keys:
         plan.errors.append(

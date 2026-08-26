@@ -1,12 +1,11 @@
-"""
-``deployment.csv`` and ``recording.csv`` generation.
+"""``deployment.csv`` and ``recording.csv`` generation and validation.
 
-Both are projections of ``audio_file_metadata.csv``. Every SoundHub deployment
-column except ``project_short_name`` is already an ``AUDIO_FIELDS`` column under
-the same name, and ``recorded_datetime`` already holds the per-file timestamp
-the app reads out of each WAV's GUANO chunk. So there is nothing to re-derive
-here: no second pass over the audio, no separate GUANO parse, no filename
-parsing.
+Recording facts are projected from ``audio_file_metadata.csv``. Before writing
+SoundHub deployment rows, the staging boundary refreshes the small set of
+fields whose authoritative sources are the current curated deployment lookup,
+the SoundHub protocol config, or the shared subproject convention. This makes
+older, already-ingested metadata safe to stage without treating its historical
+blank defaults as authoritative.
 
 Both CSVs live at the *project* root in S3, not per deployment, so they are
 cumulative across every deployment ever submitted. Each staging run writes its
@@ -30,6 +29,7 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
     SOUNDHUB_RECORDING_FIELDS,
 )
+from cassn.export.wildlife_insights import SUBPROJECT_DESIGN, subproject_for
 from cassn.soundhub.staging import SoundHubStagingError, fragments_root, project_root
 
 DEPLOYMENT_CSV = "deployment.csv"
@@ -41,6 +41,34 @@ RECORDING_CSV = "recording.csv"
 # 500 bytes in practice. The shortest real recording is orders of magnitude
 # larger, so anything below this holds no audio.
 _MIN_AUDIO_WAV_BYTES = 4096
+
+# Fields CA-SSN can populate deterministically and requires before presenting a
+# batch as ready to upload. SoundHub has additional optional columns; blanks in
+# those are intentional and are not silently invented here.
+REQUIRED_DEPLOYMENT_FIELDS = (
+    "project_short_name",
+    "deployment_id",
+    "subproject",
+    "subproject_design",
+    "placename",
+    "longitude",
+    "latitude",
+    "date_installed",
+    "deployment_start_date",
+    "deployment_start_time",
+    "deployment_end_date",
+    "deployment_end_time",
+    "frequency",
+    "duration",
+    "gain",
+    "ARU_make",
+    "ARU_model",
+    "ARU_container",
+    "ARU_microphone",
+    "mounted_on",
+    "sensor_height_meters",
+    "recorded_by",
+)
 
 
 def _holds_audio(row: dict) -> bool:
@@ -77,6 +105,76 @@ def read_bd_audio_rows(deployment_folder) -> list[dict]:
         and r.get("file_type") == "audio"
         and _holds_audio(r)
     ]
+
+
+def enrich_audio_rows(audio_rows: list[dict], lookups) -> list[dict]:
+    """Fill legacy SoundHub blanks without changing source metadata.
+
+    ``audio_file_metadata.csv`` remains the source for measured recording and
+    CONFIG.TXT facts and any values already recorded there are preserved. For
+    older metadata only, the current deployment lookup fills missing mounting
+    and height, ``soundhub_config.json`` fills missing protocol constants, and
+    the shared WI/SoundHub convention fills missing subproject fields.
+    """
+    enriched: list[dict] = []
+    errors: list[str] = []
+    config = lookups.soundhub_config
+
+    for source in audio_rows:
+        row = dict(source)
+        deployment_id = str(row.get("deployment_id") or "").strip()
+        placement = lookups.deployment_for_id(deployment_id)
+        if not placement:
+            errors.append(f"{deployment_id or '<blank>'}: no curated deployment row")
+            continue
+        if placement.get("device_type") != SOUNDHUB_DEVICE_TYPE:
+            errors.append(
+                f"{deployment_id}: curated device type is "
+                f"{placement.get('device_type')!r}, expected {SOUNDHUB_DEVICE_TYPE!r}"
+            )
+            continue
+
+        site = str(row.get("site_short_name") or placement.get("site_short_name") or "")
+        end_date = str(
+            row.get("deployment_end_date")
+            or placement.get("deployment_end_date")
+            or ""
+        )
+        expected_subproject = subproject_for(site, end_date)
+        existing_subproject = str(row.get("subproject") or "").strip()
+        if existing_subproject and existing_subproject != expected_subproject:
+            errors.append(
+                f"{deployment_id}: audio_file_metadata.csv subproject "
+                f"{existing_subproject!r} does not match expected "
+                f"{expected_subproject!r}"
+            )
+            continue
+        row["subproject"] = existing_subproject or expected_subproject
+        row["subproject_design"] = row.get("subproject_design") or SUBPROJECT_DESIGN
+        row["mounted_on"] = row.get("mounted_on") or placement.get("mounted_on", "")
+        row["sensor_height_meters"] = (
+            row.get("sensor_height_meters")
+            or placement.get("sensor_height_meters", "")
+        )
+        row["ARU_container"] = (
+            row.get("ARU_container") or config.get("ARU_container_BD", "")
+        )
+        row["ARU_microphone"] = (
+            row.get("ARU_microphone") or config.get("ARU_microphone", "")
+        )
+        row["feature_type"] = row.get("feature_type") or config.get("feature_type", "")
+        # Preserve CONFIG/GUANO-derived make and firmware model when present;
+        # the protocol values are fallbacks for older metadata only.
+        row["ARU_make"] = row.get("ARU_make") or config.get("ARU_make", "")
+        row["ARU_model"] = row.get("ARU_model") or config.get("ARU_model", "")
+        enriched.append(row)
+
+    if errors:
+        raise SoundHubStagingError(
+            "SoundHub metadata could not be resolved from the curated lookups:\n- "
+            + "\n- ".join(sorted(set(errors)))
+        )
+    return enriched
 
 
 def group_by_deployment(rows: list[dict]) -> dict[str, list[dict]]:
@@ -256,4 +354,190 @@ def refresh_project_csvs(staging_root) -> dict:
         "recording_csv": root / RECORDING_CSV,
         "deployment_count": len(deployment_rows),
         "recording_count": len(recording_rows),
+    }
+
+
+def _require_header(path: Path, expected: list[str]) -> list[dict]:
+    if not path.is_file():
+        raise SoundHubStagingError(f"Missing SoundHub manifest: {path}")
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if list(reader.fieldnames or []) != expected:
+            raise SoundHubStagingError(
+                f"{path}: header does not match the SoundHub schema"
+            )
+        rows = list(reader)
+    if any(None in row for row in rows):
+        raise SoundHubStagingError(f"{path}: row has more values than the header")
+    return rows
+
+
+def _parse_iso_date(value: str, *, path: Path, row_number: int, field: str) -> None:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise SoundHubStagingError(
+            f"{path} row {row_number}: {field} must use YYYY-MM-DD"
+        ) from exc
+
+
+def _parse_time(value: str, *, path: Path, row_number: int, field: str) -> None:
+    for form in ("%H:%M", "%H:%M:%S"):
+        try:
+            datetime.strptime(value, form)
+            return
+        except ValueError:
+            pass
+    raise SoundHubStagingError(
+        f"{path} row {row_number}: {field} must use 24-hour HH:MM or HH:MM:SS"
+    )
+
+
+def validate_staging_manifests(staging_root) -> dict:
+    """Prove cumulative manifests are complete and exactly match fragments."""
+    staging_root = Path(staging_root).expanduser().resolve()
+    fragments = fragments_root(staging_root)
+    fragment_dirs = sorted(path for path in fragments.glob("*") if path.is_dir())
+    if not fragment_dirs:
+        raise SoundHubStagingError(f"No SoundHub deployment fragments found in {fragments}")
+
+    expected_deployments: list[dict] = []
+    expected_recordings: list[dict] = []
+    for fragment_dir in fragment_dirs:
+        deployments = _require_header(
+            fragment_dir / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS
+        )
+        recordings = _require_header(
+            fragment_dir / RECORDING_CSV, SOUNDHUB_RECORDING_FIELDS
+        )
+        if len(deployments) != 1:
+            raise SoundHubStagingError(
+                f"{fragment_dir}: expected exactly one deployment row, found "
+                f"{len(deployments)}"
+            )
+        if deployments[0].get("deployment_id") != fragment_dir.name:
+            raise SoundHubStagingError(
+                f"{fragment_dir}: deployment row ID does not match fragment folder"
+            )
+        if not recordings:
+            raise SoundHubStagingError(f"{fragment_dir}: no recording rows")
+        expected_deployments.extend(deployments)
+        expected_recordings.extend(recordings)
+
+    expected_deployments.sort(key=lambda row: row.get("deployment_id", ""))
+    expected_recordings.sort(
+        key=lambda row: (row.get("deployment_id", ""), row.get("filename", ""))
+    )
+    root = project_root(staging_root)
+    deployments = _require_header(root / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS)
+    recordings = _require_header(root / RECORDING_CSV, SOUNDHUB_RECORDING_FIELDS)
+    if deployments != expected_deployments:
+        raise SoundHubStagingError(
+            f"{root / DEPLOYMENT_CSV}: cumulative rows differ from deployment fragments; "
+            "restage or rebuild the batch"
+        )
+    if recordings != expected_recordings:
+        raise SoundHubStagingError(
+            f"{root / RECORDING_CSV}: cumulative rows differ from deployment fragments; "
+            "restage or rebuild the batch"
+        )
+
+    deployment_ids: set[str] = set()
+    for number, row in enumerate(deployments, start=2):
+        deployment_id = str(row.get("deployment_id") or "").strip()
+        if deployment_id in deployment_ids:
+            raise SoundHubStagingError(
+                f"{root / DEPLOYMENT_CSV}: duplicate deployment_id {deployment_id!r}"
+            )
+        deployment_ids.add(deployment_id)
+        missing = [
+            field for field in REQUIRED_DEPLOYMENT_FIELDS
+            if not str(row.get(field) or "").strip()
+        ]
+        if missing:
+            raise SoundHubStagingError(
+                f"{root / DEPLOYMENT_CSV} row {number} ({deployment_id}): "
+                "required values are blank: " + ", ".join(missing)
+            )
+        if row["project_short_name"] != SOUNDHUB_PROJECT_SHORT_NAME:
+            raise SoundHubStagingError(
+                f"{root / DEPLOYMENT_CSV} row {number}: unexpected project_short_name"
+            )
+        if row["subproject_design"] != SUBPROJECT_DESIGN:
+            raise SoundHubStagingError(
+                f"{root / DEPLOYMENT_CSV} row {number}: subproject_design must be "
+                f"{SUBPROJECT_DESIGN!r}"
+            )
+        for field in ("date_installed", "deployment_start_date", "deployment_end_date"):
+            _parse_iso_date(row[field], path=root / DEPLOYMENT_CSV,
+                            row_number=number, field=field)
+        for field in ("deployment_start_time", "deployment_end_time"):
+            _parse_time(row[field], path=root / DEPLOYMENT_CSV,
+                        row_number=number, field=field)
+
+    recording_keys: set[tuple[str, str]] = set()
+    for number, row in enumerate(recordings, start=2):
+        key = (
+            str(row.get("deployment_id") or "").strip(),
+            str(row.get("filename") or "").strip(),
+        )
+        if not all(key) or key in recording_keys:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: blank or duplicate recording key"
+            )
+        recording_keys.add(key)
+        if key[0] not in deployment_ids:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: deployment_id is absent from "
+                "deployment.csv"
+            )
+        if not key[1].lower().endswith(".flac"):
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: filename must end in .flac"
+            )
+        try:
+            start = datetime.fromisoformat(str(row.get("start") or ""))
+            end = datetime.fromisoformat(str(row.get("end") or ""))
+        except ValueError as exc:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: invalid start or end timestamp"
+            ) from exc
+        if end <= start:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: end must be after start"
+            )
+        if start.utcoffset() is None or end.utcoffset() is None:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: start and end must include "
+                "a UTC offset"
+            )
+        media = root / key[0] / key[1]
+        if not media.is_file():
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: staged FLAC is missing: {media}"
+            )
+
+    actual_media = {
+        (path.parent.name, path.name)
+        for path in root.glob("*/*.flac")
+        if path.is_file()
+    }
+    if actual_media != recording_keys:
+        extra = sorted(actual_media - recording_keys)
+        missing = sorted(recording_keys - actual_media)
+        details: list[str] = []
+        if extra:
+            details.append(f"{len(extra)} unlisted FLAC(s)")
+        if missing:
+            details.append(f"{len(missing)} missing FLAC(s)")
+        raise SoundHubStagingError(
+            f"{root}: staged media does not exactly match recording.csv ("
+            + ", ".join(details)
+            + ")"
+        )
+
+    return {
+        "deployment_count": len(deployments),
+        "recording_count": len(recordings),
+        "fragment_count": len(fragment_dirs),
     }

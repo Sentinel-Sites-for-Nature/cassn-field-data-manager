@@ -70,7 +70,11 @@ from cassn.box.threads import (
     ProvenanceUploadThread,
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
-from cassn.soundhub.export import read_bd_audio_rows, write_deployment_copy
+from cassn.soundhub.export import (
+    enrich_audio_rows,
+    read_bd_audio_rows,
+    write_deployment_copy,
+)
 from cassn.soundhub.lifecycle import plan_completed_batch_cleanup
 from cassn.soundhub.staging import flac_available, fragments_root, project_root
 from cassn.soundhub.submission import plan_soundhub_submission
@@ -2195,11 +2199,14 @@ class FieldDataWizard(QMainWindow):
             self.current_deployment_folder, log=self.log
         )
 
-        # SoundHub's two CSVs are projections of the audio metadata, so they can
-        # be written now — before any upload — and travel to Box with the rest of
-        # the deployment. FLAC staging later rewrites the identical files.
+        # Write a pre-staging SoundHub copy that can travel to Box with the
+        # deployment. Refresh lookup/config-owned values first, so historical
+        # metadata blanks cannot leak into this copy. FLAC staging later writes
+        # it again after excluding any header-only failures.
         try:
-            audio_rows = read_bd_audio_rows(self.current_deployment_folder)
+            audio_rows = enrich_audio_rows(
+                read_bd_audio_rows(self.current_deployment_folder), self.lookups
+            )
             if audio_rows:
                 out = write_deployment_copy(self.current_deployment_folder, audio_rows)
                 self.log(f"Generated SoundHub deployment.csv and recording.csv in {out.name}/")
@@ -3083,7 +3090,7 @@ class FieldDataWizard(QMainWindow):
         self._set_soundhub_actions_enabled(False)
 
         self.soundhub_stage_thread = SoundHubStageThread(
-            self.current_deployment_folder, staging_root
+            self.current_deployment_folder, staging_root, self.lookups
         )
         self.soundhub_stage_thread.progress.connect(self.on_soundhub_progress)
         self.soundhub_stage_thread.completed.connect(self.on_soundhub_stage_complete)

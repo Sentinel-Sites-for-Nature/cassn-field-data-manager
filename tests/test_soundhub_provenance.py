@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from cassn.config import SOUNDHUB_RECORDING_FIELDS
+from cassn.config import SOUNDHUB_DEPLOYMENT_FIELDS, SOUNDHUB_RECORDING_FIELDS
+from cassn.soundhub.export import write_deployment_fragments
 from cassn.soundhub.provenance import (
     SoundHubProvenanceError,
     apply_submission_provenance,
@@ -63,6 +64,35 @@ def _recording(deployment_id: str) -> dict:
     }
 
 
+def _deployment(deployment_id: str) -> dict:
+    row = {field: "" for field in SOUNDHUB_DEPLOYMENT_FIELDS}
+    row.update(
+        project_short_name="UCNature-SSN",
+        deployment_id=deployment_id,
+        subproject="Alpha_2026",
+        subproject_design="<Site>_<SamplingYear>",
+        placename="Alpha_plot1",
+        longitude="-121.12345678",
+        latitude="36.12345678",
+        date_installed="2026-03-31",
+        deployment_start_date="2026-04-01",
+        deployment_start_time="00:00",
+        deployment_end_date="2026-04-01",
+        deployment_end_time="23:59",
+        frequency="daily",
+        duration="12:59",
+        gain="High",
+        ARU_make="Open Acoustic Devices",
+        ARU_model="AudioMoth-Firmware-Basic 1.11.1",
+        ARU_container="polybag",
+        ARU_microphone="internal",
+        mounted_on="metal_pole",
+        sensor_height_meters="2.5",
+        recorded_by="Imperato, John",
+    )
+    return row
+
+
 def _metadata(deployment_id: str, event_id: str, *, filename: str | None = None) -> dict:
     return {
         "filename": filename or f"{deployment_id}_00001.wav",
@@ -85,10 +115,19 @@ def _fixture(tmp_path: Path):
         SOUNDHUB_RECORDING_FIELDS,
         rows,
     )
+    for row in rows:
+        deployment = _deployment(row["deployment_id"])
+        audio = {
+            **deployment,
+            "filename": Path(row["filename"]).with_suffix(".wav").name,
+            "recorded_datetime": row["start"].replace(" ", "T"),
+            "recording_duration_sec": "3600",
+        }
+        write_deployment_fragments(staging, [audio])
     _write_csv(
         project_root(staging) / "deployment.csv",
-        ["deployment_id"],
-        [{"deployment_id": DEPLOYMENT_1}, {"deployment_id": DEPLOYMENT_2}],
+        SOUNDHUB_DEPLOYMENT_FIELDS,
+        [_deployment(DEPLOYMENT_1), _deployment(DEPLOYMENT_2)],
     )
     for row in rows:
         media = project_root(staging) / row["deployment_id"] / row["filename"]

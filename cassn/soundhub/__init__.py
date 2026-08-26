@@ -24,8 +24,10 @@ None of these import Qt. The GUI wrappers live in
 from cassn.soundhub.export import (
     build_deployment_rows,
     build_recording_rows,
+    enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
+    validate_staging_manifests,
     write_deployment_copy,
     write_deployment_fragments,
 )
@@ -56,6 +58,7 @@ __all__ = [
     "boto3_available",
     "build_deployment_rows",
     "build_recording_rows",
+    "enrich_audio_rows",
     "execute_soundhub_submission",
     "flac_available",
     "load_soundhub_config",
@@ -63,6 +66,7 @@ __all__ = [
     "plan_soundhub_submission",
     "read_bd_audio_rows",
     "refresh_project_csvs",
+    "validate_staging_manifests",
     "stage_deployment",
     "upload_project",
     "validate_deployment_id",

@@ -19,8 +19,10 @@ from cassn.config import (
 from cassn.soundhub.export import (
     build_deployment_rows,
     build_recording_rows,
+    enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
+    validate_staging_manifests,
     write_deployment_copy,
     write_deployment_fragments,
 )
@@ -93,6 +95,8 @@ def audio_row(deployment_id: str, seq: str, **overrides) -> dict:
         "sensor_height_meters": "2.5",
         "recorded_by": "Imperato, John",
         "subproject": "StrathearnRanch_2026",
+        "subproject_design": "<Site>_<SamplingYear>",
+        "mounted_on": "metal_pole",
     }
     row.update(overrides)
     return row
@@ -166,6 +170,85 @@ def test_read_bd_audio_rows_excludes_header_only_recordings(deployment):
 def test_read_bd_audio_rows_requires_metadata(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_bd_audio_rows(tmp_path)
+
+
+class _SoundHubLookups:
+    soundhub_config = {
+        "ARU_make": "Open Acoustic Devices",
+        "ARU_model": "AudioMoth",
+        "ARU_container_BD": "polybag",
+        "ARU_microphone": "internal",
+        "feature_type": "",
+    }
+
+    def deployment_for_id(self, deployment_id):
+        if deployment_id.startswith("UC_StrathearnRanch_plot"):
+            return {
+                "deployment_id": deployment_id,
+                "site_short_name": "StrathearnRanch",
+                "device_type": "BD",
+                "deployment_end_date": "2026-07-14",
+                "mounted_on": "metal_pole",
+                "sensor_height_meters": "2.5",
+            }
+        return {}
+
+
+def test_stage_enrichment_repairs_legacy_authoritative_blanks():
+    source = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714",
+        "00001",
+        subproject="",
+        subproject_design="",
+        mounted_on="",
+        sensor_height_meters="",
+        ARU_container="",
+        ARU_microphone="",
+    )
+
+    row = enrich_audio_rows([source], _SoundHubLookups())[0]
+
+    assert row["subproject"] == "StrathearnRanch_2026"
+    assert row["subproject_design"] == "<Site>_<SamplingYear>"
+    assert row["mounted_on"] == "metal_pole"
+    assert row["sensor_height_meters"] == "2.5"
+    assert row["ARU_container"] == "polybag"
+    assert row["ARU_microphone"] == "internal"
+    assert source["mounted_on"] == "", "enrichment must not mutate source rows"
+
+
+def test_stage_enrichment_requires_exact_curated_deployment():
+    row = audio_row("UC_Missing_plot1_BD_20260714", "00001")
+    with pytest.raises(SoundHubStagingError, match="no curated deployment row"):
+        enrich_audio_rows([row], _SoundHubLookups())
+
+
+def test_stage_enrichment_preserves_populated_metadata_values():
+    source = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714",
+        "00001",
+        mounted_on="existing_mount",
+        sensor_height_meters="3.0",
+        ARU_container="existing_container",
+        ARU_microphone="existing_microphone",
+    )
+
+    row = enrich_audio_rows([source], _SoundHubLookups())[0]
+
+    assert row["mounted_on"] == "existing_mount"
+    assert row["sensor_height_meters"] == "3.0"
+    assert row["ARU_container"] == "existing_container"
+    assert row["ARU_microphone"] == "existing_microphone"
+
+
+def test_stage_enrichment_rejects_nonblank_wrong_subproject():
+    row = audio_row(
+        "UC_StrathearnRanch_plot1_BD_20260714",
+        "00001",
+        subproject="Wrong_2026",
+    )
+    with pytest.raises(SoundHubStagingError, match="does not match expected"):
+        enrich_audio_rows([row], _SoundHubLookups())
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +412,68 @@ def test_fragments_stay_out_of_the_s3_mirror(deployment, tmp_path):
     refresh_project_csvs(staging)
     mirrored = {p.name for p in project_root(staging).rglob("*") if p.is_file()}
     assert mirrored == {"deployment.csv", "recording.csv"}
+
+
+def test_staging_validation_requires_upload_ready_metadata_and_fragment_parity(
+    deployment, tmp_path
+):
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    write_deployment_fragments(staging, rows)
+    refresh_project_csvs(staging)
+    for recording in build_recording_rows(rows):
+        media = (
+            project_root(staging)
+            / recording["deployment_id"]
+            / recording["filename"]
+        )
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"test flac")
+
+    result = validate_staging_manifests(staging)
+    assert result == {
+        "deployment_count": 2,
+        "recording_count": 3,
+        "fragment_count": 2,
+    }
+
+    cumulative = project_root(staging) / "deployment.csv"
+    text = cumulative.read_text(encoding="utf-8")
+    cumulative.write_text(text.replace("2026-05-11", "5/11/26"), encoding="utf-8")
+    with pytest.raises(SoundHubStagingError, match="differ from deployment fragments"):
+        validate_staging_manifests(staging)
+
+
+def test_staging_validation_rejects_blank_owned_required_field(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    for row in rows:
+        row["mounted_on"] = ""
+    write_deployment_fragments(staging, rows)
+    refresh_project_csvs(staging)
+    for recording in build_recording_rows(rows):
+        media = project_root(staging) / recording["deployment_id"] / recording["filename"]
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"test flac")
+
+    with pytest.raises(SoundHubStagingError, match="mounted_on"):
+        validate_staging_manifests(staging)
+
+
+def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    write_deployment_fragments(staging, rows)
+    refresh_project_csvs(staging)
+    for recording in build_recording_rows(rows):
+        media = project_root(staging) / recording["deployment_id"] / recording["filename"]
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"test flac")
+    stale = project_root(staging) / rows[0]["deployment_id"] / "stale.flac"
+    stale.write_bytes(b"stale")
+
+    with pytest.raises(SoundHubStagingError, match="unlisted FLAC"):
+        validate_staging_manifests(staging)
 
 
 def test_deployment_copy_lands_in_the_deployment_folder(deployment):
