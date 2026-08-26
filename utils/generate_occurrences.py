@@ -32,11 +32,27 @@ Example:
 """
 
 import csv
+import re
 import sys
 from pathlib import Path
 
 # ── Exclusion list ─────────────────────────────────────────────────────────────
 EXCLUDE_COMMON_NAMES = {"Blank", "Human", "Vehicle", "No CV Result", ""}
+
+
+def deployment_event_id_from_deployment_id(deployment_id: str) -> str:
+    """Remove plot/device/sequence identity from a deployment ID."""
+    parts = deployment_id.split("_")
+    try:
+        plot_idx = next(
+            index
+            for index, part in enumerate(parts)
+            if part.lower().startswith("plot")
+        )
+    except StopIteration:
+        return deployment_id
+    date_token = re.sub(r"-seq\d{2,}$", "", parts[-1])
+    return "_".join(parts[:plot_idx]) + "_" + date_token
 
 
 def generate_occurrences(file_metadata_path, images_path, output_dir):
@@ -73,14 +89,7 @@ def generate_occurrences(file_metadata_path, images_path, output_dir):
                 break
 
     if raw_deployment_id:
-        parts = raw_deployment_id.split("_")
-        try:
-            # Find the first part that starts with "plot" and take everything before it
-            # plus the final date segment (always last)
-            plot_idx = next(i for i, p in enumerate(parts) if p.lower().startswith("plot"))
-            event_id = "_".join(parts[:plot_idx]) + "_" + parts[-1]
-        except StopIteration:
-            event_id = raw_deployment_id
+        event_id = deployment_event_id_from_deployment_id(raw_deployment_id)
         output_filename = f"{event_id}_occurrences.csv"
     else:
         output_filename = "occurrences.csv"

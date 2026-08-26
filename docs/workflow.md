@@ -4,7 +4,7 @@
 flowchart TD
     A["Launch app"] --> B["Load config from ~/.cassn_config"]
     B --> D["Sync authoritative sites, plots, and config defaults from Box"]
-    D --> E["Strictly load curated devices.csv and device-level deployments.csv"]
+    D --> E["Strictly load deployment_events.csv and deployments.csv"]
     E --> F["Offer to reopen an existing session"]
     F --> G["Enter deployment metadata"]
     G --> H["Select curated returned-card event; view current field inventory read-only"]
@@ -43,12 +43,12 @@ flowchart TD
 
 1. **Startup and lookup tables**
    - On launch the app reads `~/.cassn_config/config.json` and syncs authoritative sites, plots, SoundHub, Wildlife Insights, and program config files from Box.
-   - The app then strictly loads curated `devices.csv` and device-level `deployments.csv`; legacy camera/ARU files are not fallbacks.
-   - If Box is unreachable, the complete last validated local cache may be reused with a warning; the curated pair must still pass relational validation.
+   - The app strictly loads canonical `deployment_events.csv` and `deployments.csv`; device inventories and legacy camera/ARU files are not fallbacks.
+   - If Box is unreachable, the complete last validated local cache may be reused with a warning; both curated tables must still pass relational validation.
 
 2. **Deployment setup**
    - The user selects organization, reserve, curated returned-card event, observer, and staging location.
-   - The explicit event ID supplies a read-only deployment window and enables only the placement rows assigned to it. The user may uncheck devices that are not being downloaded in the current session.
+   - `deployment_events.csv` supplies the explicit event ID and read-only event window; the selected ID enables its exact monitoring-interval rows from `deployments.csv`. Sequential rows in the same plot/device slot remain separately selectable.
    - Open/current placements are displayed separately as read-only field inventory and cannot be selected as a card-download event.
    - The app creates the deployment-event folder and saves its curated event ID and internal selection key in resumable `session.json` state.
 

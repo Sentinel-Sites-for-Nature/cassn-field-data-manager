@@ -16,11 +16,11 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Data Integrity**: SHA-256 and SHA-1 checksums recorded for each file. SHA-256 is the primary archival checksum; SHA-1 supports fast comparison with Box-reported hashes.
 - **AudioMoth Parsing**: Recording schedule, gain, filter cutoff, and sample rate extracted from CONFIG.TXT; per-file battery voltage, temperature, and gain parsed from WAV comment headers.
 - **Reconyx MakerNote Parsing**: Sequence position, trigger type (Motion/Time-lapse), sequence total, ambient temperature, moon phase, battery voltage, and battery type extracted directly from Reconyx HYPERFIRE HP4K EXIF MakerNote via ExifTool.
-- **Device Identification**: Historical physical-device assignments come from the selected curated event in device-level `deployments.csv`. AudioMoth IDs read from the card are used when present and the deployment lookup supplies the ID when CONFIG.TXT is absent.
+- **Device Identification**: Event identity and dates come from `deployment_events.csv`; each card is bound to one exact monitoring interval in `deployments.csv`. AudioMoth IDs read from the card are used when present and the deployment row supplies the fallback when CONFIG.TXT is absent.
 - **Timestamps**: `recorded_datetime` stored as ISO 8601 with UTC offset (e.g. `2025-12-04T15:48:05-08:00`), sourced from EXIF for cameras and AudioMoth filename for audio; DST-aware via `zoneinfo`
 - **Cloud Storage**: Upload to Box with progress tracking and OAuth token refresh. Transfers are started by hand from the grouped action menus on the final tab — nothing uploads on its own.
 - **Multi-Format File Support**: Images (JPG, PNG, TIF, RAW), audio (WAV, MP3, FLAC)
-- **Lookup Authority**: A manually curated `devices.csv` / `deployments.csv` pair is distributed with the complete Box `app_config` snapshot. Every app installation validates the snapshot before replacing its offline cache.
+- **Lookup Authority**: Manually curated `deployment_events.csv` and `deployments.csv` are distributed with the complete Box `app_config` snapshot. Every app installation validates the snapshot before replacing its offline cache.
 - **Wildlife Insights Export**: Generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, using event-scoped camera metadata from `deployments.csv` and defaults from `wi_config.json`.
 - **Wildlife Insights Image Batching**: Before the first Box upload, camera folders above 15,000 images are automatically organized into verified, burst-preserving numbered parts. The operation is visible, cancellable, and resumable.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
@@ -101,7 +101,7 @@ folder IDs:
 
 - **`field_data_folder_id`** — the Box folder uploads are written to.
 - **`app_config_folder_id`** — the canonical Box folder containing sites,
-  plots, JSON defaults, `devices.csv`, and device-level `deployments.csv`.
+  plots, JSON defaults, `deployment_events.csv`, and `deployments.csv`.
 
 Lock down the folder permissions so only you can read it:
 
@@ -149,8 +149,9 @@ python -m cassn
 ```
 
 On launch the app first downloads the complete Box `app_config` snapshot to
-temporary files. It validates `devices.csv` and device-level `deployments.csv`
-together, validates their canonical `site_short_name` joins, and only then
+temporary files. It validates `deployment_events.csv` and `deployments.csv`
+together, validates their canonical event, site, plot, sequence, and interval
+relationships, and only then
 replaces the local cache. A fresh authenticated installation therefore
 bootstraps entirely from Box. If Box is unavailable, the app continues only
 when the complete local cache is valid and shows an offline-cache warning. If
@@ -167,9 +168,10 @@ validator from the repository root:
 ```
 
 The directory must contain the complete runtime snapshot, including
-`sites.csv`, `plots.csv`, `devices.csv`, device-level `deployments.csv`, and the
-required JSON configuration files. The validator checks schemas, site/plot and
-device relationships, event uniqueness, and placement date ordering. It never
+`sites.csv`, `plots.csv`, `deployment_events.csv`, `deployments.csv`, and the
+required JSON configuration files. The validator
+checks schemas, canonical event IDs and dates, site/plot/sequence relationships,
+and deployment interval ordering. It never
 copies, installs, or publishes files. Distribution to Box remains a deliberate
 manual operation.
 
@@ -468,8 +470,9 @@ One row per camera trap file (images and associated files). Fields map directly 
 | `sequence_trigger_type`, `sequence_event_num`, `sequence_position`, `sequence_total` | Reconyx sequence data from MakerNote |
 | `temperature_c`, `moon_phase`, `battery_voltage`, `battery_voltage_avg`, `battery_type` | Reconyx MakerNote extras (via ExifTool) |
 | `project_id`, `bait_type`, `bait_description`, `event_type`, `quiet_period`, `camera_functioning` | Wildlife Insights fields from `wi_config.json` |
-| `feature_type`, `feature_type_methodology`, `sensor_height`, `height_other`, `sensor_orientation`, `orientation_other` | Event-scoped WI setup from device-level `deployments.csv` |
-| `plot_treatment`, `plot_treatment_description`, `detection_distance` | Event-scoped WI plot fields from `deployments.csv` |
+| `feature_type`, `feature_type_methodology` | Survey123 camera placement from device-level `deployments.csv` |
+| `sensor_height`, `height_other`, `sensor_orientation`, `orientation_other` | Camera protocol constants from `wi_config.json` |
+| `plot_treatment`, `plot_treatment_description`, `detection_distance` | Reserved WI columns; currently blank |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
 | `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
@@ -499,7 +502,8 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `date_installed`, `deployment_start_time`, `deployment_end_time` | From CONFIG.TXT recording schedule |
 | `frequency`, `duration` | Recording schedule from CONFIG.TXT |
 | `filter_type_duration`, `filter_type_amplitude` | Trigger filter settings from CONFIG.TXT |
-| `feature_type`, `feature_type_details`, `ARU_container`, `ARU_microphone`, `mounted_on`, `sensor_height_meters`, `ARU_status` | Event-scoped physical setup from `deployments.csv` plus defaults from `soundhub_config.json` |
+| `mounted_on`, `sensor_height_meters` | Survey123 ARU placement from device-level `deployments.csv` |
+| `feature_type`, `feature_type_details`, `ARU_container`, `ARU_microphone`, `ARU_status` | Protocol/hardware values from `soundhub_config.json` or reserved blank columns |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
 | `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
@@ -637,24 +641,25 @@ A few cross-cutting behaviors that aren't single QC checks but support them:
 ### Lookup Tables
 
 The app runs against authoritative site/plot references, manually curated
-device history, and export defaults:
+deployment intervals, and export defaults:
 
 - `sites.csv` — `site_name,site_short_name,site_code`, where the values are the formal name, stable relational/deployment-ID token, and acronym
 - `plots.csv` — plot names, numbers, coordinates, and hand-entered `elevation_m`, joined to sites by `site_short_name`
-- `devices.csv` — curated physical camera and ARU inventory
-- `deployments.csv` — one curated row per device placement interval, joined to sites by `site_short_name`, including explicit event and deployment IDs, plot, hardware identity, observations, and export fields
+- `deployment_events.csv` — canonical event ID, site, `deployment_event_start_date`, and `deployment_event_end_date`; this is the sole runtime authority for event naming and dates
+- `deployments.csv` — one curated row per monitoring interval, joined to events by `deployment_event_id` and to sites by `site_short_name`, including a stable sequence-aware deployment ID, plot, optional hardware identity, observations, and export fields
 - `wi_config.json` — Wildlife Insights project IDs and upload defaults
 - `soundhub_config.json` — ARU hardware defaults (make, model, microphone, containers)
 - `program_config.json` — organization label(s) and observer names for the dropdowns
 
-**How the app gets them:** Maintainers curate `devices.csv` and device-level
+**How the app gets them:** Maintainers curate `deployment_events.csv` and
 `deployments.csv`, validate the complete directory with
 `utils/validate_curated_lookups.py`, and deliberately place the accepted files
 in Box `app_config`. Box is the distributed current snapshot for all
 installations; `~/.cassn_config/lookup_tables/` is only a validated offline
 cache. Startup synchronizes Box before constructing `LookupTables`.
-`cameras.csv`, `ARUs.csv`, and event-only `deployments.csv` are not runtime
-fallbacks.
+`devices.csv`, `cameras.csv`, `ARUs.csv`, and Survey123 exports are not runtime
+fallbacks. See `docs/deployment_lookup_contract.md` for the authoritative
+definitions, identifier rules, and historical-compatibility policy.
 
 ### Example and historical lookup files
 
@@ -674,9 +679,8 @@ Field notes:
 - **`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_make`, `ARU_model`, `ARU_microphone`, container types, sample rates, and schedule. Values are copied into `audio_file_metadata.csv` at processing time.
 - **`ARUs.csv`**: Retired historical format. ARU compatibility views are built from curated device-level `deployments.csv`.
 
-> The standalone CLI tools in `utils/` (e.g. `generate_wi_deployments.py`) read
-> their lookup tables from a repo-local `local_data/` folder instead of the
-> Box-synced cache. See [`utils/README.md`](utils/README.md) for details.
+> Standalone maintenance tools may use explicitly supplied local inputs. See
+> [`utils/README.md`](utils/README.md) for each tool's lookup behavior.
 
 ## Development
 
@@ -695,7 +699,6 @@ cassn-field-data-manager/
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
-│   ├── generate_wi_deployments.py    # Wildlife Insights deployment CSV generator
 │   ├── generate_occurrences.py       # Wildlife Insights occurrences CSV generator
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)

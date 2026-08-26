@@ -31,6 +31,7 @@ from cassn.export.wildlife_insights import (
     deployment_event_name,
     subproject_for,
 )
+from cassn.lookups import normalize_deployment_event_metadata
 
 
 def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[list[dict], list[dict]]:
@@ -41,11 +42,12 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     derived from device-level deployments, ``soundhub_config`` (ARU defaults),
     and ``wi_config`` (WI project defaults).
     """
+    metadata = normalize_deployment_event_metadata(metadata)
     org = metadata.get('organization', '')
     site_name = metadata.get('site_name', '')
     site_short_name = metadata.get('site_short_name', '')
     site_code = metadata.get('site_code', '')
-    end = metadata.get('deployment_end', '')
+    end = metadata.get('deployment_event_end_date', '')
     observer = metadata.get('observer', '')
     deployment_event_id = metadata.get("deployment_event_id", "")
     if not deployment_event_id:
@@ -85,17 +87,21 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
 
         placename = f"{site_short_name}_plot{plot_num}"
 
-        # Event-scoped placement lookup from the new device-level
-        # deployments.csv. The compatibility views are populated only after a
-        # curated event has been selected.
-        placement_key = (site_short_name, plot_num_int, dev_type)
-        if dev_type in {"ML", "SA"}:
-            placement_row = lookups.cameras.get(placement_key, {})
-            aru_row = {}
-        else:
-            placement_row = lookups.arus.get(placement_key, {})
-            aru_row = placement_row
-        deployment_id = placement_row.get("deployment_id", "")
+        # New inventory rows carry the exact selected deployment ID. Historical
+        # resumable sessions predate that field, so they retain the original
+        # slot-keyed fallback without rewriting their filed identifiers.
+        inventory_deployment_id = entry.get("deployment_id", "")
+        deployment_id = inventory_deployment_id
+        placement_row = (
+            lookups.deployment_for_id(deployment_id) if deployment_id else {}
+        )
+        if not placement_row:
+            placement_key = (site_short_name, plot_num_int, dev_type)
+            if dev_type in {"ML", "SA"}:
+                placement_row = lookups.cameras.get(placement_key, {})
+            else:
+                placement_row = lookups.arus.get(placement_key, {})
+            deployment_id = placement_row.get("deployment_id", "")
         if not deployment_id:
             raise ValueError(
                 f"No curated deployment row for {site_short_name} "
@@ -103,6 +109,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             )
         placement_start = placement_row.get("deployment_start_date", "")
         placement_end = placement_row.get("deployment_end_date", "")
+        aru_row = placement_row if dev_type not in {"ML", "SA"} else {}
         if not placement_start or not placement_end:
             raise ValueError(
                 f"Incomplete curated placement interval for "
@@ -113,11 +120,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         aru_container = soundhub_config.get(f'ARU_container_{dev_type}', '')
         aru_microphone = soundhub_config.get('ARU_microphone', '')
         sh_feature_type = soundhub_config.get('feature_type', '')
-        sh_mounted_on = (
-            aru_row.get('mounted_on', '')
-            or aru_row.get('survey_mounted_on', '')
-            or soundhub_config.get('mounted_on', '')
-        )
+        sh_mounted_on = aru_row.get('mounted_on', '')
 
         base = {
             'filename':           entry.get('new_filename', ''),
@@ -131,7 +134,14 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'subproject':         subproject,
             'subproject_design':  SUBPROJECT_DESIGN,
             'placename':          placename,
-            'event_name':         deployment_event_name(placement_start, placement_end),
+            # Prospective rows use the shared event ID for WI discoverability.
+            # Historical session inventory lacks its own deployment_id; retain
+            # the event label written by the original schema if regenerated.
+            'event_name':         (
+                deployment_event_id
+                if inventory_deployment_id
+                else deployment_event_name(placement_start, placement_end)
+            ),
             'event_description':  '',
             'plot_number':        plot_num,
             'device_type':        dev_type,
@@ -155,11 +165,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         }
 
         if file_type == 'image':
-            cam_key = (
-                (site_short_name, plot_num_int, dev_type)
-                if plot_num_int else None
-            )
-            cam = lookups.cameras.get(cam_key, {}) if cam_key else {}
+            cam = placement_row
             row = {**base,
                 'start_date':    f"{placement_start} 00:00:00",
                 'end_date':      f"{placement_end} 23:59:59",
@@ -186,13 +192,13 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'camera_functioning':    wi_config.get('camera_functioning_default', 'Camera Functioning'),
                 'feature_type':          cam.get('feature_type', ''),
                 'feature_type_methodology': '',
-                'sensor_height':         cam.get('sensor_height', ''),
+                'sensor_height':         wi_config.get(f'sensor_height_{dev_type}', ''),
                 'height_other':          '',
-                'sensor_orientation':    cam.get('sensor_orientation', ''),
+                'sensor_orientation':    wi_config.get(f'sensor_orientation_{dev_type}', ''),
                 'orientation_other':     '',
-                'plot_treatment':        cam.get('plot_treatment', ''),
-                'plot_treatment_description': cam.get('plot_treatment_description', ''),
-                'detection_distance':    cam.get('detection_distance', ''),
+                'plot_treatment':        '',
+                'plot_treatment_description': '',
+                'detection_distance':    '',
                 'is_submitted_to_wi':    False,
                 'wi_submitter':          '',
                 'wi_submission_datetime': '',
@@ -250,14 +256,31 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
     return image_rows, audio_rows
 
 
-def build_deployment_event_record(metadata: dict, devices: list, file_count: int) -> dict:
+def build_deployment_event_record(
+    metadata: dict,
+    devices: list,
+    file_count: int,
+    deployment_ids_by_label: dict[str, str] | None = None,
+) -> dict:
     """Build the ``deployment_event_record.json`` payload (deployment info + device list)."""
+    metadata = normalize_deployment_event_metadata(metadata)
+    deployment_ids_by_label = deployment_ids_by_label or {}
+    device_rows = []
+    for plot_number, plot_label, device_type, device_label in devices:
+        row = {
+            'plot_number': plot_number,
+            'plot_label': plot_label,
+            'device_type': device_type,
+            'device_label': device_label,
+        }
+        # Historical inventories lack this mapping and retain their original
+        # event-record shape when reopened.
+        if deployment_ids_by_label.get(device_label):
+            row['deployment_id'] = deployment_ids_by_label[device_label]
+        device_rows.append(row)
     return {
         'deployment_info': metadata,
-        'devices': [
-            {'plot_number': pn, 'plot_label': pl, 'device_type': dc, 'device_label': dl}
-            for pn, pl, dc, dl in devices
-        ],
+        'devices': device_rows,
         'file_count': file_count,
         'generated': datetime.now().isoformat(),
         'version': VERSION,
@@ -316,7 +339,17 @@ def write_metadata_outputs(
     _write_rows(deployment_folder / "audio_file_metadata.csv", AUDIO_FIELDS, audio_rows, log=log)
 
     # deployment_event_record.json
-    record = build_deployment_event_record(metadata, devices, len(file_inventory))
+    deployment_ids_by_label = {
+        entry['device_label']: entry['deployment_id']
+        for entry in file_inventory
+        if entry.get('device_label') and entry.get('deployment_id')
+    }
+    record = build_deployment_event_record(
+        metadata,
+        devices,
+        len(file_inventory),
+        deployment_ids_by_label,
+    )
     manifest_path = deployment_folder / "deployment_event_record.json"
     existed = manifest_path.exists()
     with open(manifest_path, 'w') as f:

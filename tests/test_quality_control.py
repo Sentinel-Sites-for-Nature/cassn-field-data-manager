@@ -1,10 +1,25 @@
 """Tests for quality-control helpers (cassn.core.quality_control)."""
+import cassn.core.quality_control as quality_control
+
 from cassn.core.quality_control import (
     build_box_verification_record,
     check_required_lookups,
     is_duplicate_media,
     validate_coordinates,
 )
+
+
+def test_lookup_snapshot_excludes_retired_and_unmanaged_files(tmp_path, monkeypatch):
+    lookup_dir = tmp_path / "lookups"
+    lookup_dir.mkdir()
+    (lookup_dir / "sites.csv").write_text("site_name\nTest\n", encoding="utf-8")
+    for name in ("devices.csv", "cameras.csv", "ARUs.csv", "notes.txt"):
+        (lookup_dir / name).write_text("legacy\n", encoding="utf-8")
+    monkeypatch.setattr(quality_control, "LOCAL_DATA_DIR", lookup_dir)
+
+    manifest = quality_control.snapshot_lookup_tables(tmp_path / "deployment")
+
+    assert [entry["filename"] for entry in manifest] == ["sites.csv"]
 
 
 def test_media_duplicate_is_detected():
@@ -61,7 +76,7 @@ def test_required_lookups_blocks_missing_camera_identity():
     )
     assert findings[0][0] == "lookup_device_identity"
     assert findings[0][1] == "error"
-    assert "cameras.csv" in findings[0][2]
+    assert "deployments.csv" in findings[0][2]
 
 
 def test_required_lookups_blocks_missing_coordinates():

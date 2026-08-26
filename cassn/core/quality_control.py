@@ -38,6 +38,7 @@ from cassn.config import (
 )
 from cassn.core.classification import file_size_floor_for, format_size_floor
 from cassn.core.hashing import sha256
+from cassn.lookups import BOX_MANAGED_FILENAMES
 
 
 # ---------------------------------------------------------------------------
@@ -137,10 +138,10 @@ def check_required_lookups(
 ) -> list:
     """QC findings for missing lookup data, per the configured policy.
 
-    Blocking errors: a missing device identity (camera absent from cameras.csv,
-    or an AudioMoth serial that can't be read) and missing plot coordinates
-    (plot absent from plots.csv). Warning only: missing ARU install details
-    (recorder absent from ARUs.csv). Returns ``(check, severity, message)``
+    Blocking errors: a missing device identity (camera absent from
+    deployments.csv, or an AudioMoth serial that can't be read) and missing
+    plot coordinates (plot absent from plots.csv). Warning only: missing ARU
+    install details (deployment row absent). Returns ``(check, severity, message)``
     tuples; the caller appends them to the QC report.
     """
     findings = []
@@ -150,7 +151,7 @@ def check_required_lookups(
             "error",
             f"{device_label}: AudioMoth serial could not be read"
             if is_audio
-            else f"{device_label}: camera_id missing — camera not in cameras.csv",
+            else f"{device_label}: device_id missing — camera not in deployments.csv",
         ))
     if not has_coordinates:
         findings.append((
@@ -162,7 +163,7 @@ def check_required_lookups(
         findings.append((
             "lookup_aru_install",
             "warning",
-            f"{device_label}: ARU install details missing — recorder not in ARUs.csv",
+            f"{device_label}: ARU install details missing — deployment row not found",
         ))
     return findings
 
@@ -515,7 +516,7 @@ def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
 
 
 def check_camera_serial(entries: list, device_label: str) -> list[str]:
-    """Cross-check the cameras.csv ``camera_id`` against the EXIF camera serial.
+    """Cross-check the deployment ``device_id`` against the EXIF camera serial.
 
     The lookup ``camera_id`` should be contained within the camera's full hardware
     serial read from EXIF (e.g. ``08021269`` within ``4LPXKT08021269``). Warns once
@@ -533,7 +534,7 @@ def check_camera_serial(entries: list, device_label: str) -> list[str]:
             continue
         if cam_id.lower() not in serial.lower():
             return [
-                f"camera_id '{cam_id}' (cameras.csv) is not contained in the "
+                f"camera_id '{cam_id}' (deployments.csv device_id) is not contained in the "
                 f"camera's EXIF serial '{serial}' — possible wrong camera at this plot"
             ]
         break  # consistent within a device; one verified image is enough
@@ -637,9 +638,11 @@ def snapshot_lookup_tables(deployment_folder: Path) -> list[dict]:
     if not LOCAL_DATA_DIR.exists():
         return manifest
 
-    for source in sorted(p for p in LOCAL_DATA_DIR.iterdir() if p.is_file()):
-        if source.name == ".DS_Store":
-            continue
+    for source in sorted(
+        p
+        for p in LOCAL_DATA_DIR.iterdir()
+        if p.is_file() and p.name in BOX_MANAGED_FILENAMES
+    ):
         dest = snapshot_dir / source.name
         try:
             shutil.copy2(source, dest)

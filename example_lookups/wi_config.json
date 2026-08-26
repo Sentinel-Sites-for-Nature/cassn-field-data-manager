@@ -7,5 +7,9 @@
   "bait_description_SA": "",
   "event_type": "Temporal",
   "quiet_period": 0,
-  "camera_functioning_default": "Camera Functioning"
+  "camera_functioning_default": "Camera Functioning",
+  "sensor_height_ML": "Knee height",
+  "sensor_height_SA": "Knee height",
+  "sensor_orientation_ML": "Parallel",
+  "sensor_orientation_SA": "Pointed Downward"
 }

@@ -15,25 +15,26 @@ from cassn.box.auth import BoxConfig, get_box_client
 from cassn.box.client import BoxStorage
 from cassn.lookups import (
     BOX_MANAGED_FILENAMES,
+    DEPLOYMENT_EVENTS_CSV,
     DEPLOYMENTS_CSV,
-    DEVICES_CSV,
     PLOTS_CSV,
+    RETIRED_LOOKUP_FILENAMES,
     SITES_CSV,
     SOUNDHUB_JSON,
     WI_CONFIG_JSON,
     LookupSchemaError,
     LookupTables,
+    deployment_id_matches_contract,
+    load_deployment_events,
     load_device_deployments,
-    load_devices,
 )
 
 
-DEVICE_PAIR_FILENAMES = (DEVICES_CSV, DEPLOYMENTS_CSV)
 REQUIRED_RUNTIME_FILENAMES = frozenset({
     SITES_CSV,
     PLOTS_CSV,
-    DEVICES_CSV,
     DEPLOYMENTS_CSV,
+    DEPLOYMENT_EVENTS_CSV,
     SOUNDHUB_JSON,
     WI_CONFIG_JSON,
 })
@@ -46,8 +47,8 @@ class LookupBootstrapError(RuntimeError):
 
 @dataclass(frozen=True)
 class LookupValidation:
-    devices: int
     deployments: int
+    deployment_events: int
     hashes: dict[str, str]
 
 
@@ -67,30 +68,24 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_device_lookup_pair(
-    devices_path: Path,
+def validate_deployment_lookups(
     deployments_path: Path,
+    deployment_events_path: Path,
 ) -> LookupValidation:
-    """Validate the two curated files as one relational snapshot."""
-    devices = load_devices(devices_path)
+    """Validate deployments and events as one relational runtime snapshot."""
     deployments = load_device_deployments(deployments_path)
-
-    device_ids = [row["device_record_id"] for row in devices]
-    if any(not value for value in device_ids):
-        raise LookupSchemaError("devices.csv contains a blank device_record_id")
-    if len(device_ids) != len(set(device_ids)):
-        raise LookupSchemaError("devices.csv contains duplicate device_record_id values")
+    deployment_events = load_deployment_events(deployment_events_path)
 
     closed_without_ids = [
         row
         for row in deployments
         if row.get("deployment_end_date")
-        and (not row["deployment_id"] or not row["deployment_event_id"])
+        and not row["deployment_id"]
     ]
     if closed_without_ids:
         raise LookupSchemaError(
             f"deployments.csv has {len(closed_without_ids)} closed placement(s) "
-            "without deployment_id or deployment_event_id"
+            "without deployment_id"
         )
     named_open = [
         row for row in deployments if not row.get("deployment_end_date") and row["deployment_id"]
@@ -117,39 +112,107 @@ def validate_device_lookup_pair(
             "deployments.csv contains legacy inferred/open deployment event IDs"
         )
 
+    canonical_events = {
+        row["deployment_event_id"]: row for row in deployment_events
+    }
+    unknown_events = {
+        row["deployment_event_id"]
+        for row in deployments
+        if row["deployment_event_id"]
+        and row["deployment_event_id"] not in canonical_events
+    }
+    if unknown_events:
+        examples = ", ".join(sorted(unknown_events)[:5])
+        raise LookupSchemaError(
+            "deployments.csv references unknown deployment_event_id value(s); "
+            f"examples: {examples}"
+        )
+    event_site_mismatches = {
+        row["deployment_event_id"]
+        for row in deployments
+        if row["deployment_event_id"] in canonical_events
+        and row["site_short_name"]
+        != canonical_events[row["deployment_event_id"]]["site_short_name"]
+    }
+    if event_site_mismatches:
+        examples = ", ".join(sorted(event_site_mismatches)[:5])
+        raise LookupSchemaError(
+            "deployments.csv site_short_name disagrees with deployment_events.csv; "
+            f"examples: {examples}"
+        )
+
     deployment_ids = [row["deployment_id"] for row in deployments if row["deployment_id"]]
     if len(deployment_ids) != len(set(deployment_ids)):
         raise LookupSchemaError("deployments.csv contains duplicate deployment_id values")
 
-    reversed_intervals = [
-        row
+    unknown_identifier_policies = sorted({
+        row.get("identifier_policy", "")
+        for row in deployments
+        if row.get("identifier_policy", "") not in {"", "filed_legacy"}
+    })
+    if unknown_identifier_policies:
+        raise LookupSchemaError(
+            "deployments.csv contains unsupported identifier_policy value(s): "
+            + ", ".join(unknown_identifier_policies)
+        )
+
+    id_collision_counts: dict[tuple[str, int, str, str], int] = {}
+    for row in deployments:
+        if not row.get("deployment_end_date"):
+            continue
+        key = (
+            row["site_short_name"],
+            int(row["plot_number"]),
+            row["device_type"],
+            row["deployment_end_date"],
+        )
+        id_collision_counts[key] = id_collision_counts.get(key, 0) + 1
+
+    noncanonical_ids = [
+        row["deployment_id"]
         for row in deployments
         if row.get("deployment_end_date")
-        and row["deployment_end_date"] < row["deployment_start_date"]
+        and row.get("identifier_policy", "") != "filed_legacy"
+        and not deployment_id_matches_contract(
+            row,
+            sequence_suffix_required=(
+                int(row["deployment_sequence"]) > 0
+                and id_collision_counts[
+                    (
+                        row["site_short_name"],
+                        int(row["plot_number"]),
+                        row["device_type"],
+                        row["deployment_end_date"],
+                    )
+                ] > 1
+            ),
+        )
     ]
-    if reversed_intervals:
+    if noncanonical_ids:
+        examples = ", ".join(noncanonical_ids[:5])
         raise LookupSchemaError(
-            f"deployments.csv has {len(reversed_intervals)} placement(s) whose end "
-            "date precedes the start date"
+            f"deployments.csv has {len(noncanonical_ids)} deployment_id value(s) "
+            f"that do not match the prospective naming contract; examples: {examples}"
         )
 
     event_sites: dict[str, set[str]] = {}
-    event_slots: set[tuple[str, str, int, str]] = set()
-    duplicate_slots: set[tuple[str, str, int, str]] = set()
+    event_sequences: set[tuple[str, str, int, str, int]] = set()
+    duplicate_sequences: set[tuple[str, str, int, str, int]] = set()
     for row in deployments:
         event_id = row.get("deployment_event_id", "")
         if not event_id:
             continue
         event_sites.setdefault(event_id, set()).add(row["site_short_name"])
-        slot = (
+        sequence_key = (
             event_id,
             row["site_short_name"],
             int(row["plot_number"]),
             row["device_type"],
+            int(row["deployment_sequence"]),
         )
-        if slot in event_slots:
-            duplicate_slots.add(slot)
-        event_slots.add(slot)
+        if sequence_key in event_sequences:
+            duplicate_sequences.add(sequence_key)
+        event_sequences.add(sequence_key)
     multi_site_events = [event for event, sites in event_sites.items() if len(sites) > 1]
     if multi_site_events:
         examples = ", ".join(sorted(multi_site_events)[:5])
@@ -157,33 +220,23 @@ def validate_device_lookup_pair(
             "deployments.csv assigns deployment_event_id values to multiple sites; "
             f"examples: {examples}"
         )
-    if duplicate_slots:
+    if duplicate_sequences:
         examples = ", ".join(
-            f"{event_id}/{site}/plot{plot}/{device_type}"
-            for event_id, site, plot, device_type in sorted(duplicate_slots)[:5]
+            f"{event_id}/{site}/plot{plot}/{device_type}/sequence{sequence}"
+            for event_id, site, plot, device_type, sequence
+            in sorted(duplicate_sequences)[:5]
         )
         raise LookupSchemaError(
-            f"deployments.csv has {len(duplicate_slots)} duplicate plot/device "
-            f"slot(s) within a deployment event; examples: {examples}"
-        )
-
-    known_devices = set(device_ids)
-    unknown = {
-        row.get("device_record_id", "")
-        for row in deployments
-        if row.get("device_record_id", "") not in known_devices
-    }
-    if unknown:
-        raise LookupSchemaError(
-            f"deployments.csv references {len(unknown)} unknown device record(s)"
+            f"deployments.csv has {len(duplicate_sequences)} duplicate deployment "
+            f"sequence(s) within an event slot; examples: {examples}"
         )
 
     return LookupValidation(
-        devices=len(devices),
         deployments=len(deployments),
+        deployment_events=len(deployment_events),
         hashes={
-            DEVICES_CSV: _sha256(devices_path),
             DEPLOYMENTS_CSV: _sha256(deployments_path),
+            DEPLOYMENT_EVENTS_CSV: _sha256(deployment_events_path),
         },
     )
 
@@ -196,9 +249,9 @@ def validate_lookup_directory(lookup_dir: Path) -> tuple[LookupTables, LookupVal
     if missing:
         raise LookupSchemaError("Missing required lookup files: " + ", ".join(missing))
 
-    pair = validate_device_lookup_pair(
-        lookup_dir / DEVICES_CSV,
+    pair = validate_deployment_lookups(
         lookup_dir / DEPLOYMENTS_CSV,
+        lookup_dir / DEPLOYMENT_EVENTS_CSV,
     )
     lookups = LookupTables.load(lookup_dir)
     if not lookups.sites:
@@ -207,6 +260,31 @@ def validate_lookup_directory(lookup_dir: Path) -> tuple[LookupTables, LookupVal
         raise LookupSchemaError("plots.csv has no canonical plot rows")
 
     valid_sites = {site.site_short_name for site in lookups.sites}
+    canonical_site_names = {
+        site.site_short_name: site.site_name for site in lookups.sites
+    }
+    unknown_event_sites = {
+        row["site_short_name"]
+        for row in lookups.deployment_events
+        if row["site_short_name"] not in valid_sites
+    }
+    if unknown_event_sites:
+        raise LookupSchemaError(
+            "deployment_events.csv references "
+            f"{len(unknown_event_sites)} unknown site_short_name value(s)"
+        )
+    event_site_name_mismatches = {
+        row["deployment_event_id"]
+        for row in lookups.deployment_events
+        if row["site_short_name"] in canonical_site_names
+        and row["site_name"] != canonical_site_names[row["site_short_name"]]
+    }
+    if event_site_name_mismatches:
+        examples = ", ".join(sorted(event_site_name_mismatches)[:5])
+        raise LookupSchemaError(
+            "deployment_events.csv site_name disagrees with sites.csv; "
+            f"examples: {examples}"
+        )
     unknown_sites = {
         row["site_short_name"]
         for row in lookups.device_deployments
@@ -297,6 +375,11 @@ def sync_box_lookup_cache(client, folder_id: str, cache_dir: Path) -> tuple[Look
         cache_dir.mkdir(parents=True, exist_ok=True)
         names = sorted(box_files)
         _replace_cache_from_staging(staging_dir, cache_dir, names)
+        for name in RETIRED_LOOKUP_FILENAMES:
+            retired = cache_dir / name
+            if retired.is_symlink() or (retired.exists() and not retired.is_file()):
+                raise LookupBootstrapError(f"Unsafe retired lookup cache target: {retired}")
+            retired.unlink(missing_ok=True)
         (cache_dir / LAST_SYNC_FILENAME).write_text(
             datetime.now(timezone.utc).isoformat(), encoding="utf-8"
         )

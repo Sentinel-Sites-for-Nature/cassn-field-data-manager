@@ -12,9 +12,9 @@ def test_validator_reports_counts_and_hashes(tmp_path):
 
     report = validate_curated_lookup_directory(tmp_path)
 
-    assert "devices=1; deployments=1" in report
-    assert "devices.csv=" in report
+    assert "deployments=1; deployment_events=1" in report
     assert "deployments.csv=" in report
+    assert "deployment_events.csv=" in report
 
 
 def test_validator_cli_is_nonzero_for_invalid_directory(tmp_path, capsys):

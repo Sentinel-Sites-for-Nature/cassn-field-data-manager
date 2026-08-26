@@ -6,6 +6,7 @@ import pytest
 
 from cassn.core.inventory import (
     already_copied_relpaths,
+    build_deployment_filename,
     count_expected_files,
     deduplicate_exact_storage_entries,
     default_storage_relpath,
@@ -19,6 +20,18 @@ from cassn.core.inventory import (
     sorted_walk,
     write_session,
 )
+
+
+def test_prospective_filename_preserves_deployment_sequence_suffix():
+    assert build_deployment_filename(
+        "UC_Angelo_plot1_BD_20260709-seq01", "00001", ".WAV"
+    ) == "UC_Angelo_plot1_BD_20260709-seq01_00001.WAV"
+    assert build_deployment_filename(
+        "UC_Angelo_plot1_BD_20260709-seq01", "CONFIG_01", ".TXT"
+    ) == "UC_Angelo_plot1_BD_20260709-seq01_CONFIG_01.TXT"
+
+    with pytest.raises(ValueError, match="deployment_id is required"):
+        build_deployment_filename("", "00001", ".WAV")
 
 
 def test_sorted_walk_orders_dirs_and_files(tmp_path):

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from cassn.config import CAMERA_DEVICE_TYPES
+from cassn.lookups import normalize_deployment_event_metadata
 
 # WI deployment CSV schema. Column order is significant and must not change.
 WI_COLUMNS = [
@@ -133,12 +134,13 @@ def build_wi_rows(
     receives a warning for any camera missing a ``camera_id``; when ``None``,
     those warnings are dropped.
     """
+    deployment_info = normalize_deployment_event_metadata(deployment_info)
     _log = log or (lambda _m: None)
 
     site_short_name = deployment_info.get("site_short_name", "")
     org = deployment_info.get("organization", "")
-    start = deployment_info.get("deployment_start", "")
-    end = deployment_info.get("deployment_end", "")
+    start = deployment_info.get("deployment_event_start_date", "")
+    end = deployment_info.get("deployment_event_end_date", "")
     observer = deployment_info.get("observer", "")
 
     subproject_name = subproject_for(site_short_name, end)
@@ -160,7 +162,7 @@ def build_wi_rows(
         cam = cameras.get((site_short_name, plot_num_int, dev_type), {}) if plot_num_int else {}
         coords = plot_coords.get((site_short_name, plot_num_int), {}) if plot_num_int else {}
 
-        camera_id = cam.get("camera_id", "")
+        camera_id = cam.get("device_id", "")
         if not camera_id:
             _log(
                 f"  Warning: camera_id missing for {site_short_name} "
@@ -190,9 +192,11 @@ def build_wi_rows(
             "camera_id": camera_id,
             "quiet_period": wi_config.get("quiet_period", 0),
             "camera_functioning": wi_config.get("camera_functioning_default", "Camera Functioning"),
-            "sensor_height": cam.get("sensor_height", "Knee height"),
+            "sensor_height": wi_config.get(f"sensor_height_{dev_type}", ""),
             "height_other": "",
-            "sensor_orientation": cam.get("sensor_orientation", "Parallel" if dev_type == "ML" else "Pointed Downward"),
+            "sensor_orientation": wi_config.get(
+                f"sensor_orientation_{dev_type}", ""
+            ),
             "orientation_other": "",
             "recorded_by": observer,
             "plot_treatment": "",

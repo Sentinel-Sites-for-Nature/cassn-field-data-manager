@@ -10,37 +10,37 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from cassn.export.metadata_csv import build_metadata_rows
+from cassn.export.metadata_csv import build_deployment_event_record, build_metadata_rows
+from cassn.export.wildlife_insights import SUBPROJECT_DESIGN
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS
 from cassn.lookups import (
     LookupSchemaError,
     LookupTables,
     Site,
     build_deployment_rounds,
+    deployment_storage_label,
+    load_deployment_events,
     load_device_deployments,
     load_plot_names,
     load_sites,
+    normalize_deployment_event_metadata,
 )
 
 
 FIELDS = [
     "deployment_id",
     "deployment_event_id",
+    "deployment_sequence",
     "site_short_name",
     "plot_number",
     "device_type",
-    "device_record_id",
     "device_id",
     "deployment_start_date",
-    "deployment_start_datetime",
     "deployment_end_date",
-    "camera_id",
+    "identifier_policy",
     "feature_type",
-    "sensor_height",
-    "sensor_orientation",
     "mounted_on",
     "sensor_height_meters",
-    "ARU_status",
 ]
 
 
@@ -54,25 +54,145 @@ def write_csv(path: Path, fields: list[str], rows: list[dict]) -> None:
 def placement(**changes) -> dict:
     row = {
         "deployment_id": "dep-old-camera",
-        "deployment_event_id": "source-event",
+        "deployment_event_id": "UC_TestSite_20260424",
+        "deployment_sequence": "0",
         "site_short_name": "TestSite",
         "plot_number": "1",
         "device_type": "ML",
-        "device_record_id": "ML:CAM-OLD",
         "device_id": "CAM-OLD",
         "deployment_start_date": "2026-01-08",
-        "deployment_start_datetime": "2026-01-08T10:00:00-08:00",
         "deployment_end_date": "2026-04-24",
-        "camera_id": "CAM-OLD",
+        "identifier_policy": "filed_legacy",
         "feature_type": "Trail game",
-        "sensor_height": "Knee height",
-        "sensor_orientation": "Parallel",
         "mounted_on": "",
         "sensor_height_meters": "",
-        "ARU_status": "",
     }
     row.update(changes)
     return row
+
+
+def deployment_event(**changes) -> dict:
+    row = {
+        "deployment_event_id": "UC_TestSite_20260424",
+        "site_short_name": "TestSite",
+        "site_name": "Test Reserve",
+        "deployment_event_start_date": "2026-01-08",
+        "deployment_event_end_date": "2026-04-24",
+    }
+    row.update(changes)
+    return row
+
+
+def test_deployment_event_loader_requires_iso_dates_unique_ids_and_matching_suffix(
+    tmp_path,
+):
+    path = tmp_path / "deployment_events.csv"
+    fields = [
+        "deployment_event_id",
+        "site_short_name",
+        "site_name",
+        "deployment_event_start_date",
+        "deployment_event_end_date",
+    ]
+    write_csv(path, fields, [deployment_event()])
+    assert load_deployment_events(path) == [deployment_event()]
+
+    write_csv(
+        path,
+        fields,
+        [deployment_event(deployment_event_end_date="4/24/26")],
+    )
+    with pytest.raises(LookupSchemaError, match="expected YYYY-MM-DD"):
+        load_deployment_events(path)
+
+    write_csv(
+        path,
+        fields,
+        [deployment_event(), deployment_event()],
+    )
+    with pytest.raises(LookupSchemaError, match="duplicate deployment_event_id"):
+        load_deployment_events(path)
+
+    write_csv(
+        path,
+        fields,
+        [deployment_event(deployment_event_id="UC_TestSite_20260423")],
+    )
+    with pytest.raises(LookupSchemaError, match="does not end with"):
+        load_deployment_events(path)
+
+
+def test_event_table_dates_override_device_placement_dates():
+    events, _rows_by_round = build_deployment_rounds(
+        [deployment_event(deployment_event_start_date="2026-01-01")],
+        [
+            placement(
+                deployment_start_date="2026-01-08",
+                deployment_end_date="2026-04-23",
+            )
+        ],
+    )
+
+    event = events["TestSite"][0]
+    assert event["deployment_event_start_date"] == "2026-01-01"
+    assert event["deployment_event_end_date"] == "2026-04-24"
+
+
+def test_historical_event_metadata_is_normalized_at_ingress():
+    normalized = normalize_deployment_event_metadata(
+        {
+            "deployment_start": "2026-01-01",
+            "deployment_end": "2026-04-24",
+        }
+    )
+    assert normalized == {
+        "deployment_event_start_date": "2026-01-01",
+        "deployment_event_end_date": "2026-04-24",
+    }
+
+
+def test_sequential_deployments_remain_individually_addressable():
+    first = placement(
+        deployment_id="UC_TestSite_plot1_BD_20260424",
+        device_type="BD",
+        device_id="ARU-OLD",
+    )
+    successor = placement(
+        deployment_id="UC_TestSite_plot1_BD_20260424-seq01",
+        deployment_sequence="1",
+        device_type="BD",
+        device_id="ARU-NEW",
+        deployment_start_date="2026-04-23",
+    )
+    events, rows_by_round = build_deployment_rounds(
+        [deployment_event()], [first, successor]
+    )
+    event = events["TestSite"][0]
+    lookups = LookupTables(
+        deployments=events,
+        _deployment_rows_by_round=rows_by_round,
+        deployments_by_id={
+            first["deployment_id"]: first,
+            successor["deployment_id"]: successor,
+        },
+    )
+    lookups.activate_deployment_round(event["deployment_round_id"])
+
+    rows = lookups.active_rows_for_slot("TestSite", 1, "BD")
+    assert [row["deployment_sequence"] for row in rows] == ["0", "1"]
+    assert [deployment_storage_label(row) for row in rows] == ["p1_BD", "p1_BD_seq01"]
+    assert lookups.active_deployment_for_label("p1_BD_seq01")["device_id"] == "ARU-NEW"
+
+
+def test_event_record_adds_exact_id_only_for_prospective_inventory():
+    devices = [(1, "One", "BD", "p1_BD_seq01")]
+    prospective = build_deployment_event_record(
+        {}, devices, 1, {"p1_BD_seq01": "UC_TestSite_plot1_BD_20260424-seq01"}
+    )
+    assert prospective["devices"][0]["deployment_id"].endswith("-seq01")
+
+    historical = build_deployment_event_record({}, devices, 1)
+    assert "deployment_id" not in historical["devices"][0]
 
 
 def test_canonical_site_and_plot_loaders_join_on_short_name(tmp_path):
@@ -199,33 +319,24 @@ def test_events_follow_curated_id_and_activate_historical_devices(tmp_path):
         placement(),
         placement(
             deployment_id="dep-aru",
-            device_record_id="BD:ARU-1",
             device_type="BD",
             device_id="ARU-1",
             deployment_start_date="2026-03-04",
-            deployment_start_datetime="2026-03-04T10:00:00-08:00",
-            camera_id="",
             mounted_on="Tree",
             sensor_height_meters="1.5",
         ),
         placement(
             deployment_id="dep-new-camera",
-            deployment_event_id="curated-may-event",
-            device_record_id="ML:CAM-NEW",
+            deployment_event_id="UC_TestSite_20260506",
             device_id="CAM-NEW",
-            camera_id="CAM-NEW",
             deployment_start_date="2026-04-24",
-            deployment_start_datetime="2026-04-24T10:00:00-07:00",
             deployment_end_date="2026-05-06",
         ),
         placement(
-            deployment_id="dep-current-camera",
+            deployment_id="",
             deployment_event_id="",
-            device_record_id="ML:CAM-CURRENT",
             device_id="CAM-CURRENT",
-            camera_id="CAM-CURRENT",
             deployment_start_date="2026-05-06",
-            deployment_start_datetime="2026-05-06T10:00:00-07:00",
             deployment_end_date="",
         ),
     ]
@@ -233,25 +344,49 @@ def test_events_follow_curated_id_and_activate_historical_devices(tmp_path):
     write_csv(path, FIELDS, rows)
 
     deployments = load_device_deployments(path)
-    events, rows_by_round = build_deployment_rounds(deployments)
+    events, rows_by_round = build_deployment_rounds(
+        [
+            deployment_event(),
+            deployment_event(
+                deployment_event_id="UC_TestSite_20260506",
+                deployment_event_start_date="2026-04-24",
+                deployment_event_end_date="2026-05-06",
+            ),
+        ],
+        deployments,
+    )
 
-    april = next(event for event in events["TestSite"] if event["deployment_end"] == "2026-04-24")
-    may = next(event for event in events["TestSite"] if event["deployment_end"] == "2026-05-06")
-    assert april["deployment_start"] == "2026-01-08"
+    april = next(
+        event
+        for event in events["TestSite"]
+        if event["deployment_event_end_date"] == "2026-04-24"
+    )
+    may = next(
+        event
+        for event in events["TestSite"]
+        if event["deployment_event_end_date"] == "2026-05-06"
+    )
+    assert april["deployment_event_start_date"] == "2026-01-08"
     assert april["device_count"] == 2
-    assert april["deployment_event_id"] == "source-event"
+    assert april["deployment_event_id"] == "UC_TestSite_20260424"
     assert may["device_count"] == 1
-    assert may["deployment_event_id"] == "curated-may-event"
+    assert may["deployment_event_id"] == "UC_TestSite_20260506"
 
     lookups = LookupTables(
         deployments=events,
         _deployment_rows_by_round=rows_by_round,
     )
-    assert [event["deployment_end"] for event in lookups.returned_rounds("TestSite")] == [
+    assert [
+        event["deployment_event_end_date"]
+        for event in lookups.returned_rounds("TestSite")
+    ] == [
         "2026-05-06",
         "2026-04-24",
     ]
-    assert [event["deployment_start"] for event in lookups.current_rounds("TestSite")] == [
+    assert [
+        event["deployment_event_start_date"]
+        for event in lookups.current_rounds("TestSite")
+    ] == [
         "2026-05-06"
     ]
     assert lookups.current_rounds("TestSite")[0]["deployment_event_id"] == ""
@@ -268,27 +403,34 @@ def test_adjacent_dates_do_not_merge_distinct_curated_events(tmp_path):
     rows = [
         placement(
             deployment_id="curated-one",
-            deployment_event_id="event-one",
+            deployment_event_id="UC_TestSite_20260424",
             deployment_end_date="2026-04-24",
         ),
         placement(
             deployment_id="curated-two",
-            deployment_event_id="event-two",
-            device_record_id="BD:ARU-1",
+            deployment_event_id="UC_TestSite_20260425",
             device_type="BD",
             device_id="ARU-1",
-            camera_id="",
             deployment_end_date="2026-04-25",
         ),
     ]
     path = tmp_path / "deployments.csv"
     write_csv(path, FIELDS, rows)
 
-    events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
+    events, rows_by_round = build_deployment_rounds(
+        [
+            deployment_event(),
+            deployment_event(
+                deployment_event_id="UC_TestSite_20260425",
+                deployment_event_end_date="2026-04-25",
+            ),
+        ],
+        load_device_deployments(path),
+    )
 
     assert {event["deployment_event_id"] for event in events["TestSite"]} == {
-        "event-one",
-        "event-two",
+        "UC_TestSite_20260424",
+        "UC_TestSite_20260425",
     }
     assert sorted(len(rows) for rows in rows_by_round.values()) == [1, 1]
 
@@ -298,19 +440,19 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         placement(),
         placement(
             deployment_id="dep-aru",
-            device_record_id="BD:ARU-1",
             device_type="BD",
             device_id="ARU-1",
             deployment_start_date="2026-03-04",
-            deployment_start_datetime="2026-03-04T10:00:00-08:00",
-            camera_id="",
             mounted_on="Tree",
             sensor_height_meters="1.5",
         ),
     ]
     path = tmp_path / "deployments.csv"
     write_csv(path, FIELDS, rows)
-    events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
+    events, rows_by_round = build_deployment_rounds(
+        [deployment_event()],
+        load_device_deployments(path),
+    )
     event = events["TestSite"][0]
     lookups = LookupTables(
         sites=[Site("Test Reserve", "TestSite", "TST")],
@@ -318,6 +460,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         wi_config={},
         deployments=events,
         _deployment_rows_by_round=rows_by_round,
+        deployments_by_id={row["deployment_id"]: row for row in rows},
     )
     lookups.activate_deployment_round(event["deployment_round_id"])
     common = {
@@ -335,6 +478,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         {
             **common,
             "device_label": "p1_ML",
+            "deployment_id": "dep-old-camera",
             "plot_number": 1,
             "device_type": "ML",
             "file_type": "image",
@@ -343,6 +487,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         {
             **common,
             "device_label": "p1_BD",
+            "deployment_id": "dep-aru",
             "plot_number": 1,
             "device_type": "BD",
             "file_type": "audio",
@@ -356,8 +501,8 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
             "site_name": "Test Reserve",
             "site_short_name": "TestSite",
             "site_code": "TST",
-            "deployment_start": event["deployment_start"],
-            "deployment_end": event["deployment_end"],
+            "deployment_event_start_date": event["deployment_event_start_date"],
+            "deployment_event_end_date": event["deployment_event_end_date"],
             "deployment_event_id": event["deployment_event_id"],
             "observer": "Tester",
         },
@@ -367,11 +512,14 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
 
     assert images[0]["start_date"] == "2026-01-08 00:00:00"
     assert images[0]["end_date"] == "2026-04-24 23:59:59"
-    assert images[0]["event_name"] == "2026JAN-2026APR"
+    assert images[0]["event_name"] == "UC_TestSite_20260424"
+    assert images[0]["subproject_design"] == SUBPROJECT_DESIGN
     assert images[0]["site_name"] == "Test Reserve"
     assert images[0]["site_short_name"] == "TestSite"
     assert images[0]["site_code"] == "TST"
     assert audio[0]["date_installed"] == "2026-03-04"
+    assert audio[0]["subproject_design"] == SUBPROJECT_DESIGN
+    assert audio[0]["mounted_on"] == "Tree"
     assert images[0]["elevation_m"] == "128"
     assert audio[0]["elevation_m"] == "128"
 
@@ -385,19 +533,25 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
     rows = [
         placement(),
         placement(
-            deployment_id="dep-current-camera",
+            deployment_id="UC_TestSite_plot1_ML_20260424-seq01",
+            deployment_sequence="1",
+            device_id="CAM-REPLACEMENT",
+            deployment_start_date="2026-04-23",
+        ),
+        placement(
+            deployment_id="",
             deployment_event_id="",
-            device_record_id="ML:CAM-CURRENT",
             device_id="CAM-CURRENT",
-            camera_id="CAM-CURRENT",
             deployment_start_date="2026-04-24",
-            deployment_start_datetime="2026-04-24T10:00:00-07:00",
             deployment_end_date="",
         ),
     ]
     path = tmp_path / "deployments.csv"
     write_csv(path, FIELDS, rows)
-    events, rows_by_round = build_deployment_rounds(load_device_deployments(path))
+    events, rows_by_round = build_deployment_rounds(
+        [deployment_event()],
+        load_device_deployments(path),
+    )
     lookups = LookupTables(
         sites=[Site("Test Reserve", "TestSite", "TST")],
         plot_names={"TestSite": {1: "One"}},
@@ -414,9 +568,15 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         assert window.site_short_name_edit.text() == "TestSite"
         assert window.site_code_edit.text() == "TST"
         assert window.deploy_event_combo.count() == 1
-        assert window.deploy_event_combo.currentData()["deployment_end"] == "2026-04-24"
+        assert (
+            window.deploy_event_combo.currentData()["deployment_event_end_date"]
+            == "2026-04-24"
+        )
         assert window.deploy_start_date.isReadOnly()
         assert window.deploy_end_date.isReadOnly()
+        checks = window.device_checkboxes[1]["ML"]
+        assert [checkbox.text() for _row, checkbox in checks] == ["seq00", "seq01"]
+        assert all(checkbox.isChecked() for _row, checkbox in checks)
         assert "Since 2026-04-24" in window.current_deployment_status_label.text()
         assert "1 device in the field" in window.current_deployment_status_label.text()
     finally:

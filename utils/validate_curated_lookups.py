@@ -25,7 +25,8 @@ def validate_curated_lookup_directory(lookup_dir: Path) -> str:
     )
     return (
         f"Valid curated lookup directory: {resolved}\n"
-        f"devices={result.devices}; deployments={result.deployments}\n"
+        f"deployments={result.deployments}; "
+        f"deployment_events={result.deployment_events}\n"
         f"sha256: {hashes}"
     )
 
@@ -33,8 +34,9 @@ def validate_curated_lookup_directory(lookup_dir: Path) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate curated devices.csv and deployments.csv together with the "
-            "complete runtime lookup snapshot. This command is read-only."
+            "Validate curated deployment_events.csv and deployments.csv "
+            "together with the complete runtime lookup snapshot. "
+            "This command is read-only."
         )
     )
     parser.add_argument(

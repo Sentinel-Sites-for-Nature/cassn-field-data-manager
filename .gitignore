@@ -76,6 +76,7 @@ scratch/
 
 # Local scratch and generated output
 output/
+outputs/
 tmp/
 
 # Local agent operating instructions

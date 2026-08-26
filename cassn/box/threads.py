@@ -148,7 +148,7 @@ class BoxUploadThread(QThread):
 
             # Build nested path: root → year → reserve → deployment
             target_folder_id = self.box_config.field_data_folder_id
-            year = self.metadata["deployment_end"][:4]
+            year = self.metadata["deployment_event_end_date"][:4]
             deploy_name = self.deployment_folder.name
 
             year_id = storage.find_or_create_folder(target_folder_id, year)
@@ -423,7 +423,7 @@ class BoxVerifyThread(QThread):
                 self.finished.emit(False, f"Site '{site_name}' not in sites.csv", [])
                 return
 
-            year = self.metadata.get("deployment_end", "")[:4]
+            year = self.metadata.get("deployment_event_end_date", "")[:4]
             reserve_folder_name = sanitize_box_folder_name(site_name)
             deploy_name = self.deployment_folder.name
 
@@ -562,7 +562,7 @@ class FixityCheckThread(QThread):
                 self.finished.emit(False, f"Site '{site_name}' not in sites.csv.", [])
                 return
 
-            year = self.metadata.get("deployment_end", "")[:4]
+            year = self.metadata.get("deployment_event_end_date", "")[:4]
             reserve_folder_name = sanitize_box_folder_name(site_name)
             deploy_name = self.deployment_folder.name
 

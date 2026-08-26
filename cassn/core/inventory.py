@@ -7,8 +7,10 @@ and QC check reads from it. This module owns the parts of that
 process that are pure given their inputs, so they can be tested without a GUI or
 a physical card:
 
-* :func:`build_renamed_filename` — the single source of truth for the
-  ``{org}_{site_short_name}_plot{n}_{devcode}_{YYYYMMDD}_{seq}{ext}`` naming convention.
+* :func:`build_deployment_filename` — the prospective naming rule that keeps
+  every media prefix identical to its selected deployment ID.
+* :func:`build_renamed_filename` — the retained historical naming helper used
+  by older records and maintenance code.
 * :func:`build_inventory_record` — assembles one inventory dict from the four
   metadata sources (EXIF, Reconyx/ExifTool, CONFIG.TXT, WAV comment) plus plot
   and SoundHub lookups, applying the exact source-precedence the original used.
@@ -20,7 +22,7 @@ a physical card:
 
 The stateful parts — walking the card, incrementing the per-device sequence and
 event counters, hashing, copying, and emitting QC findings — stay in the wizard,
-which threads its loop-carried counters through :func:`build_renamed_filename`
+which threads its loop-carried counters through :func:`build_deployment_filename`
 and :func:`build_inventory_record`.
 """
 
@@ -34,6 +36,7 @@ from pathlib import Path, PurePosixPath
 from cassn.core.audio_metadata import hz_to_khz
 from cassn.core.classification import classify_file
 from cassn.core.quality_control import append_qc_report, qc_path_for
+from cassn.lookups import normalize_deployment_event_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +330,23 @@ def build_renamed_filename(
     return f"{org}_{site_short_name}_plot{plot_num}_{dev_code}_{date_str}_{seq_str}{file_ext}"
 
 
+def build_deployment_filename(
+    deployment_id: str,
+    seq_str: str,
+    file_ext: str,
+) -> str:
+    """Build a prospective media filename from an exact deployment ID.
+
+    Historical files keep the names written by their original app version. New
+    ingest uses this helper so a `-seqNN` deployment discriminator is preserved in
+    every media and CONFIG filename.
+    """
+    deployment_id = str(deployment_id or "").strip()
+    if not deployment_id:
+        raise ValueError("deployment_id is required for a new media filename")
+    return f"{deployment_id}_{seq_str}{file_ext}"
+
+
 # ---------------------------------------------------------------------------
 # Per-file inventory record
 # ---------------------------------------------------------------------------
@@ -340,6 +360,7 @@ def build_inventory_record(
     dev_code: str,
     device_label: str,
     device_id: str,
+    deployment_id: str,
     file_type: str,
     file_size_bytes: int,
     file_hash_sha256: str,
@@ -385,6 +406,7 @@ def build_inventory_record(
         'device_type': dev_code,
         'device_label': device_label,
         'device_id': device_id,
+        'deployment_id': deployment_id,
         # Image identity comes from the selected curated device placement;
         # audio rows leave this blank and use the AudioMoth device_id instead.
         'camera_id': device_id if file_type == 'image' else '',
@@ -498,6 +520,7 @@ def generate_session_summary(
     devices: list,
 ) -> Path:
     """Write ``deployment_summary.txt`` (a human-readable digest) and return its path."""
+    metadata = normalize_deployment_event_metadata(metadata)
     lines = []
     lines.append("=" * 60)
     lines.append("CASSN DEPLOYMENT SUMMARY")
@@ -508,8 +531,14 @@ def generate_session_summary(
     lines.append(f"Site code:        {metadata.get('site_code', '?')}")
     lines.append(f"Organization:     {metadata.get('organization', '?')}")
     lines.append(f"Observer:         {metadata.get('observer', '?')}")
-    lines.append(f"Deployment event start: {metadata.get('deployment_start', '?')}")
-    lines.append(f"Deployment event end:   {metadata.get('deployment_end', '?')}")
+    lines.append(
+        "Deployment event start: "
+        f"{metadata.get('deployment_event_start_date', '?')}"
+    )
+    lines.append(
+        "Deployment event end:   "
+        f"{metadata.get('deployment_event_end_date', '?')}"
+    )
     lines.append("")
 
     # Device summary

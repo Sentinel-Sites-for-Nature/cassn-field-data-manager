@@ -36,7 +36,10 @@ from cassn.core import hashing
 # A deployment id is an identity (org, site, plot, device) plus the date the
 # device was retrieved. The two halves matter separately during validation: the
 # identity must agree with the filenames, the date must not be assumed to.
-_DEPLOYMENT_ID_RE = re.compile(rf"^(?P<identity>.+_{SOUNDHUB_DEVICE_TYPE})_(?P<date>\d{{8}})$")
+_DEPLOYMENT_ID_RE = re.compile(
+    rf"^(?P<identity>.+_{SOUNDHUB_DEVICE_TYPE})_(?P<date>\d{{8}})"
+    r"(?:-seq\d{2,})?$"
+)
 
 
 class SoundHubStagingError(Exception):
@@ -93,7 +96,8 @@ def validate_deployment_id(rows: list[dict]) -> str:
         raise SoundHubStagingError(
             f"deployment_id {deployment_id!r} is not a well-formed "
             f"{SOUNDHUB_DEVICE_TYPE} deployment id "
-            f"(expected <org>_<site>_plot<n>_{SOUNDHUB_DEVICE_TYPE}_<YYYYMMDD>). "
+            f"(expected <org>_<site>_plot<n>_{SOUNDHUB_DEVICE_TYPE}_<YYYYMMDD>"
+            "[-seqNN]). "
             "Only bird recorders are submitted to SoundHub."
         )
     identity = match.group("identity")

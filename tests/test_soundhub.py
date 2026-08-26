@@ -177,6 +177,12 @@ def test_validate_returns_the_shared_id():
     assert validate_deployment_id(rows) == "UC_QuailRidge_plot1_BD_20260118"
 
 
+def test_validate_accepts_redeployment_sequence_suffix():
+    deployment_id = "UC_QuailRidge_plot1_BD_20260118-seq01"
+    rows = [audio_row(deployment_id, "00001")]
+    assert validate_deployment_id(rows) == deployment_id
+
+
 def test_validate_rejects_mixed_ids():
     rows = [
         audio_row("UC_QuailRidge_plot1_BD_20260118", "00001"),

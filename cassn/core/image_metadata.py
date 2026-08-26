@@ -163,7 +163,7 @@ def _parse_reconyx_tags(tags: dict) -> dict:
     result["battery_voltage_avg"] = str(tags.get("BatteryVoltageAvg", ""))
     result["battery_type"] = tags.get("BatteryType", "")
     # The camera's hardware serial, straight from the Reconyx MakerNote. Captured
-    # for provenance and cross-checked against the cameras.csv camera_id in QC.
+    # for provenance and cross-checked against deployments.csv device_id in QC.
     result["camera_serial_exif"] = str(tags.get("SerialNumber", ""))
 
     trigger, pos, total = _reconyx_sequence_from_exiftool_tags(tags)

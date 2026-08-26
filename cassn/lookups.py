@@ -218,23 +218,51 @@ def load_plot_coords(csv_path: Path) -> dict:
     return result
 
 
-DEVICE_REQUIRED_FIELDS = frozenset({
-    "device_record_id",
-    "device_id",
-    "device_type",
+DEPLOYMENT_EVENT_REQUIRED_FIELDS = frozenset({
+    "deployment_event_id",
+    "site_short_name",
+    "site_name",
+    "deployment_event_start_date",
+    "deployment_event_end_date",
 })
 
 DEVICE_DEPLOYMENT_REQUIRED_FIELDS = frozenset({
     "deployment_id",
     "deployment_event_id",
+    "deployment_sequence",
     "site_short_name",
     "plot_number",
     "device_type",
-    "device_record_id",
     "device_id",
     "deployment_start_date",
     "deployment_end_date",
+    "identifier_policy",
+    "feature_type",
+    "mounted_on",
+    "sensor_height_meters",
 })
+RUNTIME_DEVICE_TYPES = frozenset({"ML", "SA", "BD", "BT"})
+
+
+def normalize_deployment_event_metadata(metadata: dict | None) -> dict:
+    """Return event metadata using the current, explicit event-date keys.
+
+    Historical ``session.json`` and ``deployment_event_record.json`` files used
+    the ambiguous keys ``deployment_start`` and ``deployment_end``.  Those
+    artifacts are immutable, so readers normalize them at ingress while every
+    current runtime and writer uses only ``deployment_event_start_date`` and
+    ``deployment_event_end_date``.
+    """
+    normalized = dict(metadata or {})
+    aliases = (
+        ("deployment_event_start_date", "deployment_start"),
+        ("deployment_event_end_date", "deployment_end"),
+    )
+    for current, legacy in aliases:
+        if not normalized.get(current) and normalized.get(legacy):
+            normalized[current] = normalized[legacy]
+        normalized.pop(legacy, None)
+    return normalized
 
 
 def _load_required_csv(csv_path: Path, required_fields: frozenset[str]) -> list[dict]:
@@ -261,84 +289,212 @@ def _load_required_csv(csv_path: Path, required_fields: frozenset[str]) -> list[
     return rows
 
 
-def load_devices(csv_path: Path) -> list[dict]:
-    """Load the curated physical-device inventory."""
-    return _load_required_csv(csv_path, DEVICE_REQUIRED_FIELDS)
+def load_deployment_events(csv_path: Path) -> list[dict]:
+    """Load the canonical deployment-event identities and date intervals."""
+    rows = _load_required_csv(csv_path, DEPLOYMENT_EVENT_REQUIRED_FIELDS)
+    seen_ids: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        event_id = row["deployment_event_id"]
+        if not event_id or not row["site_short_name"] or not row["site_name"]:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has a blank event or site identity"
+            )
+        if event_id in seen_ids:
+            raise LookupSchemaError(
+                f"{csv_path.name} contains duplicate deployment_event_id: {event_id}"
+            )
+        seen_ids.add(event_id)
+
+        try:
+            start = date.fromisoformat(row["deployment_event_start_date"])
+            end = date.fromisoformat(row["deployment_event_end_date"])
+        except (TypeError, ValueError) as exc:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has an invalid event date; "
+                "expected YYYY-MM-DD"
+            ) from exc
+        if end < start:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has an end date before its start date"
+            )
+        if not event_id.endswith(end.strftime("%Y%m%d")):
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} deployment_event_id does not "
+                "end with its deployment_event_end_date"
+            )
+    return rows
 
 
 def load_device_deployments(csv_path: Path) -> list[dict]:
-    """Load curated device-placement intervals."""
+    """Load curated deployment intervals and validate prospective IDs."""
     rows = _load_required_csv(csv_path, DEVICE_DEPLOYMENT_REQUIRED_FIELDS)
     for row_number, row in enumerate(rows, start=2):
         try:
-            int(row["plot_number"])
-            date.fromisoformat(row["deployment_start_date"])
+            plot_number = int(row["plot_number"])
+            start = date.fromisoformat(row["deployment_start_date"])
         except (TypeError, ValueError) as exc:
             raise LookupSchemaError(
                 f"{csv_path.name} row {row_number} has an invalid plot or start date"
             ) from exc
+        if plot_number < 1:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has an invalid plot number"
+            )
+        if not row["site_short_name"] or not row["device_type"]:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has a blank site or device type"
+            )
+        if row["device_type"] not in RUNTIME_DEVICE_TYPES:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has unsupported device_type: "
+                f"{row['device_type']}"
+            )
+
+        try:
+            sequence = int(row["deployment_sequence"])
+        except (TypeError, ValueError) as exc:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} has an invalid deployment_sequence"
+            ) from exc
+        if sequence < 0 or str(sequence) != row["deployment_sequence"]:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} deployment_sequence must be a "
+                "canonical non-negative integer"
+            )
+
         if row["deployment_end_date"]:
             try:
-                date.fromisoformat(row["deployment_end_date"])
+                end = date.fromisoformat(row["deployment_end_date"])
             except ValueError as exc:
                 raise LookupSchemaError(
                     f"{csv_path.name} row {row_number} has an invalid end date"
                 ) from exc
+            if end < start:
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} has an end date before its start date"
+                )
+            if not row["deployment_id"]:
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} is closed without a deployment_id"
+                )
+        else:
+            if row["deployment_id"] or row["deployment_event_id"]:
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} assigns an identifier to an open deployment"
+                )
     return rows
 
 
+def deployment_id_matches_contract(
+    row: dict,
+    *,
+    sequence_suffix_required: bool = False,
+) -> bool:
+    """Whether a closed prospective row follows the canonical ID formula."""
+    if not row.get("deployment_id") or not row.get("deployment_end_date"):
+        return False
+    try:
+        plot_number = int(row["plot_number"])
+        sequence = int(row["deployment_sequence"])
+        end_token = date.fromisoformat(row["deployment_end_date"]).strftime("%Y%m%d")
+    except (KeyError, TypeError, ValueError):
+        return False
+    suffix = f"-seq{sequence:02d}" if sequence_suffix_required else ""
+    expected_tail = (
+        f"_{row['site_short_name']}_plot{plot_number}_{row['device_type']}_"
+        f"{end_token}{suffix}"
+    )
+    deployment_id = row["deployment_id"]
+    return deployment_id.endswith(expected_tail) and bool(
+        deployment_id[: -len(expected_tail)]
+    )
+
+
+def deployment_storage_label(row: dict) -> str:
+    """Return the stable raw-data directory label for one deployment row."""
+    base = f"p{int(row['plot_number'])}_{row['device_type']}"
+    sequence = int(row.get("deployment_sequence") or 0)
+    return base if sequence == 0 else f"{base}_seq{sequence:02d}"
+
+
 def build_deployment_rounds(
-    rows: list[dict],
+    event_rows: list[dict],
+    placement_rows: list[dict],
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
-    """Build selectable events from explicitly curated placement identifiers.
+    """Build selectable events from the canonical event table.
 
-    A closed placement belongs to exactly the ``deployment_event_id`` stored in
-    ``deployments.csv``. No date-gap clustering, majority vote, or identifier
-    reconstruction occurs here. Open placements have no event ID and are grouped
-    only by their exact start date for the read-only field-inventory display.
+    ``deployment_events.csv`` supplies every closed event's ID, site, and dates.
+    ``deployments.csv`` only supplies the device rows joined by event ID. Open
+    placements have no event ID and remain grouped by exact start date solely
+    for the read-only field-inventory display.
     """
-    by_site: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        by_site[row["site_short_name"]].append(row)
+    canonical_events = {row["deployment_event_id"]: row for row in event_rows}
+    closed_rows_by_event: dict[str, list[dict]] = defaultdict(list)
+    open_rows_by_site_start: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in placement_rows:
+        event_id = row["deployment_event_id"]
+        if event_id:
+            event = canonical_events.get(event_id)
+            if event is None:
+                raise LookupSchemaError(
+                    f"deployments.csv references unknown deployment_event_id: {event_id}"
+                )
+            if row["site_short_name"] != event["site_short_name"]:
+                raise LookupSchemaError(
+                    "deployments.csv site_short_name disagrees with deployment_events.csv "
+                    f"for {event_id}"
+                )
+            closed_rows_by_event[event_id].append(row)
+        elif not row["deployment_end_date"]:
+            open_rows_by_site_start[
+                (row["site_short_name"], row["deployment_start_date"])
+            ].append(row)
 
-    events_by_site: dict[str, list[dict]] = {}
+    events_by_site: dict[str, list[dict]] = defaultdict(list)
     rows_by_round: dict[str, list[dict]] = {}
-    for site_short_name, site_rows in by_site.items():
-        grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        for row in site_rows:
-            if row["deployment_end_date"]:
-                grouped[("closed", row["deployment_event_id"])].append(row)
-            else:
-                grouped[("open", row["deployment_start_date"])].append(row)
+    for event_row in event_rows:
+        event_id = event_row["deployment_event_id"]
+        site_short_name = event_row["site_short_name"]
+        round_rows = closed_rows_by_event[event_id]
+        if not round_rows:
+            continue
+        round_id = f"{site_short_name}:closed:{event_id}"
+        events_by_site[site_short_name].append({
+            "deployment_round_id": round_id,
+            "deployment_event_id": event_id,
+            "deployment_event_start_date": event_row["deployment_event_start_date"],
+            "deployment_event_end_date": event_row["deployment_event_end_date"],
+            "deployment_count": len(round_rows),
+            "device_count": len(round_rows),  # historical session/UI compatibility
+        })
+        rows_by_round[round_id] = round_rows
 
-        site_events: list[dict] = []
-        for (state, group_id), round_rows in grouped.items():
-            start = min(r["deployment_start_date"] for r in round_rows)
-            end_dates = [r["deployment_end_date"] for r in round_rows if r["deployment_end_date"]]
-            end = max(end_dates) if end_dates else ""
-            round_id = f"{site_short_name}:{state}:{group_id}"
-            event = {
-                "deployment_round_id": round_id,
-                "deployment_event_id": group_id if state == "closed" else "",
-                "deployment_start": start,
-                "deployment_end": end,
-                "device_count": len(round_rows),
-            }
-            site_events.append(event)
-            rows_by_round[round_id] = round_rows
+    for (site_short_name, start), round_rows in open_rows_by_site_start.items():
+        round_id = f"{site_short_name}:open:{start}"
+        events_by_site[site_short_name].append({
+            "deployment_round_id": round_id,
+            "deployment_event_id": "",
+            "deployment_event_start_date": start,
+            "deployment_event_end_date": "",
+            "deployment_count": len(round_rows),
+            "device_count": len(round_rows),  # historical session/UI compatibility
+        })
+        rows_by_round[round_id] = round_rows
 
+    for site_short_name, site_events in events_by_site.items():
         # A download is normally for returned cards, so put the newest closed
         # round first and list currently deployed/open rounds afterward.
         events_by_site[site_short_name] = sorted(
             site_events,
             key=lambda event: (
-                bool(event["deployment_end"]),
-                event["deployment_end"] or event["deployment_start"],
+                bool(event["deployment_event_end_date"]),
+                event["deployment_event_end_date"]
+                or event["deployment_event_start_date"],
             ),
             reverse=True,
         )
 
-    return events_by_site, rows_by_round
+    return dict(events_by_site), rows_by_round
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +504,8 @@ def build_deployment_rounds(
 # Canonical filenames inside the lookup-tables directory.
 SITES_CSV = "sites.csv"
 PLOTS_CSV = "plots.csv"
-DEVICES_CSV = "devices.csv"
 DEPLOYMENTS_CSV = "deployments.csv"
+DEPLOYMENT_EVENTS_CSV = "deployment_events.csv"
 SOUNDHUB_JSON = "soundhub_config.json"
 WI_CONFIG_JSON = "wi_config.json"
 PROGRAM_CONFIG_JSON = "program_config.json"
@@ -360,13 +516,18 @@ PROGRAM_CONFIG_JSON = "program_config.json"
 BOX_MANAGED_FILENAMES = frozenset({
     SITES_CSV,
     PLOTS_CSV,
-    DEVICES_CSV,
     DEPLOYMENTS_CSV,
+    DEPLOYMENT_EVENTS_CSV,
     SOUNDHUB_JSON,
     WI_CONFIG_JSON,
     PROGRAM_CONFIG_JSON,
     "motus.csv",
 })
+
+# Exact legacy filenames removed from the runtime contract. A successful Box
+# refresh prunes these from the local cache so stale copies cannot be mistaken
+# for active inputs.
+RETIRED_LOOKUP_FILENAMES = frozenset({"devices.csv", "cameras.csv", "ARUs.csv"})
 
 
 @dataclass
@@ -381,8 +542,10 @@ class LookupTables:
     plot_names: dict = field(default_factory=dict)
     plot_metadata: dict = field(default_factory=dict)
     soundhub_config: dict = field(default_factory=dict)
-    devices: list[dict] = field(default_factory=list)
+    deployment_events: list[dict] = field(default_factory=list)
     device_deployments: list[dict] = field(default_factory=list)
+    active_deployment_rows: list[dict] = field(default_factory=list)
+    deployments_by_id: dict[str, dict] = field(default_factory=dict)
     arus: dict = field(default_factory=dict)
     cameras: dict = field(default_factory=dict)
     wi_config: dict = field(default_factory=dict)
@@ -403,12 +566,19 @@ class LookupTables:
         self.sites = load_sites(data_dir / SITES_CSV)
         self.plot_names, self.plot_metadata = load_plot_names(data_dir / PLOTS_CSV)
         self.soundhub_config = load_soundhub_config(data_dir / SOUNDHUB_JSON)
-        self.devices = load_devices(data_dir / DEVICES_CSV)
+        self.deployment_events = load_deployment_events(data_dir / DEPLOYMENT_EVENTS_CSV)
         self.device_deployments = load_device_deployments(data_dir / DEPLOYMENTS_CSV)
         self.deployments, self._deployment_rows_by_round = build_deployment_rounds(
-            self.device_deployments
+            self.deployment_events,
+            self.device_deployments,
         )
         self.active_deployment_round_id = ""
+        self.active_deployment_rows = []
+        self.deployments_by_id = {
+            row["deployment_id"]: row
+            for row in self.device_deployments
+            if row.get("deployment_id")
+        }
         self.arus = {}
         self.cameras = {}
         self.wi_config = load_wi_config(data_dir / WI_CONFIG_JSON)
@@ -420,19 +590,22 @@ class LookupTables:
         if round_id not in self._deployment_rows_by_round:
             raise LookupSchemaError(f"Unknown deployment round: {round_id}")
 
+        self.active_deployment_rows = list(self._deployment_rows_by_round[round_id])
         chosen: dict[tuple, dict] = {}
-        for row in self._deployment_rows_by_round[round_id]:
+        for row in self.active_deployment_rows:
             key = (
                 row["site_short_name"],
                 int(row["plot_number"]),
                 row["device_type"],
             )
-            if key in chosen:
-                raise LookupSchemaError(
-                    "Curated deployment event contains duplicate site/plot/device slots: "
-                    f"{round_id} {key}"
-                )
-            chosen[key] = row
+            # Compatibility views are only for older slot-keyed code. Prefer
+            # the earliest deployment in a slot; ingest and metadata use the
+            # exact deployment ID and never rely on this lossy view.
+            previous = chosen.get(key)
+            if previous is None or int(row.get("deployment_sequence") or 0) < int(
+                previous.get("deployment_sequence") or 0
+            ):
+                chosen[key] = row
 
         cameras: dict[tuple, dict] = {}
         arus: dict[tuple, dict] = {}
@@ -440,7 +613,7 @@ class LookupTables:
             if row["device_type"] in {"ML", "SA"}:
                 cameras[key] = {
                     **row,
-                    "camera_id": row.get("camera_id") or row.get("device_id", ""),
+                    "camera_id": row.get("device_id", ""),
                 }
             elif row["device_type"] in {"BD", "BT"}:
                 arus[key] = row
@@ -452,8 +625,39 @@ class LookupTables:
     def clear_active_deployment_round(self) -> None:
         """Clear event-scoped device views when no valid round is selected."""
         self.active_deployment_round_id = ""
+        self.active_deployment_rows = []
         self.cameras = {}
         self.arus = {}
+
+    def deployment_for_id(self, deployment_id: str) -> dict:
+        """Return one exact deployment row, or an empty mapping when absent."""
+        return self.deployments_by_id.get(deployment_id, {})
+
+    def active_rows_for_slot(self, site: str, plot_number: int, device_type: str) -> list[dict]:
+        """Return sequence-ordered active rows for a plot/device slot."""
+        return sorted(
+            (
+                row
+                for row in self.active_deployment_rows
+                if row["site_short_name"] == site
+                and int(row["plot_number"]) == int(plot_number)
+                and row["device_type"] == device_type
+            ),
+            key=lambda row: int(row.get("deployment_sequence") or 0),
+        )
+
+    def active_deployment_for_label(self, device_label: str) -> dict:
+        """Resolve a raw-data label to its exact active deployment row."""
+        matches = [
+            row
+            for row in self.active_deployment_rows
+            if deployment_storage_label(row) == device_label
+        ]
+        if len(matches) > 1:
+            raise LookupSchemaError(
+                f"Active event maps {device_label} to multiple deployment rows"
+            )
+        return matches[0] if matches else {}
 
     def available_device_keys(self, round_id: str | None = None) -> set[tuple]:
         """Return ``(site, plot, type)`` keys available in a selected round."""
@@ -472,7 +676,7 @@ class LookupTables:
         return [
             event
             for event in self.deployments.get(site_short_name, [])
-            if event.get("deployment_end")
+            if event.get("deployment_event_end_date")
         ]
 
     def current_rounds(self, site_short_name: str) -> list[dict]:
@@ -480,7 +684,7 @@ class LookupTables:
         return [
             event
             for event in self.deployments.get(site_short_name, [])
-            if not event.get("deployment_end")
+            if not event.get("deployment_event_end_date")
         ]
 
     # -- canonical site views --------------------------------------------

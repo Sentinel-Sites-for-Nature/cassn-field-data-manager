@@ -78,6 +78,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS  # noqa: E402
+from cassn.lookups import normalize_deployment_event_metadata  # noqa: E402
 
 # The two provenance-bearing CSVs and their canonical column schemas. Reusing the
 # app's field lists keeps the rewritten header/column order identical to what the
@@ -136,19 +137,23 @@ def parse_override(value: str, assume_tz: ZoneInfo) -> datetime:
 
 
 def load_deployment_metadata(dep: Path) -> dict:
-    """Return ``{reserve_name, deployment_end, observer, ...}`` for a local deployment."""
+    """Return normalized event metadata for a local deployment."""
     rec = dep / "deployment_event_record.json"
     if rec.exists():
         try:
-            info = json.loads(rec.read_text()).get("deployment_info", {})
-            if info.get("reserve_name"):
+            info = normalize_deployment_event_metadata(
+                json.loads(rec.read_text()).get("deployment_info", {})
+            )
+            if info.get("site_name") or info.get("reserve_name"):
                 return info
         except Exception:
             pass
     sess = dep / "session.json"
     if sess.exists():
         try:
-            return json.loads(sess.read_text()).get("metadata", {})
+            return normalize_deployment_event_metadata(
+                json.loads(sess.read_text()).get("metadata", {})
+            )
         except Exception:
             pass
     return {}
@@ -187,10 +192,14 @@ def process_local(dep: Path, args, assume_tz: ZoneInfo, box_config) -> bool:
         return False
 
     meta = load_deployment_metadata(dep)
-    reserve, deployment_end = meta.get("reserve_name"), meta.get("deployment_end")
+    reserve = meta.get("site_name") or meta.get("reserve_name")
+    deployment_end = meta.get("deployment_event_end_date")
     observer = meta.get("observer", "")
     if not reserve or not deployment_end:
-        print("  ERROR: no reserve_name/deployment_end in deployment_event_record.json / session.json — skipped.")
+        print(
+            "  ERROR: no site name/deployment_event_end_date in "
+            "deployment_event_record.json / session.json — skipped."
+        )
         return False
 
     if args.upload_datetime:

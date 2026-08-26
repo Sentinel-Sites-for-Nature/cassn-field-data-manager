@@ -3,8 +3,8 @@
 Helper scripts for maintenance and data recovery tasks.
 
 The active lookup contract uses `site_name,site_short_name,site_code` in
-`sites.csv`; `plots.csv` and curated device-level `deployments.csv` join by
-`site_short_name`. `devices.csv` has no site key. Retired `cameras.csv`,
+`sites.csv`; `plots.csv` and curated `deployments.csv` join by
+`site_short_name`. Retired `devices.csv`, `cameras.csv`,
 `ARUs.csv`, and event-only `deployments.csv` are not app inputs.
 
 ## `validate_curated_lookups.py`
@@ -15,7 +15,7 @@ Read-only validation for a complete candidate runtime lookup directory:
 .venv/bin/python utils/validate_curated_lookups.py /path/to/lookup_directory
 ```
 
-The command validates both curated CSVs, their event/device relationships, and
+The command validates both curated CSVs, their event/deployment relationships, and
 their authoritative site/plot references. It prints row counts and SHA-256
 hashes. It does not authenticate, publish, install, copy, or modify anything.
 If the path is omitted it checks the normal local lookup cache.
@@ -185,110 +185,6 @@ If the deployment folder already exists locally, the script fails and does not o
   or `deployment_event_record.json` back to Box
 - Writes `recovery_report.json` even when the run completes with failures
 - Uses `local_data/plots.csv` for plot-label lookup; `example_lookups/` files are templates only
-
----
-
-## `generate_wi_deployments.py`
-
-Generates Wildlife Insights deployment CSVs from CASSN deployment folders.
-
-You can use it two ways:
-- scan Box for deployment folders and generate WI CSVs in bulk, then upload them back to Box
-- or process one local deployment folder for testing
-
-For each deployment event, the script writes two CSVs into a `WI_metadata/`
-subfolder:
-
-- `wildlife_insights_ML_deployments.csv` — one row per ML (parallel) camera plot
-- `wildlife_insights_SA_deployments.csv` — one row per SA (downward) camera plot
-
-### When to use
-
-- Run this after a deployment has already been uploaded to Box and you need the
-  WI deployment CSVs.
-- Use the local mode if you want to test one deployment folder before doing a
-  broader backfill.
-- If WI CSVs already exist in a deployment folder, the script skips that folder
-  unless you use `--force`.
-
-### Requirements
-
-```bash
-pip install box-sdk-gen
-```
-
-No extra dependencies beyond `box-sdk-gen`.
-
-### Setup
-
-This script depends on two local files in `local_data/`. These are gitignored on
-purpose because they contain project IDs and camera serial numbers you do not
-want committed.
-
-#### 1. `local_data/cameras.csv`
-
-Maps each site + plot + camera type to the camera used there, plus the few WI
-fields this script needs. The script writes a skeleton from `local_data/plots.csv`
-on first run when the file is absent, leaving `camera_id` and `feature_type`
-blank for you to fill in.
-
-#### 2. `local_data/wi_config.json`
-
-Stores WI project IDs and a few deployment-level defaults. Copy the template and
-fill in your values:
-
-```bash
-cp example_lookups/wi_config.json local_data/wi_config.json
-```
-
-To find your WI project ID: log in to [app.wildlifeinsights.org](https://app.wildlifeinsights.org),
-open the project, and copy the number from the URL:
-`wildlifeinsights.org/manage/projects/XXXXX`
-
-### Run — Box mode (all deployments)
-
-```bash
-python3 utils/generate_wi_deployments.py
-```
-
-Traverses the Box deployment folders, downloads the deployment JSON files it
-needs, generates the WI CSVs, and uploads them back to a `WI_metadata/`
-subfolder in Box.
-
-### Run — local mode (single deployment)
-
-```bash
-python3 utils/generate_wi_deployments.py --local PATH
-```
-
-Processes one local deployment folder. Writes WI CSVs to a `WI_metadata/` subfolder
-inside that folder. Useful for testing before running against Box.
-
-Example:
-
-```bash
-python3 utils/generate_wi_deployments.py --local '/Volumes/G-DRIVE ArmorATD/2026/UC_QuailRidge_20260108'
-```
-
-### Output
-
-For each deployment event, the script creates or updates:
-
-```text
-<deployment-folder>/
-└── WI_metadata/
-    ├── wildlife_insights_ML_deployments.csv
-    └── wildlife_insights_SA_deployments.csv
-```
-
-### Notes
-
-- Authenticates using `~/.cassn_credentials/box_tokens.json` — no separate authentication step needed
-- Only downloads `deployment_event_record.json` from Box; media files are never downloaded
-- Audio device types (`BD`, `BT`) are ignored
-- Missing `wi_config.json` causes the script to fail before writing output
-- Missing `cameras.csv` causes warnings and blank camera-specific fields
-- Existing WI CSVs are skipped unless you use `--force`
 
 ---
 

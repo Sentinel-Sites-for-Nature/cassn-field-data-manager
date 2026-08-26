@@ -116,8 +116,8 @@ from cassn.core.file_transfer import (
 )
 from cassn.core.inventory import (
     SESSION_SCHEMA_VERSION,
+    build_deployment_filename,
     build_inventory_record,
-    build_renamed_filename,
     deduplicate_exact_storage_entries,
     generate_session_summary,
     index_inventory_by_storage_relpath,
@@ -149,7 +149,11 @@ from cassn.core.quality_control import (
 )
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
-from cassn.lookups import LookupTables
+from cassn.lookups import (
+    LookupTables,
+    deployment_storage_label,
+    normalize_deployment_event_metadata,
+)
 
 
 # How often, at most, to persist session.json from inside the copy loop. The save
@@ -393,13 +397,15 @@ class FieldDataWizard(QMainWindow):
         list_widget = QListWidget()
         for s in sessions:
             if s["status"] == "ok":
-                meta = s["data"].get("metadata", {})
+                meta = normalize_deployment_event_metadata(
+                    s["data"].get("metadata", {})
+                )
                 statuses = s["data"].get("device_statuses", {})
                 total = len(statuses)
                 completed = sum(1 for v in statuses.values() if v.get("status") in ("Complete", "Skipped"))
                 site_name = meta.get("site_name") or meta.get("reserve_name", "Unknown Site")
-                start = meta.get("deployment_start", "?")
-                end = meta.get("deployment_end", "?")
+                start = meta.get("deployment_event_start_date", "?")
+                end = meta.get("deployment_event_end_date", "?")
                 label = f"✓  {site_name}  |  {start} → {end}  |  {completed}/{total} devices done"
             else:
                 folder_name = s["path"].parent.name
@@ -441,7 +447,9 @@ class FieldDataWizard(QMainWindow):
 
     def restore_session(self, session_data):
         """Restore app state from a saved session dict."""
-        self.metadata = session_data.get("metadata", {})
+        self.metadata = normalize_deployment_event_metadata(
+            session_data.get("metadata", {})
+        )
         migrated_site_metadata = False
         if "site_short_name" not in self.metadata:
             # One-time migration for sessions created before the canonical site
@@ -503,22 +511,32 @@ class FieldDataWizard(QMainWindow):
             same_round = round_id and event["deployment_round_id"] == round_id
             same_event = event_id and event["deployment_event_id"] == event_id
             same_dates = (
-                event["deployment_start"] == self.metadata.get("deployment_start", "")
-                and event["deployment_end"] == self.metadata.get("deployment_end", "")
+                event["deployment_event_start_date"]
+                == self.metadata.get("deployment_event_start_date", "")
+                and event["deployment_event_end_date"]
+                == self.metadata.get("deployment_event_end_date", "")
             )
             if same_round or same_event or same_dates:
                 self.deploy_event_combo.setCurrentIndex(combo_index)
                 self.on_deploy_event_changed(combo_index)
                 self.metadata["deployment_round_id"] = event["deployment_round_id"]
                 self.metadata["deployment_event_id"] = event["deployment_event_id"]
-                self.metadata["deployment_start"] = event["deployment_start"]
-                self.metadata["deployment_end"] = event["deployment_end"]
+                self.metadata["deployment_event_start_date"] = event[
+                    "deployment_event_start_date"
+                ]
+                self.metadata["deployment_event_end_date"] = event[
+                    "deployment_event_end_date"
+                ]
                 break
 
-        start = QDate.fromString(self.metadata.get("deployment_start", ""), "yyyy-MM-dd")
+        start = QDate.fromString(
+            self.metadata.get("deployment_event_start_date", ""), "yyyy-MM-dd"
+        )
         if start.isValid():
             self.deploy_start_date.setDate(start)
-        end = QDate.fromString(self.metadata.get("deployment_end", ""), "yyyy-MM-dd")
+        end = QDate.fromString(
+            self.metadata.get("deployment_event_end_date", ""), "yyyy-MM-dd"
+        )
         if end.isValid():
             self.deploy_end_date.setDate(end)
 
@@ -535,9 +553,10 @@ class FieldDataWizard(QMainWindow):
             self.observer_other_edit.show()
 
         self.clear_all_devices()
-        for plot_num, _plot_label, dev_code, _dev_label in self.devices:
+        for plot_num, _plot_label, dev_code, device_label in self.devices:
             if plot_num in self.device_checkboxes and dev_code in self.device_checkboxes[plot_num]:
-                self.device_checkboxes[plot_num][dev_code].setChecked(True)
+                for row, checkbox in self.device_checkboxes[plot_num][dev_code]:
+                    checkbox.setChecked(deployment_storage_label(row) == device_label)
 
         # Rebuild collection tree and restore per-device statuses
         self.populate_collection_list()
@@ -735,6 +754,7 @@ class FieldDataWizard(QMainWindow):
             col += 1
 
         self.device_checkboxes = {}
+        self.device_cells = []
         self.plot_labels = {}
 
         # Reflect the combo's default selection. addItems() already selected the
@@ -1133,9 +1153,13 @@ class FieldDataWizard(QMainWindow):
         combo.clear()
         events = self.lookups.returned_rounds(site_short_name)
         for ev in events:
-            start, end = ev["deployment_start"], ev["deployment_end"]
-            count = ev["device_count"]
-            label = f"{ev['deployment_event_id']} — {start} → {end}  ({count} devices)"
+            start = ev["deployment_event_start_date"]
+            end = ev["deployment_event_end_date"]
+            count = ev.get("deployment_count", ev.get("device_count", 0))
+            label = (
+                f"{ev['deployment_event_id']} — {start} → {end}  "
+                f"({count} deployment{'s' if count != 1 else ''})"
+            )
             combo.addItem(label, ev)
         if not events:
             combo.addItem("— No returned-card events —", None)
@@ -1146,7 +1170,7 @@ class FieldDataWizard(QMainWindow):
         if current:
             self.current_deployment_status_label.setText(
                 "\n".join(
-                    f"Since {event['deployment_start']}: "
+                    f"Since {event['deployment_event_start_date']}: "
                     f"{event['device_count']} device"
                     f"{'s' if event['device_count'] != 1 else ''} in the field"
                     for event in current
@@ -1164,11 +1188,11 @@ class FieldDataWizard(QMainWindow):
             self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
             return
         self.lookups.activate_deployment_round(ev["deployment_round_id"])
-        start = QDate.fromString(ev["deployment_start"], "yyyy-MM-dd")
+        start = QDate.fromString(ev["deployment_event_start_date"], "yyyy-MM-dd")
         if start.isValid():
             self.deploy_start_date.setDate(start)
-        if ev["deployment_end"]:
-            end = QDate.fromString(ev["deployment_end"], "yyyy-MM-dd")
+        if ev["deployment_event_end_date"]:
+            end = QDate.fromString(ev["deployment_event_end_date"], "yyyy-MM-dd")
             if end.isValid():
                 self.deploy_end_date.setDate(end)
         self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
@@ -1192,20 +1216,18 @@ class FieldDataWizard(QMainWindow):
         for plot_label in self.plot_labels.values():
             plot_label.setParent(None)
             plot_label.deleteLater()
-        for cb_row in self.device_checkboxes.values():
-            for cb in cb_row.values():
-                cb.setParent(None)
-                cb.deleteLater()
+        for cell in getattr(self, "device_cells", []):
+            cell.setParent(None)
+            cell.deleteLater()
         self.plot_labels = {}
         self.device_checkboxes = {}
+        self.device_cells = []
 
         # Determine plot numbers to show
         plot_names_for_site = (
             self.lookups.plot_names.get(site_short_name, {}) if site_short_name else {}
         )
         plot_numbers = sorted(plot_names_for_site.keys())
-        available = self.lookups.available_device_keys()
-
         # Build a row per plot. row_idx maps to grid row (header is row 0).
         for row_idx, plot_num in enumerate(plot_numbers, start=1):
             name = plot_names_for_site.get(plot_num, "")
@@ -1217,29 +1239,51 @@ class FieldDataWizard(QMainWindow):
             self.device_checkboxes[plot_num] = {}
             col = 1
             for dev_code in DEVICE_TYPES.keys():
-                cb = QCheckBox()
-                is_available = (site_short_name, plot_num, dev_code) in available
-                cb.setEnabled(is_available)
-                cb.setChecked(is_available)
-                if not is_available:
-                    cb.setToolTip("No curated device placement in the selected event")
-                self.device_checkboxes[plot_num][dev_code] = cb
-                self.grid_layout.addWidget(cb, row_idx, col, Qt.AlignCenter)
+                rows = self.lookups.active_rows_for_slot(
+                    site_short_name or "", plot_num, dev_code
+                )
+                checks: list[tuple[dict, QCheckBox]] = []
+                if rows:
+                    cell = QWidget()
+                    cell_layout = QVBoxLayout(cell)
+                    cell_layout.setContentsMargins(0, 0, 0, 0)
+                    cell_layout.setSpacing(2)
+                    for row in rows:
+                        sequence = int(row.get("deployment_sequence") or 0)
+                        label = "" if len(rows) == 1 else f"seq{sequence:02d}"
+                        cb = QCheckBox(label)
+                        cb.setChecked(True)
+                        cb.setToolTip(
+                            f"{row['deployment_id']}\n"
+                            f"{row['deployment_start_date']} → {row['deployment_end_date']}"
+                        )
+                        checks.append((row, cb))
+                        cell_layout.addWidget(cb, alignment=Qt.AlignCenter)
+                    self.grid_layout.addWidget(cell, row_idx, col, Qt.AlignCenter)
+                    self.device_cells.append(cell)
+                else:
+                    cb = QCheckBox()
+                    cb.setEnabled(False)
+                    cb.setToolTip("No curated deployment in the selected event")
+                    self.grid_layout.addWidget(cb, row_idx, col, Qt.AlignCenter)
+                    self.device_cells.append(cb)
+                self.device_checkboxes[plot_num][dev_code] = checks
                 col += 1
 
     def select_all_devices(self):
         """Select all device checkboxes"""
         for plot_num in self.device_checkboxes:
             for dev_code in DEVICE_TYPES.keys():
-                checkbox = self.device_checkboxes[plot_num][dev_code]
-                if checkbox.isEnabled():
-                    checkbox.setChecked(True)
+                for _row, checkbox in self.device_checkboxes[plot_num][dev_code]:
+                    if checkbox.isEnabled():
+                        checkbox.setChecked(True)
 
     def clear_all_devices(self):
         """Clear all device checkboxes"""
         for plot_num in self.device_checkboxes:
             for dev_code in DEVICE_TYPES.keys():
-                self.device_checkboxes[plot_num][dev_code].setChecked(False)
+                for _row, checkbox in self.device_checkboxes[plot_num][dev_code]:
+                    checkbox.setChecked(False)
 
     def choose_staging_location(self):
         """Choose staging directory"""
@@ -1292,8 +1336,12 @@ class FieldDataWizard(QMainWindow):
             "site_code": site_code,
             "deployment_round_id": selected_event["deployment_round_id"],
             "deployment_event_id": selected_event["deployment_event_id"],
-            "deployment_start": selected_event["deployment_start"],
-            "deployment_end": selected_event["deployment_end"],
+            "deployment_event_start_date": selected_event[
+                "deployment_event_start_date"
+            ],
+            "deployment_event_end_date": selected_event[
+                "deployment_event_end_date"
+            ],
             "observer": self.observer_other_edit.text() if observer == "Other" else observer,
         }
 
@@ -1307,9 +1355,10 @@ class FieldDataWizard(QMainWindow):
             plot_label = plot_names.get(plot_num) or str(plot_num)
 
             for dev_code in DEVICE_TYPES.keys():
-                if self.device_checkboxes[plot_num][dev_code].isChecked():
-                    device_label = f"p{plot_num}_{dev_code}"
-                    self.devices.append((plot_num, plot_label, dev_code, device_label))
+                for deployment_row, checkbox in self.device_checkboxes[plot_num][dev_code]:
+                    if checkbox.isChecked():
+                        device_label = deployment_storage_label(deployment_row)
+                        self.devices.append((plot_num, plot_label, dev_code, device_label))
 
         if not self.devices:
             QMessageBox.warning(self, "No Devices Selected", "Please select at least one device.")
@@ -1534,7 +1583,7 @@ class FieldDataWizard(QMainWindow):
         """Process files from SD card.
 
         Walks the source tree alphabetically, renames each media/config file to the
-        deployment convention via :func:`build_renamed_filename`, copies it,
+        exact deployment-ID convention via :func:`build_deployment_filename`, copies it,
         verifies the copy by re-hashing (source vs. dest must match), flags small
         files and duplicates, and appends one :func:`build_inventory_record` per
         accepted file. Per-device QC aggregates are written to ``qc_report.json``.
@@ -1583,32 +1632,28 @@ class FieldDataWizard(QMainWindow):
                 f"{device_label}, resuming..."
             )
 
-        # Deployment end date for media filenames (YYYYMMDD)
-        deploy_date = datetime.strptime(self.metadata["deployment_end"], "%Y-%m-%d")
-        date_str = deploy_date.strftime("%Y%m%d")
-
-        # Deployment start date for config filenames (YYYYMMDD)
-        deploy_start = datetime.strptime(self.metadata["deployment_start"], "%Y-%m-%d")
-        start_date_str = deploy_start.strftime("%Y%m%d")
-
-        org = self.metadata["organization"]
         site_short_name = self.metadata["site_short_name"]
         plot_metadata = self.lookups.plot_metadata.get((site_short_name, plot_num), {})
 
+        deployment_row = self.lookups.active_deployment_for_label(device_label)
+        if not deployment_row:
+            raise ValueError(
+                f"No exact curated deployment row is active for {device_label}"
+            )
+        deployment_id = deployment_row["deployment_id"]
+        deployment_start = deployment_row["deployment_start_date"]
+
         # Resolve physical device identifier
         if dev_code in AUDIO_DEVICE_TYPES:
-            aru_key = (site_short_name, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
-            deployment_device_id = self.lookups.arus.get(aru_key, {}).get("device_id", "")
+            deployment_device_id = deployment_row.get("device_id", "")
             device_id = parse_audiomoth_device_id(source_dir) or deployment_device_id
             if not device_id:
                 self.log(f"  Warning: could not find AudioMoth Device ID in {source_dir}")
         else:
-            cam_key = (site_short_name, int(plot_num) if str(plot_num).isdigit() else plot_num, dev_code)
-            cam_meta = self.lookups.cameras.get(cam_key, {})
-            device_id = cam_meta.get("camera_id", "")
+            device_id = deployment_row.get("device_id", "")
             if not device_id:
                 self.log(
-                    f"  Warning: camera_id missing for {site_short_name} plot {plot_num} "
+                    f"  Warning: device_id missing for {site_short_name} plot {plot_num} "
                     f"{dev_code} in the selected curated deployment event"
                 )
 
@@ -1701,12 +1746,8 @@ class FieldDataWizard(QMainWindow):
                         seq_total = reconyx_data["sequence_total"]
 
                 if file_type == "config":
-                    # Rename: ORG_SITE_plotN_DEVCODE_YYYYMMDD_CONFIG_01.txt
-                    # plotN must be in the name so each plot's CONFIG is uniquely identifiable
-                    # (otherwise BD plots 1, 2, 3, 4 all collide on the same filename).
-                    new_filename = build_renamed_filename(
-                        org, site_short_name, plot_num, dev_code, start_date_str,
-                        "CONFIG_01", file_ext
+                    new_filename = build_deployment_filename(
+                        deployment_id, "CONFIG_01", file_ext
                     )
                     dest_path = dest_dir / new_filename
                 elif file_type == "image" and seq_pos is not None:
@@ -1715,16 +1756,16 @@ class FieldDataWizard(QMainWindow):
                         current_event_num = event_sequence
                         event_sequence += 1
                     seq_str = f"{current_event_num:05d}_{seq_pos}"
-                    new_filename = build_renamed_filename(
-                        org, site_short_name, plot_num, dev_code, date_str, seq_str, file_ext
+                    new_filename = build_deployment_filename(
+                        deployment_id, seq_str, file_ext
                     )
                     dest_path = dest_dir / new_filename
                     file_sequence += 1
                 else:
                     # Audio or image without sequence data: standard sequential naming
                     seq_str = f"{file_sequence:05d}"
-                    new_filename = build_renamed_filename(
-                        org, site_short_name, plot_num, dev_code, date_str, seq_str, file_ext
+                    new_filename = build_deployment_filename(
+                        deployment_id, seq_str, file_ext
                     )
                     dest_path = dest_dir / new_filename
                     file_sequence += 1
@@ -1869,6 +1910,7 @@ class FieldDataWizard(QMainWindow):
                     dev_code=dev_code,
                     device_label=device_label,
                     device_id=device_id,
+                    deployment_id=deployment_id,
                     file_type=file_type,
                     file_size_bytes=dest_size,
                     file_hash_sha256=file_hash,
@@ -1885,7 +1927,7 @@ class FieldDataWizard(QMainWindow):
                     seq_pos=seq_pos,
                     seq_total=seq_total,
                     event_num=current_event_num,
-                    date_installed=self.metadata.get("deployment_start", ""),
+                    date_installed=deployment_start,
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
@@ -2048,21 +2090,25 @@ class FieldDataWizard(QMainWindow):
             return
 
         dev_code = dev_combo.currentData()
-        device_label = f"p{plot_num}_{dev_code}"
-
-        if (site_short_name, plot_num, dev_code) not in self.lookups.available_device_keys():
+        slot_rows = self.lookups.active_rows_for_slot(
+            site_short_name, plot_num, dev_code
+        )
+        existing_labels = {existing[3] for existing in self.devices}
+        available_rows = [
+            row
+            for row in slot_rows
+            if deployment_storage_label(row) not in existing_labels
+        ]
+        if not available_rows:
             QMessageBox.warning(
                 self,
                 "Device Not in Deployment Event",
-                f"{device_label} has no placement in the selected curated event.",
+                f"Plot {plot_num} {dev_code} has no unselected deployment in the "
+                "selected curated event.",
             )
             return
-
-        # Reject duplicates
-        if any(existing[3] == device_label for existing in self.devices):
-            QMessageBox.warning(self, "Already Exists",
-                f"Device {device_label} is already in this deployment.")
-            return
+        deployment_row = available_rows[0]
+        device_label = deployment_storage_label(deployment_row)
 
         plot_label = plot_names_for_reserve.get(plot_num) or str(plot_num)
 
@@ -2174,7 +2220,11 @@ class FieldDataWizard(QMainWindow):
         summary.append(f"Site Name: {self.metadata['site_name']}")
         summary.append(f"Site Short Name: {self.metadata['site_short_name']}")
         summary.append(f"Site Code: {self.metadata['site_code']}")
-        summary.append(f"Deployment Event Period: {self.metadata['deployment_start']} to {self.metadata['deployment_end']}")
+        summary.append(
+            "Deployment Event Period: "
+            f"{self.metadata['deployment_event_start_date']} to "
+            f"{self.metadata['deployment_event_end_date']}"
+        )
         summary.append(f"Observer: {self.metadata['observer']}")
         summary.append("")
 
@@ -2680,8 +2730,8 @@ class FieldDataWizard(QMainWindow):
         """Run QC checks after a device completes. Logs each check (pass + fail) to qc_report.json."""
         if not self.current_deployment_folder:
             return
-        deploy_start = self.metadata.get("deployment_start", "")
-        deploy_end = self.metadata.get("deployment_end", "")
+        deploy_start = self.metadata.get("deployment_event_start_date", "")
+        deploy_end = self.metadata.get("deployment_event_end_date", "")
 
         check_results = [
             ("sequence_gap", check_sequence_integrity(device_entries, device_label)),

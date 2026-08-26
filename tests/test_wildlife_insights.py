@@ -30,18 +30,24 @@ def test_build_wi_rows_formats_lookup_coordinates():
         {
             "organization": "UC",
             "site_short_name": "TEST",
-            "deployment_start": "2026-01-01",
-            "deployment_end": "2026-02-01",
+            "deployment_event_start_date": "2026-01-01",
+            "deployment_event_end_date": "2026-02-01",
         },
         [{"device_type": "ML", "plot_number": "1"}],
-        {("TEST", 1, "ML"): {"camera_id": "camera-1"}},
+        {("TEST", 1, "ML"): {"device_id": "camera-1"}},
         {("TEST", 1): {"latitude": "34.1234", "longitude": "-120.123456789"}},
-        {},
+        {
+            "sensor_height_ML": "Knee height",
+            "sensor_orientation_ML": "Parallel",
+        },
     )
 
     row = rows_by_type["ML"][0]
     assert row["latitude"] == "34.12340000"
     assert row["longitude"] == "-120.12345679"
+    assert row["camera_id"] == "camera-1"
+    assert row["sensor_height"] == "Knee height"
+    assert row["sensor_orientation"] == "Parallel"
 
 
 def test_reshape_image_metadata_formats_coordinates(tmp_path):
