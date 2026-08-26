@@ -623,6 +623,134 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         app.processEvents()
 
 
+def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
+    tmp_path, monkeypatch
+):
+    import threading
+    import time
+
+    from PySide6.QtWidgets import QApplication, QFileDialog
+
+    import cassn.gui.card_ingest_thread as card_thread_module
+    import cassn.gui.wizard as wizard_module
+    from cassn.box.auth import BoxConfig
+    from cassn.gui.wizard import FieldDataWizard
+
+    class DummyReconyx:
+        def start(self):
+            return self
+
+        def parse(self, _path):
+            return {}
+
+        def close(self):
+            return None
+
+    rows = [
+        placement(
+            deployment_id="UC_TestSite_plot1_ML_20260424",
+            identifier_policy="prospective",
+        ),
+        placement(
+            deployment_id="UC_TestSite_plot2_ML_20260424",
+            identifier_policy="prospective",
+            plot_number="2",
+            device_id="CAM-2",
+        ),
+    ]
+    path = tmp_path / "deployments.csv"
+    write_csv(path, FIELDS, rows)
+    events, rows_by_round = build_deployment_rounds(
+        [deployment_event()], load_device_deployments(path)
+    )
+    lookups = LookupTables(
+        sites=[Site("Test Reserve", "TestSite", "TST")],
+        plot_names={"TestSite": {1: "One", 2: "Two"}},
+        deployments=events,
+        _deployment_rows_by_round=rows_by_round,
+    )
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
+    monkeypatch.setattr(card_thread_module, "ReconyxExtractor", DummyReconyx)
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+
+    source_paths = []
+    for plot in (1, 2):
+        source = tmp_path / f"card{plot}"
+        source.mkdir()
+        (source / f"image{plot}.jpg").write_bytes(f"unique-{plot}".encode())
+        source_paths.append(str(source))
+    selected_sources = iter(source_paths)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: next(selected_sources),
+    )
+
+    original_processor = FieldDataWizard.process_sd_card_files
+    both_started = threading.Barrier(2)
+
+    def gated_processor(context, *args):
+        both_started.wait(timeout=5)
+        return original_processor(context, *args)
+
+    monkeypatch.setattr(FieldDataWizard, "process_sd_card_files", gated_processor)
+
+    window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
+    try:
+        event_root = tmp_path / "event"
+        (event_root / "raw_data").mkdir(parents=True)
+        window.current_deployment_folder = event_root
+        window.metadata = {
+            "organization": "UC",
+            "site_name": "Test Reserve",
+            "site_short_name": "TestSite",
+            "site_code": "TST",
+            "deployment_event_id": "UC_TestSite_20260424",
+            "deployment_round_id": "TestSite|2026-01-08|2026-04-24",
+            "deployment_event_start_date": "2026-01-08",
+            "deployment_event_end_date": "2026-04-24",
+            "observer": "Imperato, John",
+        }
+        window.devices = [
+            (1, "One", "ML", "p1_ML"),
+            (2, "Two", "ML", "p2_ML"),
+        ]
+        window.populate_collection_list()
+
+        window.device_tree.setCurrentItem(window.device_tree.topLevelItem(0))
+        window.copy_sd_card_data()
+        window.device_tree.setCurrentItem(window.device_tree.topLevelItem(1))
+        window.copy_sd_card_data()
+        assert len(window.card_ingest_threads) == 2
+
+        deadline = time.monotonic() + 10
+        while (window.card_ingest_threads or window._retiring_card_threads) and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+
+        assert not window.card_ingest_threads
+        assert not window._retiring_card_threads
+        assert [
+            window.device_tree.topLevelItem(index).text(2) for index in range(2)
+        ] == ["Complete", "Complete"]
+        assert {row["device_label"] for row in window.file_inventory} == {
+            "p1_ML",
+            "p2_ML",
+        }
+        assert all(
+            panel["status"].text() == "Complete — safe to eject card"
+            for panel in window.card_ingest_panels.values()
+        )
+        assert window.copy_btn.isEnabled()
+    finally:
+        window.current_deployment_folder = None
+        window.close()
+        app.processEvents()
+
+
 def test_event_only_legacy_deployments_schema_is_rejected(tmp_path):
     path = tmp_path / "deployments.csv"
     write_csv(

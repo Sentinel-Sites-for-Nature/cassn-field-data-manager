@@ -7,6 +7,7 @@ import pytest
 from cassn.core import file_transfer
 from cassn.core.file_transfer import (
     FileTransferError,
+    copy_file_single_read_verified,
     copy_file_verified,
     hash_file_with_retries,
 )
@@ -29,6 +30,42 @@ def test_verified_copy_commits_matching_bytes(tmp_path):
 
     assert destination.read_bytes() == b"field-data"
     assert result.attempts == 1
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_single_read_copy_verifies_and_commits_after_hash_acceptance(tmp_path):
+    source = tmp_path / "source.jpg"
+    destination = tmp_path / "staged.jpg"
+    source.write_bytes(b"camera-data" * 100)
+    accepted = []
+
+    result = copy_file_single_read_verified(
+        source,
+        destination,
+        accept_hash=lambda sha256, sha1: accepted.append((sha256, sha1)) or True,
+        retry_delay=0,
+    )
+
+    assert result.accepted
+    assert result.attempts == 1
+    assert destination.read_bytes() == source.read_bytes()
+    assert accepted == [(result.sha256, result.sha1)]
+
+
+def test_single_read_copy_discards_verified_duplicate_without_destination(tmp_path):
+    source = tmp_path / "source.jpg"
+    destination = tmp_path / "staged.jpg"
+    source.write_bytes(b"duplicate")
+
+    result = copy_file_single_read_verified(
+        source,
+        destination,
+        accept_hash=lambda _sha256, _sha1: False,
+        retry_delay=0,
+    )
+
+    assert not result.accepted
+    assert not destination.exists()
     assert not list(tmp_path.glob("*.partial"))
 
 

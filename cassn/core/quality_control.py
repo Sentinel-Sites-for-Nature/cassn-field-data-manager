@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,9 @@ from cassn.config import (
 from cassn.core.classification import file_size_floor_for, format_size_floor
 from cassn.core.hashing import sha256
 from cassn.lookups import BOX_MANAGED_FILENAMES
+
+
+_QC_REPORT_LOCK = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +278,20 @@ def append_qc_report(deployment_folder: Path, check: str, device: str, severity:
 
     History is append-only; ``current_state`` is rebuilt on every call.
     """
+    with _QC_REPORT_LOCK:
+        _append_qc_report_locked(
+            deployment_folder, check, device, severity, message
+        )
+
+
+def _append_qc_report_locked(
+    deployment_folder: Path,
+    check: str,
+    device: str,
+    severity: str,
+    message: str,
+) -> None:
+    """Read-modify-write implementation guarded by ``_QC_REPORT_LOCK``."""
     report_path = qc_path_for(deployment_folder, "qc_report.json")
     if report_path.exists():
         try:
@@ -312,8 +330,10 @@ def append_qc_report(deployment_folder: Path, check: str, device: str, severity:
         history["session_checks"], history["devices"]
     )
 
-    with open(report_path, "w") as f:
+    tmp_path = report_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
         json.dump(report, f, indent=2)
+    tmp_path.replace(report_path)
 
 
 # ---------------------------------------------------------------------------

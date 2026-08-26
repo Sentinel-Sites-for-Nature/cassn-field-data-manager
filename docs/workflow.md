@@ -7,10 +7,10 @@ flowchart TD
     D --> E["Strictly load deployment_events.csv and deployments.csv"]
     E --> F["Offer to reopen an existing session"]
     F --> G["Enter deployment metadata"]
-    G --> H["Select curated returned-card event; view current field inventory read-only"]
+    G --> H["Select curated deployment event; view current field inventory"]
     H --> I["Create deployment folder and session.json"]
-    I --> J["Choose a device row"]
-    J --> K["Select SD card folder"]
+    I --> J["Choose a device row and an available card slot"]
+    J --> K["Select SD card folder; run up to four device jobs"]
     K --> L["Auto-count expected media files"]
     L --> M["Copy, rename, and hash files into raw_data/device folders"]
     M --> N["Extract camera, AudioMoth, plot, device, and timing metadata"]
@@ -18,8 +18,8 @@ flowchart TD
     O --> P["Write image/audio metadata CSVs and deployment_event_record.json"]
     P --> Q["Snapshot lookup/config files into qc/lookup_snapshot"]
     Q --> R0["Run device QC checks"]
-    R0 --> R{"More selected devices?"}
-    R -->|Yes| J
+    R0 --> R{"Active jobs or more selected devices?"}
+    R -->|Yes; reuse each completed slot| J
     R -->|No| S["Review and finalize"]
     S --> T["Validate plot coordinates (study-area bounds)"]
     T --> U["Regenerate metadata CSVs and Wildlife Insights exports"]
@@ -53,21 +53,23 @@ flowchart TD
    - The app creates the deployment-event folder and saves its curated event ID and internal selection key in resumable `session.json` state.
 
 3. **Per-device SD card processing**
-   - The user processes one device at a time.
+   - The user chooses a concurrency limit from one through four and may start that many independent device cards. When one finishes, its card is safe to eject and its slot may be reused immediately; the other jobs continue.
+   - Active/recent jobs appear in a responsive 2×2 panel grid with source, progress, speed, estimated completion, current filename, warning/error counts, and per-card cancellation.
    - Files are classified as image, audio, config, or ignored.
-   - Valid files are copied into `raw_data/<device_label>/`, renamed using the CA-SSN convention, and verified with source/destination hashes.
+   - Valid files are copied into separate `raw_data/<device_label>/` destinations, renamed using the CA-SSN convention, and verified with source/destination hashes. The copy stream calculates source hashes in one pass before the staged bytes are independently re-read for verification.
    - The app extracts EXIF, Reconyx, AudioMoth, plot, device, and deployment metadata.
+   - A shared atomic hash registry preserves cross-card duplicate detection. Session checkpoints and QC report writes are serialized so workers cannot overwrite one another.
 
 4. **Inventory, metadata, and QC**
-   - Each copied file becomes one inventory record in the session.
-   - The app writes `image_file_metadata.csv`, `audio_file_metadata.csv`, and `deployment_event_record.json` from the session inventory.
+   - Each copied file becomes one inventory record in the session. A completed worker checkpoints its rows before the interface says that card is safe to eject.
+   - Once no card jobs remain active, the app atomically rebuilds `image_file_metadata.csv`, `audio_file_metadata.csv`, and `deployment_event_record.json` from the stable cumulative inventory.
    - The app snapshots the current lookup/config files into `qc/lookup_snapshot/` so regenerated metadata can be tied to the exact configuration used.
    - QC checks record warnings/errors in `qc/qc_report.json`.
 
 5. **Exports and final review**
    - The app validates plot coordinates against the California study-area bounding box.
    - Wildlife Insights deployment CSVs are generated under `WI_metadata/` for camera devices.
-   - The review tab summarizes deployment, devices, files, output location, and next steps.
+   - The review tab presents an ingestion summary, sensor deployments, files processed, the actual staged-event tree, and current operational next steps.
 
 6. **Box upload path**
    - Before the first Box upload, the app scans ML/SA camera folders. Folders above 15,000 images are split into numbered subfolders without cutting trigger bursts.

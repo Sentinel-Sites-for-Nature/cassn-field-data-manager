@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QMenu,
     QTabWidget,
     QTextEdit,
@@ -70,6 +71,7 @@ from cassn.box.threads import (
     ProvenanceUploadThread,
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
+from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
@@ -108,7 +110,6 @@ from cassn.core.audio_metadata import (
 )
 from cassn.core.image_metadata import (
     EXIF_AVAILABLE,
-    ReconyxExtractor,
     extract_exif_data,
     extract_reconyx_sequence,
     parse_camera_recorded_datetime,
@@ -116,6 +117,7 @@ from cassn.core.image_metadata import (
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
 from cassn.core.file_transfer import (
     FileTransferError,
+    copy_file_single_read_verified,
     copy_file_verified,
     hash_file_with_retries,
 )
@@ -133,7 +135,6 @@ from cassn.core.inventory import (
     write_session,
 )
 from cassn.core.inventory import (
-    count_expected_files,
     find_all_sessions_multi as _find_all_sessions_multi,
     reconcile_device_dir,
     sorted_walk,
@@ -142,12 +143,10 @@ from cassn.core.quality_control import (
     append_qc_report,
     build_box_verification_record,
     check_camera_serial,
-    check_expected_count,
     check_file_size_floor,
     check_recording_stop_reasons,
     check_required_lookups,
     check_sequence_integrity,
-    is_duplicate_media,
     migrate_qc_sidecars,
     qc_path_for,
     validate_coordinates,
@@ -195,10 +194,15 @@ class FieldDataWizard(QMainWindow):
         # the resume dialog can surface partial sessions from any of them (e.g. an
         # SSD/Desktop copy and the external G-DRIVE), not just the active root.
         self.known_staging_roots: list[str] = []
+        self.card_concurrency_limit = 4
         self.current_deployment_folder = None
         self.file_inventory = []
         self.seen_file_hashes = set()  # session-wide duplicate detection
-        self._copy_in_progress = False
+        self.card_ingest_threads: dict[str, CardIngestThread] = {}
+        self._retiring_card_threads: set[CardIngestThread] = set()
+        self.card_ingest_panels: dict[str, dict] = {}
+        self._active_card_sources: set[Path] = set()
+        self._ingest_hash_registry = IngestHashRegistry()
         self._session_save_error_shown = False
         self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
@@ -271,6 +275,12 @@ class FieldDataWizard(QMainWindow):
                         self.known_staging_roots = [
                             str(p) for p in config["known_staging_roots"]
                         ]
+                    try:
+                        self.card_concurrency_limit = min(
+                            4, max(1, int(config.get("card_concurrency_limit", 4)))
+                        )
+                    except (TypeError, ValueError):
+                        self.card_concurrency_limit = 4
         except Exception:
             pass
 
@@ -290,6 +300,7 @@ class FieldDataWizard(QMainWindow):
             # can still scan it for partial sessions even after the default changes.
             self._remember_staging_root(self.staging_root)
             config["known_staging_roots"] = list(self.known_staging_roots)
+            config["card_concurrency_limit"] = self.card_concurrency_limit
             with open(self.config_file, "w") as f:
                 json.dump(config, f, indent=2)
         except Exception:
@@ -488,6 +499,7 @@ class FieldDataWizard(QMainWindow):
         self.seen_file_hashes = {
             e["file_hash_sha256"] for e in self.file_inventory if e.get("file_hash_sha256")
         }
+        self._ingest_hash_registry = IngestHashRegistry(self.seen_file_hashes)
 
         # Migrate any pre-existing QC sidecars from the deployment root into qc/.
         # No-op for fresh sessions or already-migrated deployments.
@@ -571,7 +583,10 @@ class FieldDataWizard(QMainWindow):
             if i < len(self.devices):
                 device_label = self.devices[i][3]
                 if device_label in statuses:
-                    self.device_tree.topLevelItem(i).setText(2, statuses[device_label].get("status", "Pending"))
+                    restored_status = statuses[device_label].get("status", "Pending")
+                    if restored_status in {"Counting", "Copying", "Cancelling"}:
+                        restored_status = "Incomplete"
+                    self.device_tree.topLevelItem(i).setText(2, restored_status)
                 actual_count = sum(
                     1 for entry in self.file_inventory
                     if entry.get("device_label") == device_label
@@ -892,6 +907,7 @@ class FieldDataWizard(QMainWindow):
         self.device_tree.setColumnWidth(1, 200)
         self.device_tree.setColumnWidth(2, 100)
         device_layout.addWidget(self.device_tree)
+        self.device_tree.currentItemChanged.connect(self._update_copy_action)
 
         device_group.setLayout(device_layout)
         layout.addWidget(device_group)
@@ -908,8 +924,29 @@ class FieldDataWizard(QMainWindow):
         control_layout.addWidget(self.copy_btn)
         control_layout.addWidget(skip_btn)
         control_layout.addWidget(add_device_btn)
+        control_layout.addSpacing(18)
+        control_layout.addWidget(QLabel("Simultaneous cards:"))
+        self.card_concurrency_spin = QSpinBox()
+        self.card_concurrency_spin.setRange(1, 4)
+        self.card_concurrency_spin.setValue(self.card_concurrency_limit)
+        self.card_concurrency_spin.setToolTip(
+            "Maximum cards copied at once. Running copies are never interrupted "
+            "when this limit is lowered."
+        )
+        self.card_concurrency_spin.valueChanged.connect(
+            self._on_card_concurrency_changed
+        )
+        control_layout.addWidget(self.card_concurrency_spin)
         control_layout.addStretch()
         layout.addLayout(control_layout)
+
+        # One compact panel per active/recent card. Four jobs arrange as a 2×2
+        # grid so their progress remains visible without interleaving log lines.
+        self.card_jobs_group = QGroupBox("Card Ingest Jobs")
+        self.card_jobs_grid = QGridLayout()
+        self.card_jobs_group.setLayout(self.card_jobs_grid)
+        self.card_jobs_group.hide()
+        layout.addWidget(self.card_jobs_group)
 
         # Progress log
         log_group = QGroupBox("Progress Log")
@@ -1444,11 +1481,92 @@ class FieldDataWizard(QMainWindow):
     # SD-card ingest
     # ------------------------------------------------------------------
 
-    def copy_sd_card_data(self):
-        """Copy data from SD card for selected device"""
-        if self._copy_in_progress:
+    def _device_item(self, device_label: str):
+        for index, device in enumerate(self.devices):
+            if device[3] == device_label and index < self.device_tree.topLevelItemCount():
+                return self.device_tree.topLevelItem(index)
+        return None
+
+    def _update_copy_action(self, *_args) -> None:
+        """Enable starting a card whenever the selected device owns a free slot."""
+        if not hasattr(self, "copy_btn"):
+            return
+        selected = self.device_tree.currentItem()
+        if selected is None:
+            self.copy_btn.setEnabled(False)
+            return
+        index = self.device_tree.indexOfTopLevelItem(selected)
+        if index < 0 or index >= len(self.devices):
+            self.copy_btn.setEnabled(False)
+            return
+        device_label = self.devices[index][3]
+        running = device_label in self.card_ingest_threads
+        at_limit = len(self.card_ingest_threads) >= self.card_concurrency_spin.value()
+        self.copy_btn.setEnabled(not running and not at_limit)
+
+    def _on_card_concurrency_changed(self, value: int) -> None:
+        self.card_concurrency_limit = int(value)
+        self.save_config()
+        self._update_copy_action()
+
+    def _remove_oldest_completed_card_panel(self) -> None:
+        """Keep at most four visible job panels, preferring active jobs."""
+        if len(self.card_ingest_panels) < 4:
+            return
+        for label, panel in list(self.card_ingest_panels.items()):
+            if label in self.card_ingest_threads:
+                continue
+            panel["group"].setParent(None)
+            panel["group"].deleteLater()
+            del self.card_ingest_panels[label]
             return
 
+    def _create_card_panel(self, device_label: str, source_dir: Path) -> None:
+        existing = self.card_ingest_panels.pop(device_label, None)
+        if existing:
+            existing["group"].setParent(None)
+            existing["group"].deleteLater()
+        self._remove_oldest_completed_card_panel()
+
+        group = QGroupBox(device_label)
+        layout = QVBoxLayout(group)
+        source_label = QLabel(f"Source: {source_dir}")
+        source_label.setWordWrap(True)
+        status = QLabel("Counting files…")
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        detail = QLabel("0 files processed")
+        detail.setWordWrap(True)
+        findings = QLabel("Warnings: 0 · Errors: 0")
+        cancel = QPushButton("Cancel This Card")
+        cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
+        for widget in (source_label, status, progress, detail, findings, cancel):
+            layout.addWidget(widget)
+
+        self.card_ingest_panels[device_label] = {
+            "group": group,
+            "status": status,
+            "progress": progress,
+            "detail": detail,
+            "findings": findings,
+            "warnings": 0,
+            "errors": 0,
+            "cancel": cancel,
+            "started": time.monotonic(),
+        }
+        self._reflow_card_panels()
+
+    def _reflow_card_panels(self) -> None:
+        while self.card_jobs_grid.count():
+            item = self.card_jobs_grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(self.card_jobs_group)
+        for index, panel in enumerate(self.card_ingest_panels.values()):
+            self.card_jobs_grid.addWidget(panel["group"], index // 2, index % 2)
+        self.card_jobs_group.setVisible(bool(self.card_ingest_panels))
+
+    def copy_sd_card_data(self):
+        """Select and start one SD card without blocking other device jobs."""
         selected = self.device_tree.currentItem()
         if not selected:
             QMessageBox.information(self, "No Selection", "Please select a device from the list.")
@@ -1456,8 +1574,17 @@ class FieldDataWizard(QMainWindow):
 
         index = self.device_tree.indexOfTopLevelItem(selected)
         plot_num, plot_label, dev_code, device_label = self.devices[index]
+        if device_label in self.card_ingest_threads:
+            return
+        if len(self.card_ingest_threads) >= self.card_concurrency_spin.value():
+            QMessageBox.information(
+                self,
+                "All Card Slots Busy",
+                f"The current limit is {self.card_concurrency_spin.value()} simultaneous "
+                "card(s). Wait for one to finish or raise the limit.",
+            )
+            return
 
-        # Check if already complete
         if selected.text(2) == "Complete":
             reply = QMessageBox.question(
                 self,
@@ -1468,55 +1595,186 @@ class FieldDataWizard(QMainWindow):
             if reply == QMessageBox.No:
                 return
 
-        # Select SD card
-        self._copy_in_progress = True
-        self.copy_btn.setEnabled(False)
         sd_path = QFileDialog.getExistingDirectory(
             self, f"Select SD Card for Plot {plot_num} - {DEVICE_TYPES[dev_code]}"
         )
-
         if not sd_path:
-            self._copy_in_progress = False
-            self.copy_btn.setEnabled(True)
+            return
+        source_dir = Path(sd_path).resolve()
+        if source_dir in self._active_card_sources:
+            QMessageBox.warning(
+                self,
+                "Card Already In Use",
+                "That source folder is already assigned to an active card job.",
+            )
             return
 
-        # Auto-count the files the copy loop will keep (anything classify_file()
-        # doesn't call "other"), used silently as expected_file_count for the
-        # post-copy comparison that catches files skipped during copy (hash
-        # mismatch, duplicate). count_expected_files keeps this rule identical to
-        # the copy loop, so the two only differ on genuine drops.
-        try:
-            expected_file_count = count_expected_files(sd_path)
-        except Exception:
-            expected_file_count = None
-        if expected_file_count is not None:
-            self.log(f"  Auto-counted {expected_file_count} media file(s) in source folder.")
+        selected.setText(2, "Counting")
+        selected.setText(3, "0")
+        self._active_card_sources.add(source_dir)
+        self._create_card_panel(device_label, source_dir)
+        self.log(
+            f"Starting background ingest for {device_label} from {source_dir} "
+            f"({len(self.card_ingest_threads) + 1}/{self.card_concurrency_spin.value()} slots)."
+        )
 
-        self.log(f"Starting copy for Plot {plot_num} ({plot_label}) - {DEVICE_TYPES[dev_code]}...")
-        self.log(f"Source: {sd_path}")
+        worker = CardIngestThread(
+            processor=type(self).process_sd_card_files,
+            source_dir=source_dir,
+            deployment_folder=self.current_deployment_folder,
+            plot_num=plot_num,
+            plot_label=plot_label,
+            device_code=dev_code,
+            device_label=device_label,
+            metadata=self.metadata,
+            lookups=self.lookups,
+            inventory=[
+                entry
+                for entry in self.file_inventory
+                if entry.get("device_label") == device_label
+            ],
+            hash_registry=self._ingest_hash_registry,
+        )
+        worker.log_line.connect(self._on_card_log)
+        worker.progress.connect(self._on_card_progress)
+        worker.rows_ready.connect(
+            self._on_card_rows_ready,
+            Qt.ConnectionType.BlockingQueuedConnection,
+        )
+        worker.completed.connect(self._on_card_completed)
+        worker.finished.connect(lambda: self._release_finished_card_thread(worker))
+        self.card_ingest_threads[device_label] = worker
+        worker.start()
+        self._update_copy_action()
 
-        # Create device folder
-        device_folder = self.current_deployment_folder / "raw_data" / device_label
-        device_folder.mkdir(parents=True, exist_ok=True)
+    def cancel_card_ingest(self, device_label: str) -> None:
+        worker = self.card_ingest_threads.get(device_label)
+        if worker is None:
+            return
+        worker.cancel()
+        item = self._device_item(device_label)
+        if item:
+            item.setText(2, "Cancelling")
+        panel = self.card_ingest_panels.get(device_label)
+        if panel:
+            panel["status"].setText("Cancelling after the current file…")
+            panel["cancel"].setEnabled(False)
 
-        # One persistent ExifTool process for this whole device copy, instead of
-        # spawning one per image (slow on a card of thousands). Closed in finally.
-        reconyx = None
-        try:
-            reconyx = ReconyxExtractor().start()
-            _files_copied, duplicate_count, hash_mismatch_count = self.process_sd_card_files(
-                Path(sd_path), device_folder, plot_num, plot_label, dev_code, device_label,
-                reconyx,
+    def _on_card_log(self, device_label: str, message: str) -> None:
+        panel = self.card_ingest_panels.get(device_label)
+        if panel:
+            stripped = message.lstrip()
+            if stripped.startswith(("✗", "ERROR:")):
+                panel["errors"] += 1
+            elif "Warning:" in message or stripped.startswith(("⚠", "WARNING:")):
+                panel["warnings"] += 1
+            panel["findings"].setText(
+                f"Warnings: {panel['warnings']} · Errors: {panel['errors']}"
             )
+        self.log(f"[{device_label}] {message}")
 
-            selected.setText(2, "Complete")
-            device_entries = [e for e in self.file_inventory if e["device_label"] == device_label]
-            total_for_device = len(device_entries)
-            selected.setText(3, str(total_for_device))
-            if not self.save_session():
-                selected.setText(2, "Incomplete")
-                raise RuntimeError("Session recovery file could not be saved")
+    def _on_card_progress(
+        self, device_label: str, copied: int, expected: int, filename: str
+    ) -> None:
+        item = self._device_item(device_label)
+        if item:
+            item.setText(2, "Copying")
+            item.setText(3, str(copied))
+        panel = self.card_ingest_panels.get(device_label)
+        if not panel:
+            return
+        if expected > 0:
+            panel["progress"].setRange(0, expected)
+            panel["progress"].setValue(min(copied, expected))
+            elapsed = max(time.monotonic() - panel["started"], 0.001)
+            rate = copied / elapsed
+            remaining = max(expected - copied, 0)
+            eta = remaining / rate if rate > 0 else 0
+            eta_text = f" — about {eta / 60:.0f} min remaining" if copied and remaining else ""
+            panel["detail"].setText(
+                f"{copied:,}/{expected:,} files — {rate:.1f} files/s{eta_text}\n{filename}"
+            )
+        else:
+            panel["progress"].setRange(0, 0)
+            panel["detail"].setText(filename or "Counting files…")
+        panel["status"].setText("Copying and verifying…")
 
+    def _on_card_rows_ready(self, device_label: str, rows: list[dict]) -> None:
+        if not rows:
+            return
+        existing = index_inventory_by_storage_relpath(self.file_inventory)
+        for row in rows:
+            relative = inventory_storage_relpath(row)
+            prior = existing.get(relative)
+            if prior is not None:
+                if prior.get("file_hash_sha256") != row.get("file_hash_sha256"):
+                    self.log(f"✗ [{device_label}] Inventory collision at {relative}")
+                continue
+            self.file_inventory.append(row)
+            existing[relative] = row
+            file_hash = row.get("file_hash_sha256", "")
+            if file_hash and row.get("file_type") != "config":
+                self.seen_file_hashes.add(file_hash)
+        if not self.save_session():
+            worker = self.card_ingest_threads.get(device_label)
+            if worker:
+                worker.mark_checkpoint_failed()
+
+    def _on_card_completed(self, device_label: str, result: dict) -> None:
+        worker = self.card_ingest_threads.pop(device_label, None)
+        if worker:
+            self._retiring_card_threads.add(worker)
+        source = Path(result.get("source_dir", "")).resolve()
+        self._active_card_sources.discard(source)
+        item = self._device_item(device_label)
+        panel = self.card_ingest_panels.get(device_label)
+
+        if not result.get("ok"):
+            cancelled = bool(result.get("cancelled"))
+            if item:
+                item.setText(2, "Incomplete")
+            if panel:
+                panel["status"].setText("Cancelled — safe to retry" if cancelled else "Failed — review error")
+                panel["status"].setStyleSheet("color: #cc4400; font-weight: bold;")
+                panel["progress"].setRange(0, 100)
+                panel["cancel"].hide()
+            message = result.get("error", "Unknown card ingest error")
+            self.log(f"{'⚠' if cancelled else '✗'} [{device_label}] {message}")
+            self.save_session()
+            if not cancelled:
+                QMessageBox.critical(self, "Card Ingest Failed", f"{device_label}: {message}")
+            self._update_copy_action()
+            return
+
+        device_entries = [
+            entry for entry in self.file_inventory if entry.get("device_label") == device_label
+        ]
+        total_for_device = len(device_entries)
+        if item:
+            item.setText(2, "Complete")
+            item.setText(3, str(total_for_device))
+        self._finalize_completed_card(device_label, device_entries, result)
+        if not self.save_session():
+            if item:
+                item.setText(2, "Incomplete")
+            if panel:
+                panel["status"].setText("Copied, but recovery state could not be saved")
+            self._update_copy_action()
+            return
+
+        if panel:
+            panel["status"].setText("Complete — safe to eject card")
+            panel["status"].setStyleSheet("color: green; font-weight: bold;")
+            panel["progress"].setRange(0, max(total_for_device, 1))
+            panel["progress"].setValue(total_for_device)
+            panel["detail"].setText(f"{total_for_device:,} files inventoried")
+            panel["cancel"].hide()
+        self.log(f"✓ [{device_label}] Complete — {total_for_device:,} files inventoried; card is safe to eject.")
+
+        # Global products are rebuilt only at a stable boundary. A newly free
+        # slot can be reused immediately; if other jobs remain, their eventual
+        # completion will trigger the rebuild instead.
+        if not self.card_ingest_threads:
             try:
                 write_metadata_outputs(
                     self.current_deployment_folder,
@@ -1526,78 +1784,85 @@ class FieldDataWizard(QMainWindow):
                     self.lookups,
                     log=self.log,
                 )
-            except Exception:
-                pass  # never block device completion on a CSV write error
+            except Exception as exc:
+                self.log(f"Warning: could not refresh metadata after card ingests: {exc}")
+        self._update_copy_action()
 
-            if expected_file_count is not None:
-                # Compare against total inventoried files for this device, not files
-                # copied in this run alone — otherwise resume runs falsely warn because
-                # already-copied files are skipped and don't count toward files_copied.
-                if check_expected_count(expected_file_count, total_for_device):
-                    append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "pass",
-                                     f"Expected {expected_file_count}, inventory has {total_for_device}")
-                else:
-                    # Drop-aware: a shortfall is expected when files were intentionally
-                    # dropped (byte-identical duplicates, or copies that failed hash
-                    # verification after retries). Only raise the modal on an
-                    # *unexplained* shortfall; an accounted-for gap is logged, not popped.
-                    accounted_drops = duplicate_count + hash_mismatch_count
-                    unexplained_shortfall = expected_file_count - total_for_device - accounted_drops
-                    if unexplained_shortfall > 0:
-                        self.log(f"  ⚠ File count mismatch: expected {expected_file_count}, inventory has {total_for_device}. Check SD card!")
-                        append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "warning",
-                                         f"Expected {expected_file_count}, inventory has {total_for_device}")
-                        QMessageBox.warning(self, "File Count Mismatch",
-                            f"Expected {expected_file_count} files in source but device inventory has {total_for_device}.\n\n"
-                            f"Please verify the SD card for missing files before ejecting.")
-                    else:
-                        self.log(f"  File count: expected {expected_file_count}, inventory {total_for_device} — "
-                                 f"{accounted_drops} duplicate(s)/hash-drop(s) dropped, accounted for")
-                        append_qc_report(self.current_deployment_folder, "expected_file_count", device_label, "pass",
-                                         f"Expected {expected_file_count}, inventory has {total_for_device} "
-                                         f"({accounted_drops} intentional drop(s) accounted for)")
+    def _release_finished_card_thread(self, worker: CardIngestThread) -> None:
+        self._retiring_card_threads.discard(worker)
+        worker.deleteLater()
 
-            # Required-lookup policy (see check_required_lookups): missing device
-            # identity or plot coordinates blocks (QC error); a missing ARU row
-            # warns. Values are read from the device's inventory records, which
-            # already hold the resolved lookup values.
-            if device_entries:
-                first_record = device_entries[0]
-                dev_type = first_record.get("device_type", "")
-                plot_num_val = first_record.get("plot_number", "")
-                site_short_name = self.metadata.get("site_short_name", "")
-                aru_key = (
-                    site_short_name,
-                    int(plot_num_val) if str(plot_num_val).isdigit() else plot_num_val,
-                    dev_type,
-                )
-                for check, severity, message in check_required_lookups(
+    def _finalize_completed_card(
+        self, device_label: str, device_entries: list[dict], result: dict
+    ) -> None:
+        expected = result.get("expected_file_count")
+        total = len(device_entries)
+        drops = int(result.get("duplicates", 0)) + int(result.get("hash_mismatches", 0))
+        if expected is not None:
+            unexplained = int(expected) - total - drops
+            severity = "warning" if unexplained > 0 else "pass"
+            message = f"Expected {expected}, inventory has {total}"
+            if drops:
+                message += f" ({drops} intentional drop(s) accounted for)"
+            append_qc_report(
+                self.current_deployment_folder,
+                "expected_file_count",
+                device_label,
+                severity,
+                message,
+            )
+            if unexplained > 0:
+                self.log(f"⚠ [{device_label}] Unexplained file shortfall: {unexplained}")
+
+        if device_entries:
+            first = device_entries[0]
+            dev_type = first.get("device_type", "")
+            plot_value = first.get("plot_number", "")
+            site = self.metadata.get("site_short_name", "")
+            aru_key = (
+                site,
+                int(plot_value) if str(plot_value).isdigit() else plot_value,
+                dev_type,
+            )
+            for check, severity, message in check_required_lookups(
+                device_label,
+                is_audio=dev_type in AUDIO_DEVICE_TYPES,
+                has_device_identity=any(entry.get("device_id") for entry in device_entries),
+                has_coordinates=bool(first.get("latitude") and first.get("longitude")),
+                has_aru_row=aru_key in self.lookups.arus,
+            ):
+                append_qc_report(
+                    self.current_deployment_folder,
+                    check,
                     device_label,
-                    is_audio=dev_type in AUDIO_DEVICE_TYPES,
-                    has_device_identity=any(e.get("device_id") for e in device_entries),
-                    has_coordinates=bool(
-                        first_record.get("latitude") and first_record.get("longitude")
-                    ),
-                    has_aru_row=aru_key in self.lookups.arus,
-                ):
-                    append_qc_report(
-                        self.current_deployment_folder, check, device_label, severity, message
-                    )
-                    self.log(f"  {'⚠' if severity == 'warning' else '✗'} {message}")
+                    severity,
+                    message,
+                )
+                self.log(f"[{device_label}] {message}")
+        self._run_device_qc_checks(device_entries, device_label)
 
-            # Run QC checks and log findings to qc_report.json
-            self._run_device_qc_checks(device_entries, device_label)
+    def _reserve_ingest_hash(self, file_hash: str, file_type: str) -> bool:
+        if file_type == "config":
+            return True
+        if file_hash in self.seen_file_hashes:
+            return False
+        self.seen_file_hashes.add(file_hash)
+        return True
 
-            self.log(f"✓ Completed! {total_for_device} files copied. Manifest written.\n")
+    def _release_ingest_hash(self, file_hash: str, file_type: str) -> None:
+        if file_type != "config":
+            self.seen_file_hashes.discard(file_hash)
 
-        except Exception as e:
-            self.log(f"✗ Error: {str(e)}\n")
-            QMessageBox.critical(self, "Copy Error", f"Error copying files: {str(e)}")
-        finally:
-            if reconyx is not None:
-                reconyx.close()
-            self._copy_in_progress = False
-            self.copy_btn.setEnabled(True)
+    def _append_ingest_qc(
+        self, deployment_folder, check, device, severity, message
+    ) -> None:
+        append_qc_report(deployment_folder, check, device, severity, message)
+
+    def _ingest_cancelled(self) -> bool:
+        return False
+
+    def _ingest_progress(self, _copied: int, _filename: str) -> None:
+        return
 
     def process_sd_card_files(self, source_dir, dest_dir, plot_num, plot_label, dev_code, device_label, reconyx):
         """Process files from SD card.
@@ -1693,6 +1958,8 @@ class FieldDataWizard(QMainWindow):
         # reproducible regardless of filesystem order (see inventory.sorted_walk).
         for root, dirs, files in sorted_walk(source_dir):
             for filename in files:
+                if self._ingest_cancelled():
+                    raise InterruptedError("Card ingest cancelled")
                 if filename.startswith(".") or filename.startswith("_"):
                     continue
 
@@ -1743,6 +2010,7 @@ class FieldDataWizard(QMainWindow):
                             f"{filename}"
                         )
                     files_copied += 1
+                    self._ingest_progress(files_copied, prior_dest.name)
                     continue
 
                 # For images: read EXIF + Reconyx metadata from source before
@@ -1793,26 +2061,68 @@ class FieldDataWizard(QMainWindow):
                 # Read/hash retries cover OS-level I/O failures as well as the
                 # post-copy verification. Duplicate media is rejected before any
                 # destination is touched.
+                hash_reserved = False
                 try:
-                    source_result = hash_file_with_retries(source_path)
-                    source_hash = source_result.sha256
-                    source_sha1 = source_result.sha1
-                    if source_result.attempts > 1:
-                        self.log(
-                            f"  Note: source read recovered on retry "
-                            f"{source_result.attempts - 1} — {filename}"
+                    relative_dest = dest_path.relative_to(
+                        self.current_deployment_folder
+                    ).as_posix()
+                    prior_at_destination = inventoried_storage.get(relative_dest)
+                    if prior_at_destination is None:
+                        copy_result = copy_file_single_read_verified(
+                            source_path,
+                            dest_path,
+                            accept_hash=lambda sha256_value, _sha1_value: (
+                                self._reserve_ingest_hash(sha256_value, file_type)
+                            ),
+                            release_hash=lambda sha256_value, _sha1_value: (
+                                self._release_ingest_hash(sha256_value, file_type)
+                            ),
                         )
-
-                    if is_duplicate_media(
-                        source_hash, file_type, self.seen_file_hashes
-                    ):
+                        source_hash = copy_result.sha256
+                        source_sha1 = copy_result.sha1
+                        if not copy_result.accepted:
+                            self.log(
+                                f"  Warning: duplicate file skipped — {new_filename} "
+                                "matches an already-inventoried file"
+                            )
+                            duplicate_count += 1
+                            duplicate_names.append(new_filename)
+                            self._append_ingest_qc(
+                                self.current_deployment_folder,
+                                "duplicate_detection",
+                                device_label,
+                                "warning",
+                                f"Duplicate hash: {new_filename} matches an "
+                                "already-inventoried file",
+                            )
+                            continue
+                        hash_reserved = file_type != "config"
+                        if copy_result.attempts > 1:
+                            self.log(
+                                f"  Note: copy verified on retry "
+                                f"{copy_result.attempts - 1} — {filename}"
+                            )
+                        file_hash, file_sha1 = source_hash, source_sha1
+                        copy_result = None
+                        prior_at_destination = None
+                    else:
+                        # Historical/config collision path: retain the old
+                        # hash-first comparison because an inventory-owned
+                        # destination must never be replaced speculatively.
+                        source_result = hash_file_with_retries(source_path)
+                        source_hash = source_result.sha256
+                        source_sha1 = source_result.sha1
+                        hash_reserved = self._reserve_ingest_hash(
+                            source_hash, file_type
+                        )
+                    if prior_at_destination is not None and not hash_reserved:
                         self.log(
                             f"  Warning: duplicate file skipped — {new_filename} "
                             "matches an already-inventoried file"
                         )
                         duplicate_count += 1
                         duplicate_names.append(new_filename)
-                        append_qc_report(
+                        self._append_ingest_qc(
                             self.current_deployment_folder,
                             "duplicate_detection",
                             device_label,
@@ -1822,10 +2132,6 @@ class FieldDataWizard(QMainWindow):
                         )
                         continue
 
-                    relative_dest = dest_path.relative_to(
-                        self.current_deployment_folder
-                    ).as_posix()
-                    prior_at_destination = inventoried_storage.get(relative_dest)
                     if prior_at_destination is not None:
                         if prior_at_destination.get("file_hash_sha256") == source_hash:
                             expected_size = int(
@@ -1845,28 +2151,18 @@ class FieldDataWizard(QMainWindow):
                                 f"  Already inventoried at {relative_dest}; "
                                 "not creating a duplicate record."
                             )
+                            self._release_ingest_hash(source_hash, file_type)
                             continue
                         raise ValueError(
                             f"Refusing to overwrite inventory-owned destination: "
                             f"{relative_dest}"
                         )
-
-                    copy_result = copy_file_verified(
-                        source_path,
-                        dest_path,
-                        expected_sha256=source_hash,
-                        expected_sha1=source_sha1,
-                    )
-                    if copy_result.attempts > 1:
-                        self.log(
-                            f"  Note: copy verified on retry "
-                            f"{copy_result.attempts - 1} — {filename}"
-                        )
-                    file_hash, file_sha1 = source_hash, source_sha1
                 except FileTransferError as exc:
+                    if hash_reserved:
+                        self._release_ingest_hash(source_hash, file_type)
                     hash_mismatch_count += 1
                     hash_mismatch_names.append(filename)
-                    append_qc_report(
+                    self._append_ingest_qc(
                         self.current_deployment_folder,
                         "hash_verification",
                         device_label,
@@ -1874,6 +2170,10 @@ class FieldDataWizard(QMainWindow):
                         str(exc),
                     )
                     self.save_session()
+                    raise
+                except Exception:
+                    if hash_reserved:
+                        self._release_ingest_hash(source_hash, file_type)
                     raise
 
                 # File size floor: flag suspiciously small files using device-aware thresholds.
@@ -1951,12 +2251,11 @@ class FieldDataWizard(QMainWindow):
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
-                if file_type != "config":
-                    self.seen_file_hashes.add(file_hash)
                 self.file_inventory.append(file_info)
                 inventoried_sources[source_relpath] = file_info
                 inventoried_storage[file_info["storage_relpath"]] = file_info
                 files_copied += 1
+                self._ingest_progress(files_copied, new_filename)
 
                 if file_type == "audio":
                     size_mb = dest_size / 1_000_000
@@ -1990,26 +2289,26 @@ class FieldDataWizard(QMainWindow):
 
         # Per-file aggregate summaries for qc_report.json
         if files_copied > 0:
-            append_qc_report(self.current_deployment_folder, "hash_verification", device_label, "pass",
-                             f"{files_copied} file(s) copied; all source/dest hashes matched")
+            self._append_ingest_qc(self.current_deployment_folder, "hash_verification", device_label, "pass",
+                                   f"{files_copied} file(s) copied; all source/dest hashes matched")
         if hash_mismatch_count == 0 and files_copied == 0:
             # No copy attempts logged — don't write a hash_verification entry
             pass
         if small_file_count > 0:
-            append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "warning",
-                             f"{small_file_count} file(s) below device-aware size floor(s): {floor_summary}")
+            self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "warning",
+                                   f"{small_file_count} file(s) below device-aware size floor(s): {floor_summary}")
         elif expected_floor is not None:
-            append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "pass",
-                             f"All {files_copied} file(s) above {format_size_floor(expected_floor)} threshold")
+            self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "pass",
+                                   f"All {files_copied} file(s) above {format_size_floor(expected_floor)} threshold")
         else:
-            append_qc_report(self.current_deployment_folder, "file_size_floor", device_label, "pass",
-                             "No device-specific file-size floor applied")
+            self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "pass",
+                                   "No device-specific file-size floor applied")
         if duplicate_count > 0:
-            append_qc_report(self.current_deployment_folder, "duplicate_detection", device_label, "warning",
-                             f"{duplicate_count} duplicate file(s) skipped")
+            self._append_ingest_qc(self.current_deployment_folder, "duplicate_detection", device_label, "warning",
+                                   f"{duplicate_count} duplicate file(s) skipped")
         else:
-            append_qc_report(self.current_deployment_folder, "duplicate_detection", device_label, "pass",
-                             "No duplicate file hashes encountered")
+            self._append_ingest_qc(self.current_deployment_folder, "duplicate_detection", device_label, "pass",
+                                   "No duplicate file hashes encountered")
 
         # Return the intentional-drop counts alongside files_copied so the caller's
         # expected-count reconciliation can treat them as accounted-for shortfall.
@@ -2024,6 +2323,13 @@ class FieldDataWizard(QMainWindow):
 
         index = self.device_tree.indexOfTopLevelItem(selected)
         plot_num, plot_label, dev_code, device_label = self.devices[index]
+        if device_label in self.card_ingest_threads:
+            QMessageBox.information(
+                self,
+                "Card Copy Running",
+                "Cancel this card job before marking the device as skipped.",
+            )
+            return
 
         selected.setText(2, "Skipped")
         selected.setText(3, "0")
@@ -2152,10 +2458,18 @@ class FieldDataWizard(QMainWindow):
 
     def validate_and_next_collection(self):
         """Validate collection and proceed to review"""
+        if self.card_ingest_threads:
+            labels = ", ".join(sorted(self.card_ingest_threads))
+            QMessageBox.information(
+                self,
+                "Card Copies Still Running",
+                f"Wait for the active card jobs to finish before finalizing:\n{labels}",
+            )
+            return
         pending = False
         for i in range(self.device_tree.topLevelItemCount()):
             item = self.device_tree.topLevelItem(i)
-            if item.text(2) == "Pending":
+            if item.text(2) not in {"Complete", "Skipped"}:
                 pending = True
                 break
 
@@ -2163,7 +2477,7 @@ class FieldDataWizard(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "Incomplete Collection",
-                "Some devices are still pending. Continue anyway?",
+                "Some devices are pending, incomplete, or failed. Continue anyway?",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.No:
@@ -3322,7 +3636,7 @@ class FieldDataWizard(QMainWindow):
         all_done = True
         pending_count = 0
         for i in range(self.device_tree.topLevelItemCount()):
-            if self.device_tree.topLevelItem(i).text(2) == "Pending":
+            if self.device_tree.topLevelItem(i).text(2) not in {"Complete", "Skipped"}:
                 all_done = False
                 pending_count += 1
         items.append({
@@ -3450,6 +3764,15 @@ class FieldDataWizard(QMainWindow):
 
     def closeEvent(self, event):
         """Override close to show pre-departure checklist and write summary when a session is active."""
+        if self.card_ingest_threads:
+            QMessageBox.warning(
+                self,
+                "Card Copies Still Running",
+                "The app cannot close while SD cards are being copied. Cancel each "
+                "card job or wait for it to finish.",
+            )
+            event.ignore()
+            return
         if self.wi_split_thread and self.wi_split_thread.isRunning():
             QMessageBox.information(
                 self,
@@ -3477,6 +3800,13 @@ class FieldDataWizard(QMainWindow):
 
     def start_new_deployment(self):
         """Reset for new deployment"""
+        if self.card_ingest_threads:
+            QMessageBox.information(
+                self,
+                "Card Copies Still Running",
+                "Cancel or finish all card jobs before starting a new ingestion.",
+            )
+            return
         if self.current_deployment_folder and not self.show_pre_departure_checklist():
             return
         reply = QMessageBox.question(
@@ -3505,6 +3835,13 @@ class FieldDataWizard(QMainWindow):
             self.devices = []
             self.file_inventory = []
             self.seen_file_hashes = set()
+            self._ingest_hash_registry = IngestHashRegistry()
+            self._active_card_sources.clear()
+            for panel in self.card_ingest_panels.values():
+                panel["group"].deleteLater()
+            self.card_ingest_panels.clear()
+            if hasattr(self, "card_jobs_group"):
+                self.card_jobs_group.hide()
             self.current_deployment_folder = None
             self.fixity_check_run = False
             self.box_upload_complete = False

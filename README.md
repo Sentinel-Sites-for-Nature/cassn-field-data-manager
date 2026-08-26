@@ -9,6 +9,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 ## Features
 
 - **Guided Workflow**: Step-by-step interface for SD card download and cloud storage upload across multi-plot, multi-device deployments
+- **Parallel Card Ingestion**: Copy one to four device cards concurrently. Each card has independent progress, speed/ETA, warnings, cancellation, and a rolling slot that becomes reusable as soon as that card is safely checkpointed.
 - **Standardized File Naming**: Files renamed to a consistent convention (`ORG_SITE_plotN_DEVTYPE_YYYYMMDD_SEQNO.ext`) for all devices. Camera images additionally encode trigger event and burst position (`EVENTNO_POS`) so photos from the same trigger are grouped.
 - **Per-file Metadata Generation**: Two CSVs written per deployment: `image_file_metadata.csv` (camera trap files) and `audio_file_metadata.csv` (AudioMoth recordings and config files). See the Metadata Schema section below for full field lists.
 - **Deployment Records**: Deployment configuration and file manifest saved as JSON for each session.
@@ -25,7 +26,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Wildlife Insights Image Batching**: Before the first Box upload, camera folders above 15,000 images are automatically organized into verified, burst-preserving numbered parts. The operation is visible, cancellable, and resumable.
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
 - **Wildlife SoundHub Submission**: Bird audio is transcoded to lossless FLAC into a local tree mirroring SoundHub's S3 bucket, with `deployment.csv` and `recording.csv` projected from `audio_file_metadata.csv`, then uploaded and verified. Box keeps the original WAVs untouched. See the Wildlife SoundHub Preparation section.
-- **Session Persistence**: Interrupted downloads resume automatically. Previously copied files are skipped and sequence/event numbering continues correctly.
+- **Session Persistence**: Interrupted downloads resume automatically. Concurrent workers checkpoint through one session writer; previously copied files are skipped and sequence/event numbering continues correctly.
 
 ## Installation
 
