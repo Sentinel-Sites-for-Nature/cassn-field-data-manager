@@ -740,6 +740,22 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
             "p1_ML",
             "p2_ML",
         }
+        assert set(window.card_ingest_panels) == {"p1_ML", "p2_ML"}
+        assert all(
+            panel["complete"] for panel in window.card_ingest_panels.values()
+        )
+        assert all(
+            "QC: All checks passed." in panel["messages"].toPlainText()
+            for panel in window.card_ingest_panels.values()
+        )
+        # Completed panels remain as safe-to-eject confirmations, then vanish
+        # once their source volumes disappear.
+        for source_path in source_paths:
+            source = Path(source_path)
+            for child in source.iterdir():
+                child.unlink()
+            source.rmdir()
+        window._remove_ejected_completed_card_panels()
         assert not window.card_ingest_panels
         assert not window.card_jobs_group.isVisible()
         assert window.copy_btn.isEnabled()

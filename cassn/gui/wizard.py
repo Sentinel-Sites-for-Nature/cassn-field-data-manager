@@ -27,8 +27,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPixmap
+from PySide6.QtCore import QDate, QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -226,6 +226,15 @@ class FieldDataWizard(QMainWindow):
 
         # Build UI
         self.init_ui()
+
+        # A completed card panel remains visible until its source volume is
+        # actually unmounted, then disappears without requiring a UI action.
+        self._card_ejection_timer = QTimer(self)
+        self._card_ejection_timer.setInterval(1000)
+        self._card_ejection_timer.timeout.connect(
+            self._remove_ejected_completed_card_panels
+        )
+        self._card_ejection_timer.start()
 
         # Offer to resume an in-progress session
         sessions = self.find_all_sessions()
@@ -619,33 +628,12 @@ class FieldDataWizard(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Logo banner at top - logo + title
-        banner_layout = QHBoxLayout()
-        banner_layout.setContentsMargins(0, 0, 0, 0)
-        banner_layout.addStretch()
-
-        # CA-SSN Logo
-        cassn_logo_path = BUNDLE_DIR / "assets" / "cassn_icon.png"
-        if cassn_logo_path.exists():
-            cassn_label = QLabel()
-            cassn_pixmap = QPixmap(str(cassn_logo_path))
-            cassn_scaled = cassn_pixmap.scaledToHeight(140, Qt.SmoothTransformation)
-            cassn_label.setPixmap(cassn_scaled)
-            cassn_label.setAlignment(Qt.AlignCenter)
-            banner_layout.addWidget(cassn_label)
-
-        banner_layout.addSpacing(10)
-
-        # App title
+        # Compact title; the former 140-pixel logo banner consumed workspace
+        # needed by concurrent card jobs.
         title_label = QLabel("CA-SSN Field Data Manager")
-        title_font = QFont("Arial", 24, QFont.Bold)
+        title_font = QFont("Arial", 18, QFont.Bold)
         title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignCenter)
-        banner_layout.addWidget(title_label)
-
-        banner_layout.addStretch()
-        main_layout.addLayout(banner_layout)
-        main_layout.addSpacing(10)
+        main_layout.addWidget(title_label)
 
         # Tab widget
         self.tabs = QTabWidget()
@@ -948,12 +936,14 @@ class FieldDataWizard(QMainWindow):
         self.card_jobs_group.hide()
         layout.addWidget(self.card_jobs_group)
 
-        # Progress log
-        log_group = QGroupBox("Progress Log")
+        # Cross-device messages only. Per-card copy chatter lives in the card
+        # panel that produced it.
+        log_group = QGroupBox("QC & Session Messages")
         log_layout = QVBoxLayout()
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(140)
         log_layout.addWidget(self.log_text)
 
         log_group.setLayout(log_layout)
@@ -1514,11 +1504,9 @@ class FieldDataWizard(QMainWindow):
         if len(self.card_ingest_panels) < 4:
             return
         for label, panel in list(self.card_ingest_panels.items()):
-            if label in self.card_ingest_threads:
+            if label in self.card_ingest_threads or not panel.get("complete"):
                 continue
-            panel["group"].setParent(None)
-            panel["group"].deleteLater()
-            del self.card_ingest_panels[label]
+            self._remove_card_panel(label)
             return
 
     def _remove_card_panel(self, device_label: str) -> None:
@@ -1529,6 +1517,16 @@ class FieldDataWizard(QMainWindow):
         panel["group"].setParent(None)
         panel["group"].deleteLater()
         self._reflow_card_panels()
+
+    def _remove_ejected_completed_card_panels(self) -> None:
+        """Dismiss successful panels after their source volume is unmounted."""
+        for device_label, panel in list(self.card_ingest_panels.items()):
+            if not panel.get("complete"):
+                continue
+            source_dir = panel.get("source_dir")
+            if source_dir is not None and not Path(source_dir).exists():
+                self.log(f"[{device_label}] Source card ejected; cleared completed job panel.")
+                self._remove_card_panel(device_label)
 
     def _create_card_panel(self, device_label: str, source_dir: Path) -> None:
         existing = self.card_ingest_panels.pop(device_label, None)
@@ -1547,9 +1545,21 @@ class FieldDataWizard(QMainWindow):
         detail = QLabel("0 files processed")
         detail.setWordWrap(True)
         findings = QLabel("Warnings: 0 · Errors: 0")
+        messages = QTextEdit()
+        messages.setReadOnly(True)
+        messages.setMaximumHeight(90)
+        messages.setPlaceholderText("Card and device QC messages appear here.")
         cancel = QPushButton("Cancel This Card")
         cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
-        for widget in (source_label, status, progress, detail, findings, cancel):
+        for widget in (
+            source_label,
+            status,
+            progress,
+            detail,
+            findings,
+            messages,
+            cancel,
+        ):
             layout.addWidget(widget)
 
         self.card_ingest_panels[device_label] = {
@@ -1558,10 +1568,13 @@ class FieldDataWizard(QMainWindow):
             "progress": progress,
             "detail": detail,
             "findings": findings,
+            "messages": messages,
             "warnings": 0,
             "errors": 0,
             "cancel": cancel,
             "started": time.monotonic(),
+            "source_dir": source_dir.resolve(),
+            "complete": False,
         }
         self._reflow_card_panels()
 
@@ -1671,16 +1684,42 @@ class FieldDataWizard(QMainWindow):
 
     def _on_card_log(self, device_label: str, message: str) -> None:
         panel = self.card_ingest_panels.get(device_label)
+        stripped = message.lstrip()
+        is_error = stripped.startswith(("✗", "ERROR:"))
+        is_warning = "Warning:" in message or stripped.startswith(("⚠", "WARNING:"))
         if panel:
-            stripped = message.lstrip()
-            if stripped.startswith(("✗", "ERROR:")):
+            if is_error:
                 panel["errors"] += 1
-            elif "Warning:" in message or stripped.startswith(("⚠", "WARNING:")):
+            elif is_warning:
                 panel["warnings"] += 1
             panel["findings"].setText(
                 f"Warnings: {panel['warnings']} · Errors: {panel['errors']}"
             )
-        self.log(f"[{device_label}] {message}")
+            routine_progress = (
+                stripped.startswith("...") and stripped.endswith("files processed")
+            ) or (
+                stripped.startswith("[") and " MB)" in stripped
+            )
+            if not routine_progress:
+                self._append_card_message(
+                    device_label, message, alert=is_error or is_warning
+                )
+        # The shared log is now for actionable cross-device information, not
+        # routine per-file progress already represented by each card panel.
+        if is_error or is_warning:
+            self.log(f"[{device_label}] {message}")
+
+    def _append_card_message(
+        self, device_label: str, message: str, *, alert: bool = False
+    ) -> None:
+        """Append a meaningful device message to its own compact log."""
+        panel = self.card_ingest_panels.get(device_label)
+        if panel is None:
+            return
+        messages = panel["messages"]
+        messages.setTextColor(QColor("#cc0000") if alert else QColor("#000000"))
+        messages.append(message)
+        messages.setTextColor(QColor("#000000"))
 
     def _on_card_progress(
         self, device_label: str, copied: int, expected: int, filename: str
@@ -1748,6 +1787,7 @@ class FieldDataWizard(QMainWindow):
                 panel["progress"].setRange(0, 100)
                 panel["cancel"].hide()
             message = result.get("error", "Unknown card ingest error")
+            self._append_card_message(device_label, message, alert=True)
             self.log(f"{'⚠' if cancelled else '✗'} [{device_label}] {message}")
             self.save_session()
             if not cancelled:
@@ -1777,7 +1817,11 @@ class FieldDataWizard(QMainWindow):
             panel["progress"].setRange(0, max(total_for_device, 1))
             panel["progress"].setValue(total_for_device)
             panel["detail"].setText(f"{total_for_device:,} files inventoried")
+            panel["messages"].append(
+                f"Complete: {total_for_device:,} files inventoried. Safe to eject card."
+            )
             panel["cancel"].hide()
+            panel["complete"] = True
         self.log(f"✓ [{device_label}] Complete — {total_for_device:,} files inventoried; card is safe to eject.")
 
         # Global products are rebuilt only at a stable boundary. A newly free
@@ -1795,7 +1839,6 @@ class FieldDataWizard(QMainWindow):
                 )
             except Exception as exc:
                 self.log(f"Warning: could not refresh metadata after card ingests: {exc}")
-        self._remove_card_panel(device_label)
         self._update_copy_action()
 
     def _release_finished_card_thread(self, worker: CardIngestThread) -> None:
@@ -1822,6 +1865,11 @@ class FieldDataWizard(QMainWindow):
                 message,
             )
             if unexplained > 0:
+                self._append_card_message(
+                    device_label,
+                    f"QC warning: unexplained file shortfall of {unexplained}.",
+                    alert=True,
+                )
                 self.log(f"⚠ [{device_label}] Unexplained file shortfall: {unexplained}")
 
         if device_entries:
@@ -1848,7 +1896,13 @@ class FieldDataWizard(QMainWindow):
                     severity,
                     message,
                 )
-                self.log(f"[{device_label}] {message}")
+                self._append_card_message(
+                    device_label,
+                    f"QC: {message}",
+                    alert=severity in {"warning", "error"},
+                )
+                if severity in {"warning", "error"}:
+                    self.log(f"[{device_label}] {message}")
         self._run_device_qc_checks(device_entries, device_label)
 
     def _reserve_ingest_hash(self, file_hash: str, file_type: str) -> bool:
@@ -3097,13 +3151,16 @@ class FieldDataWizard(QMainWindow):
             if warnings_list:
                 any_warnings = True
                 for msg in warnings_list:
+                    self._append_card_message(
+                        device_label, f"QC warning: {msg}", alert=True
+                    )
                     self.log(f"  QC [{device_label}] {msg}")
                     append_qc_report(self.current_deployment_folder, check_name, device_label, "warning", msg)
             else:
                 append_qc_report(self.current_deployment_folder, check_name, device_label, "pass", "OK")
 
         if not any_warnings:
-            self.log(f"  QC [{device_label}] All checks passed.")
+            self._append_card_message(device_label, "QC: All checks passed.")
 
     # -- verification (manual) ---------------------------------------------
 
