@@ -146,7 +146,18 @@ refresh them.
 ### 2. Run the Application
 
 ```bash
-python -m cassn
+cassn-app
+```
+
+`cassn-app` is a launcher symlinked from `~/.local/bin`. It changes to this
+repository and runs `.venv/bin/python -m cassn`, so the application always uses
+the tested project environment even when Conda or another Python installation
+is active. To install the command on another workstation, make
+`utils/cassn-app` executable and symlink it into a directory on that user's
+`PATH`. The direct equivalent is:
+
+```bash
+.venv/bin/python -m cassn
 ```
 
 On launch the app first downloads the complete Box `app_config` snapshot to
