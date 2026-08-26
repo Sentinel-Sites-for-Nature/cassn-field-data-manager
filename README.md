@@ -182,7 +182,7 @@ For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
 #### Step 1: Deployment Metadata
 - Select your organization (driven by the synced `program_config.json`)
 - Choose the formal site name from the dropdown; the stable short name and acronym fill automatically
-- Choose a returned-card deployment event; its read-only dates and deployed devices load automatically
+- Choose a completed deployment event; its read-only dates and deployed devices load automatically
 - Review the separate read-only summary of devices still deployed in the field
 - Select who is downloading the data
 - Check which devices (ML, SA, BD, BT) for each plot

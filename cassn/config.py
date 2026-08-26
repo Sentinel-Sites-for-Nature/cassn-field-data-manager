@@ -78,9 +78,10 @@ AUDIO_DEVICE_TYPES = frozenset({"BD", "BT"})
 # ---------------------------------------------------------------------------
 
 ORGANIZATIONS = ["UC"]
+DEFAULT_DOWNLOADER = "Imperato, John"
 DOWNLOADERS = [
-    "Bloom, Ryan",
     "Imperato, John",
+    "Bloom, Ryan",
     "Kaplan-Zenk, Samara",
     "Other",
 ]

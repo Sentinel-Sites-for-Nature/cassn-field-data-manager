@@ -424,13 +424,13 @@ def build_deployment_rounds(
     """Build selectable events from the canonical event table.
 
     ``deployment_events.csv`` supplies every closed event's ID, site, and dates.
-    ``deployments.csv`` only supplies the device rows joined by event ID. Open
-    placements have no event ID and remain grouped by exact start date solely
-    for the read-only field-inventory display.
+    ``deployments.csv`` only supplies the device rows joined by event ID. All
+    open placements at a site form one read-only current field set, even when
+    individual devices were installed or redeployed on different dates.
     """
     canonical_events = {row["deployment_event_id"]: row for row in event_rows}
     closed_rows_by_event: dict[str, list[dict]] = defaultdict(list)
-    open_rows_by_site_start: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    open_rows_by_site: dict[str, list[dict]] = defaultdict(list)
     for row in placement_rows:
         event_id = row["deployment_event_id"]
         if event_id:
@@ -446,9 +446,7 @@ def build_deployment_rounds(
                 )
             closed_rows_by_event[event_id].append(row)
         elif not row["deployment_end_date"]:
-            open_rows_by_site_start[
-                (row["site_short_name"], row["deployment_start_date"])
-            ].append(row)
+            open_rows_by_site[row["site_short_name"]].append(row)
 
     events_by_site: dict[str, list[dict]] = defaultdict(list)
     rows_by_round: dict[str, list[dict]] = {}
@@ -469,13 +467,17 @@ def build_deployment_rounds(
         })
         rows_by_round[round_id] = round_rows
 
-    for (site_short_name, start), round_rows in open_rows_by_site_start.items():
-        round_id = f"{site_short_name}:open:{start}"
+    for site_short_name, round_rows in open_rows_by_site.items():
+        start_dates = sorted({row["deployment_start_date"] for row in round_rows})
+        earliest_start = start_dates[0]
+        latest_start = start_dates[-1]
+        round_id = f"{site_short_name}:open"
         events_by_site[site_short_name].append({
             "deployment_round_id": round_id,
             "deployment_event_id": "",
-            "deployment_event_start_date": start,
+            "deployment_event_start_date": earliest_start,
             "deployment_event_end_date": "",
+            "latest_open_deployment_start_date": latest_start,
             "deployment_count": len(round_rows),
             "device_count": len(round_rows),  # historical session/UI compatibility
         })

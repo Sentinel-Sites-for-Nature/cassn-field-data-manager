@@ -435,6 +435,36 @@ def test_adjacent_dates_do_not_merge_distinct_curated_events(tmp_path):
     assert sorted(len(rows) for rows in rows_by_round.values()) == [1, 1]
 
 
+def test_all_open_placements_at_a_site_form_one_current_field_set():
+    original = placement(
+        deployment_id="",
+        deployment_event_id="",
+        deployment_end_date="",
+        deployment_start_date="2026-04-08",
+    )
+    later_bird_redeployment = placement(
+        deployment_id="",
+        deployment_event_id="",
+        deployment_end_date="",
+        deployment_start_date="2026-06-11",
+        plot_number="2",
+        device_type="BD",
+        device_id="ARU-CURRENT",
+    )
+
+    events, rows_by_round = build_deployment_rounds(
+        [], [original, later_bird_redeployment]
+    )
+
+    assert len(events["TestSite"]) == 1
+    current = events["TestSite"][0]
+    assert current["deployment_round_id"] == "TestSite:open"
+    assert current["deployment_event_start_date"] == "2026-04-08"
+    assert current["latest_open_deployment_start_date"] == "2026-06-11"
+    assert current["device_count"] == 2
+    assert rows_by_round["TestSite:open"] == [original, later_bird_redeployment]
+
+
 def test_metadata_uses_each_device_placement_interval(tmp_path):
     rows = [
         placement(),
@@ -567,6 +597,14 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         assert window.site_name_combo.currentText() == "Test Reserve"
         assert window.site_short_name_edit.text() == "TestSite"
         assert window.site_code_edit.text() == "TST"
+        form = window.deploy_event_combo.parentWidget().layout()
+        assert form.labelForField(window.deploy_event_combo).text() == "Deployment Event:"
+        assert (
+            form.labelForField(window.current_deployment_status_label).text()
+            == "Currently Deployed:"
+        )
+        assert form.labelForField(window.deploy_start_date).text() == "Start Date:"
+        assert form.labelForField(window.deploy_end_date).text() == "End Date:"
         assert window.deploy_event_combo.count() == 1
         assert (
             window.deploy_event_combo.currentData()["deployment_event_end_date"]
@@ -577,8 +615,9 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         checks = window.device_checkboxes[1]["ML"]
         assert [checkbox.text() for _row, checkbox in checks] == ["seq00", "seq01"]
         assert all(checkbox.isChecked() for _row, checkbox in checks)
-        assert "Since 2026-04-24" in window.current_deployment_status_label.text()
+        assert window.observer_combo.currentText() == "Imperato, John"
         assert "1 device in the field" in window.current_deployment_status_label.text()
+        assert "deployed 2026-04-24" in window.current_deployment_status_label.text()
     finally:
         window.close()
         app.processEvents()

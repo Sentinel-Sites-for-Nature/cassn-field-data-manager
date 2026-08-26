@@ -92,6 +92,7 @@ from cassn.config import (
     BOX_TOKEN_FILE,
     BUNDLE_DIR,
     CONFIG_JSON,
+    DEFAULT_DOWNLOADER,
     DEVICE_TYPES,
     DOWNLOADERS,
     IMAGE_FIELDS,
@@ -691,11 +692,11 @@ class FieldDataWizard(QMainWindow):
         # metadata are scoped to this selection.
         self.deploy_event_combo = QComboBox()
         self.deploy_event_combo.setToolTip(
-            "Pick the curated card-return event. The device grid and metadata "
+            "Pick the completed deployment event. The device grid and metadata "
             "will use only placements assigned to that event."
         )
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
-        form_layout.addRow("Returned-Card Event:", self.deploy_event_combo)
+        form_layout.addRow("Deployment Event:", self.deploy_event_combo)
 
         # Open placements are useful field context, but they are not actionable
         # downloads and must never supply an invented retrieval/end date.
@@ -707,25 +708,34 @@ class FieldDataWizard(QMainWindow):
         self.current_deployment_status_label.setToolTip(
             "Read-only curated inventory for devices that remain in the field."
         )
-        form_layout.addRow("Currently Deployed (read only):", self.current_deployment_status_label)
+        form_layout.addRow("Currently Deployed:", self.current_deployment_status_label)
 
         # Deployment dates
         self.deploy_start_date = QDateEdit()
         self.deploy_start_date.setReadOnly(True)
         self.deploy_start_date.setCalendarPopup(False)
         self.deploy_start_date.setDate(QDate.currentDate())
-        form_layout.addRow("Deployment Event Start Date:", self.deploy_start_date)
+        form_layout.addRow("Start Date:", self.deploy_start_date)
 
         self.deploy_end_date = QDateEdit()
         self.deploy_end_date.setReadOnly(True)
         self.deploy_end_date.setCalendarPopup(False)
         self.deploy_end_date.setDate(QDate.currentDate())
-        form_layout.addRow("Deployment Event End Date:", self.deploy_end_date)
+        form_layout.addRow("End Date:", self.deploy_end_date)
 
         # Observer/Downloader
         self.observer_combo = QComboBox()
         self.observer_combo.setEditable(True)
-        self.observer_combo.addItems(self.lookups.program_config.get("observers") or DOWNLOADERS)
+        self.observer_combo.addItems(
+            self.lookups.program_config.get("observers") or DOWNLOADERS
+        )
+        self.default_downloader = (
+            self.lookups.program_config.get("default_downloader")
+            or DEFAULT_DOWNLOADER
+        )
+        if self.observer_combo.findText(self.default_downloader) < 0:
+            self.observer_combo.insertItem(0, self.default_downloader)
+        self.observer_combo.setCurrentText(self.default_downloader)
         self.observer_combo.currentTextChanged.connect(self.on_observer_changed)
         form_layout.addRow("Who is downloading data?", self.observer_combo)
 
@@ -1149,7 +1159,7 @@ class FieldDataWizard(QMainWindow):
         self._populate_deploy_events("")
 
     def _populate_deploy_events(self, site_short_name):
-        """Show curated returned-card events and read-only open placements."""
+        """Show completed deployment events and one current field summary."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
@@ -1172,13 +1182,18 @@ class FieldDataWizard(QMainWindow):
 
         current = self.lookups.current_rounds(site_short_name)
         if current:
+            event = current[0]
+            earliest = event["deployment_event_start_date"]
+            latest = event.get("latest_open_deployment_start_date", earliest)
+            date_text = (
+                f"deployed {earliest}–{latest}"
+                if latest != earliest
+                else f"deployed {earliest}"
+            )
+            count = event["device_count"]
             self.current_deployment_status_label.setText(
-                "\n".join(
-                    f"Since {event['deployment_event_start_date']}: "
-                    f"{event['device_count']} device"
-                    f"{'s' if event['device_count'] != 1 else ''} in the field"
-                    for event in current
-                )
+                f"{count} device{'s' if count != 1 else ''} in the field "
+                f"({date_text})"
             )
         else:
             self.current_deployment_status_label.setText("None recorded")
@@ -3494,7 +3509,7 @@ class FieldDataWizard(QMainWindow):
             self.site_code_edit.clear()
             self.deploy_start_date.setDate(QDate.currentDate())
             self.deploy_end_date.setDate(QDate.currentDate())
-            self.observer_combo.setCurrentIndex(-1)
+            self.observer_combo.setCurrentText(self.default_downloader)
             self.clear_all_devices()
             self.device_tree.clear()
             self.log_text.clear()

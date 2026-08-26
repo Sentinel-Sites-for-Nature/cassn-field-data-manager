@@ -151,6 +151,11 @@ seasons may remain exactly as filed.
 
 ## Decisions to settle before Phase 3
 
+- Whether the download wizard should continue using a deployment event as its
+  primary work unit or become plot/deployment-first. The current event workflow
+  remains workable because the operator can select only one plot's checkboxes;
+  revisit this after the 2026 season alongside the directory and survey-form
+  redesign rather than changing the ingest model in isolation.
 - Whether `media/` uses direct files or `media/images/` and `media/audio/`.
 - Whether per-deployment file metadata stays split by image/audio schema.
 - Whether the redesigned post-2026 workflow retains the event directory layer.
