@@ -1023,7 +1023,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(review_splitter, stretch=1)
 
         # Box upload progress (hidden by default)
-        self.upload_group = QGroupBox("WI Preparation & Box Upload Progress")
+        self.upload_group = QGroupBox("Box Upload Progress")
         upload_layout = QVBoxLayout()
 
         self.upload_progress_bar = QProgressBar()
@@ -2847,6 +2847,7 @@ class FieldDataWizard(QMainWindow):
             return
 
         self.upload_group.show()
+        self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
         self.upload_status_label.setStyleSheet("")
 
@@ -2870,7 +2871,7 @@ class FieldDataWizard(QMainWindow):
             self._start_box_upload_thread()
             return
 
-        self.upload_status_label.setText("Planning Wildlife Insights image folders…")
+        self.upload_status_label.setText("Preparing local files for Box upload…")
         self.cancel_upload_btn.setText("Cancel Preparation")
         self.wi_split_thread = WISplitThread(
             self.current_deployment_folder,
@@ -2881,22 +2882,21 @@ class FieldDataWizard(QMainWindow):
         self.wi_split_thread.start()
 
     def _on_wi_split_progress(self, current: int, total: int, path: str):
-        """Show visible progress while local camera folders are prepared."""
+        """Report the internal preparation phase without a progress bar."""
         if total <= 0:
-            self.upload_progress_bar.setRange(0, 0)
-            self.upload_status_label.setText(path or "Planning WI image folders…")
+            self.upload_status_label.setText(
+                path or "Preparing local files for Box upload…"
+            )
             return
 
-        self.upload_progress_bar.setRange(0, 100)
         percent = int((current / total) * 100)
-        self.upload_progress_bar.setValue(percent)
         if path:
             self.upload_status_label.setText(
-                f"Preparing WI folders: {current}/{total} ({percent}%) — {path}"
+                f"Preparing local files: {current}/{total} ({percent}%) — {path}"
             )
         else:
             self.upload_status_label.setText(
-                f"Preparing WI folders: {current}/{total} ({percent}%)"
+                f"Preparing local files: {current}/{total} ({percent}%)"
             )
 
     def _on_wi_split_completed(self, success: bool, cancelled: bool, message: str):
@@ -2942,6 +2942,7 @@ class FieldDataWizard(QMainWindow):
 
     def _start_box_upload_thread(self):
         """Launch the existing uploader after preparation has cleared its gate."""
+        self.upload_progress_bar.show()
         self.upload_progress_bar.setRange(0, 100)
         self.upload_progress_bar.setValue(0)
         self.upload_status_label.setText("Starting upload to Box…")

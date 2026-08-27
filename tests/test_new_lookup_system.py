@@ -707,6 +707,14 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
         window.activity_log_toggle.setChecked(False)
         assert window.activity_log_group.isHidden()
 
+        assert window.upload_group.title() == "Box Upload Progress"
+        window.upload_progress_bar.hide()
+        window._on_wi_split_progress(1, 4, "camera folder")
+        assert window.upload_progress_bar.isHidden()
+        assert window.upload_status_label.text().startswith(
+            "Preparing local files: 1/4 (25%)"
+        )
+
         event_root = tmp_path / "event"
         (event_root / "raw_data").mkdir(parents=True)
         window.current_deployment_folder = event_root
