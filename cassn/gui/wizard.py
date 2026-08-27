@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QSpinBox,
     QMenu,
     QTabWidget,
@@ -126,7 +127,6 @@ from cassn.core.inventory import (
     build_deployment_filename,
     build_inventory_record,
     deduplicate_exact_storage_entries,
-    format_staged_event_tree,
     generate_session_summary,
     index_inventory_by_storage_relpath,
     inventory_by_source_relpath,
@@ -1001,7 +1001,26 @@ class FieldDataWizard(QMainWindow):
         summary_layout.addWidget(self.summary_text)
 
         summary_group.setLayout(summary_layout)
-        layout.addWidget(summary_group)
+
+        # Native logical tree: expandable and width-safe, but deliberately
+        # bounded so opening Review never enumerates tens of thousands of media
+        # files from raw_data device folders.
+        tree_group = QGroupBox("Staged Deployment Event")
+        tree_layout = QVBoxLayout()
+        self.staged_event_tree = QTreeWidget()
+        self.staged_event_tree.setHeaderLabels(["Folder / File", "Contents"])
+        self.staged_event_tree.setColumnWidth(0, 420)
+        self.staged_event_tree.setAlternatingRowColors(True)
+        tree_layout.addWidget(self.staged_event_tree)
+        tree_group.setLayout(tree_layout)
+
+        review_splitter = QSplitter(Qt.Vertical)
+        review_splitter.addWidget(summary_group)
+        review_splitter.addWidget(tree_group)
+        review_splitter.setStretchFactor(0, 1)
+        review_splitter.setStretchFactor(1, 1)
+        review_splitter.setSizes([330, 260])
+        layout.addWidget(review_splitter, stretch=1)
 
         # Box upload progress (hidden by default)
         self.upload_group = QGroupBox("WI Preparation & Box Upload Progress")
@@ -2676,16 +2695,10 @@ class FieldDataWizard(QMainWindow):
             summary.append(f"  {ftype}: {count}")
         summary.append("")
 
-        summary.append("STAGED DEPLOYMENT EVENT")
+        summary.append("LOCAL STAGING")
         summary.append("-" * 60)
-        summary.append(f"Local Staging: {self.current_deployment_folder}")
-        summary.append("")
-        summary.extend(
-            format_staged_event_tree(
-                self.current_deployment_folder,
-                self.file_inventory,
-            ).splitlines()
-        )
+        summary.append(str(self.current_deployment_folder))
+        summary.append("See the expandable staged deployment tree below.")
         summary.append("")
 
         summary.append("=" * 60)
@@ -2710,6 +2723,111 @@ class FieldDataWizard(QMainWindow):
         )
 
         self.summary_text.setText("\n".join(summary))
+        self._populate_staged_event_tree()
+
+    def _populate_staged_event_tree(self) -> None:
+        """Render a bounded logical directory tree for the review screen.
+
+        ``raw_data`` stops at one node per device and uses inventory counts;
+        individual media files are never enumerated. Other generated folders
+        show their immediate children, capped to keep the UI responsive.
+        """
+        tree = self.staged_event_tree
+        tree.clear()
+        root = Path(self.current_deployment_folder) if self.current_deployment_folder else None
+        if root is None:
+            tree.addTopLevelItem(QTreeWidgetItem(["No staging folder selected", ""]))
+            return
+
+        device_counts: Counter[str] = Counter(
+            str(row.get("device_label", "") or "").strip()
+            for row in self.file_inventory
+            if str(row.get("device_label", "") or "").strip()
+        )
+        root_item = QTreeWidgetItem(
+            [f"{root.name}/", f"{len(self.file_inventory):,} inventoried files"]
+        )
+        root_item.setToolTip(0, str(root))
+        tree.addTopLevelItem(root_item)
+
+        if not root.is_dir():
+            root_item.addChild(QTreeWidgetItem(["Folder not found", ""]))
+            root_item.setExpanded(True)
+            return
+
+        def visible_children(folder: Path) -> list[Path]:
+            try:
+                children = [
+                    path for path in folder.iterdir()
+                    if not path.name.startswith(".")
+                ]
+            except OSError:
+                return []
+            return sorted(
+                children,
+                key=lambda path: (not path.is_dir(), path.name.casefold()),
+            )
+
+        for path in visible_children(root):
+            if path.is_dir():
+                children = visible_children(path)
+                folder_item = QTreeWidgetItem(
+                    [f"{path.name}/", f"{len(children):,} items"]
+                )
+                folder_item.setToolTip(0, str(path))
+                root_item.addChild(folder_item)
+
+                if path.name == "raw_data":
+                    device_dirs = {
+                        child.name: child for child in children if child.is_dir()
+                    }
+                    for label in sorted(
+                        set(device_dirs) | set(device_counts), key=str.casefold
+                    ):
+                        count = device_counts.get(label, 0)
+                        noun = "file" if count == 1 else "files"
+                        detail = f"{count:,} inventoried {noun}"
+                        if label not in device_dirs:
+                            detail += " — folder missing"
+                        device_item = QTreeWidgetItem([f"{label}/", detail])
+                        if label in device_dirs:
+                            device_item.setToolTip(0, str(device_dirs[label]))
+                        folder_item.addChild(device_item)
+                else:
+                    displayed = children[:50]
+                    for child in displayed:
+                        if child.is_dir():
+                            label = f"{child.name}/"
+                            detail = "Folder"
+                        else:
+                            label = child.name
+                            try:
+                                detail = f"{child.stat().st_size:,} bytes"
+                            except OSError:
+                                detail = "File"
+                        child_item = QTreeWidgetItem([label, detail])
+                        child_item.setToolTip(0, str(child))
+                        folder_item.addChild(child_item)
+                    if len(children) > len(displayed):
+                        folder_item.addChild(
+                            QTreeWidgetItem(
+                                [f"… {len(children) - len(displayed)} more items", ""]
+                            )
+                        )
+            else:
+                try:
+                    detail = f"{path.stat().st_size:,} bytes"
+                except OSError:
+                    detail = "File"
+                file_item = QTreeWidgetItem([path.name, detail])
+                file_item.setToolTip(0, str(path))
+                root_item.addChild(file_item)
+
+        root_item.setExpanded(True)
+        for index in range(root_item.childCount()):
+            child = root_item.child(index)
+            if child.text(0) == "raw_data/":
+                child.setExpanded(True)
 
     # ------------------------------------------------------------------
     # Box upload + post-upload verification
