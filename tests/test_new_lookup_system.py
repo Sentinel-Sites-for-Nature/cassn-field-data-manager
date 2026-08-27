@@ -699,6 +699,14 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
 
     window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
     try:
+        assert window.activity_log_group.isHidden()
+        assert window.activity_log_toggle.text() == "Show Activity Details"
+        window.activity_log_toggle.setChecked(True)
+        assert not window.activity_log_group.isHidden()
+        assert window.activity_log_toggle.text() == "Hide Activity Details"
+        window.activity_log_toggle.setChecked(False)
+        assert window.activity_log_group.isHidden()
+
         event_root = tmp_path / "event"
         (event_root / "raw_data").mkdir(parents=True)
         window.current_deployment_folder = event_root

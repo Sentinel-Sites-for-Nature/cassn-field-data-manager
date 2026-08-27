@@ -936,9 +936,18 @@ class FieldDataWizard(QMainWindow):
         self.card_jobs_group.hide()
         layout.addWidget(self.card_jobs_group)
 
-        # Cross-device messages only. Per-card copy chatter lives in the card
-        # panel that produced it.
-        log_group = QGroupBox("QC & Session Messages")
+        # Keep a diagnostic log available without permanently consuming the
+        # collection workspace. Normal device/QC feedback lives in card panels
+        # and Review & Finalize.
+        self.activity_log_toggle = QToolButton()
+        self.activity_log_toggle.setText("Show Activity Details")
+        self.activity_log_toggle.setCheckable(True)
+        self.activity_log_toggle.setArrowType(Qt.RightArrow)
+        self.activity_log_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.activity_log_toggle.toggled.connect(self._toggle_activity_details)
+        layout.addWidget(self.activity_log_toggle, alignment=Qt.AlignLeft)
+
+        self.activity_log_group = QGroupBox("Activity Details")
         log_layout = QVBoxLayout()
 
         self.log_text = QTextEdit()
@@ -946,8 +955,9 @@ class FieldDataWizard(QMainWindow):
         self.log_text.setMaximumHeight(140)
         log_layout.addWidget(self.log_text)
 
-        log_group.setLayout(log_layout)
-        layout.addWidget(log_group)
+        self.activity_log_group.setLayout(log_layout)
+        self.activity_log_group.hide()
+        layout.addWidget(self.activity_log_group)
 
         # Navigation
         nav_layout = QHBoxLayout()
@@ -959,6 +969,16 @@ class FieldDataWizard(QMainWindow):
         nav_layout.addStretch()
         nav_layout.addWidget(next_btn)
         layout.addLayout(nav_layout)
+
+    def _toggle_activity_details(self, expanded: bool) -> None:
+        """Expand or collapse the optional diagnostic activity log."""
+        self.activity_log_group.setVisible(expanded)
+        self.activity_log_toggle.setArrowType(
+            Qt.DownArrow if expanded else Qt.RightArrow
+        )
+        self.activity_log_toggle.setText(
+            "Hide Activity Details" if expanded else "Show Activity Details"
+        )
 
     def create_review_tab(self):
         """Create the review and finalize tab"""
