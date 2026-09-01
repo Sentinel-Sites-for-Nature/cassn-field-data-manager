@@ -29,7 +29,7 @@ without requiring historical folders to move.
 ## Target Box tree for the current workflow
 
 ```text
-field_data/
+data/
 └── <year>/
     └── <reserve>/
         └── <deployment_event_id>/

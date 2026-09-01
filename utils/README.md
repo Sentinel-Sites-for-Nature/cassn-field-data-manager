@@ -7,6 +7,89 @@ The active lookup contract uses `site_name,site_short_name,site_code` in
 `site_short_name`. Retired `devices.csv`, `cameras.csv`,
 `ARUs.csv`, and event-only `deployments.csv` are not app inputs.
 
+## `generate_data_collection_summary.py`
+
+Builds a three-sheet Excel report from confirmed Box-uploaded media metadata in
+one complete `data/<year>` folder. It reads only deployment-event-root
+`image_file_metadata.csv` and `audio_file_metadata.csv` files; it does not list
+or open raw images or recordings.
+
+The report contains:
+
+- `Summary` — sites, images, WI-classified images, bird minutes, SoundHub-
+  classified bird minutes, bat minutes, and total media volume;
+- `By Site` — the same measures using the full `site_name`; and
+- `Data Quality` — excluded/unconfirmed rows and incomplete source metadata.
+
+Wildlife Insights upload is manual. For an accurate WI total, export
+`CASSN_WI_Validation_Tracker_v2` from Google Sheets as `.xlsx` (or export its
+`Deployment Tracker` tab as `.csv`) and pass it with `--wi-tracker`. Tracker
+statuses beginning `WI -` count as uploaded/classified; `Box` does not. The
+tracker is read-only and no Box metadata is changed.
+
+Preview the 2026 report without writing anything:
+
+```bash
+.venv/bin/python utils/generate_data_collection_summary.py \
+  --year 2026 \
+  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx
+```
+
+After reviewing the totals and data-quality messages, write the workbook:
+
+```bash
+.venv/bin/python utils/generate_data_collection_summary.py \
+  --year 2026 \
+  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx \
+  --apply
+```
+
+The normal output is:
+
+```text
+Box-Box/CASSN/data_collection_summary_stats/
+└── <date-of-generation>/
+    └── CA-SSN_data_collection_summary_<year>.xlsx
+```
+
+That Box reports folder is ID `413722950229`. Use `--box-year-root` or
+`--output-root` to test with fixture/local folders. The default is always a dry
+run; a report with validation errors is never written.
+
+## `backfill_wi_provenance.py`
+
+Backfills the durable `is_submitted_to_wi` flag in Box image metadata from an
+export of `CASSN_WI_Validation_Tracker_v2`. The utility operates directly on
+Box, reads metadata CSVs only, and uploads verified new CSV versions only when
+`--apply` is supplied. Tracker statuses beginning `WI -` set the flag true;
+`Box` statuses never clear an existing true value. Unknown submitter and
+submission-datetime values remain blank.
+
+```bash
+.venv/bin/python utils/backfill_wi_provenance.py \
+  --year 2026 \
+  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx
+
+.venv/bin/python utils/backfill_wi_provenance.py \
+  --year 2026 \
+  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx \
+  --apply
+```
+
+## `backfill_audio_durations.py`
+
+Recovers blank `recording_duration_sec` values directly from small ranged WAV
+header reads on Box. It reads at most the first 1 MiB per unique recording,
+derives whole seconds from the RIFF `fmt` and `data` chunks, and never downloads
+or modifies the audio body. The default is a dry run; `--apply` versions and
+SHA-1-verifies only affected `audio_file_metadata.csv` files. Malformed or
+header-only recordings remain blank and are documented in the audit.
+
+```bash
+.venv/bin/python -u utils/backfill_audio_durations.py --year 2026
+.venv/bin/python -u utils/backfill_audio_durations.py --year 2026 --apply
+```
+
 ## `validate_curated_lookups.py`
 
 Read-only validation for a complete candidate runtime lookup directory:
@@ -235,7 +318,7 @@ locally (e.g. cameras that recorded 2025 because the clock was a year early).
 Audio (`BD`/`BT`) is never affected — AudioMoth datetimes come from the
 GUANO/filename, not a camera clock.
 
-> **Close the CASSN app before running.** Its autosave would otherwise overwrite
+> **Close the CA-SSN app before running.** Its autosave would otherwise overwrite
 > the corrected `session.json`.
 
 ### Requirements
@@ -339,7 +422,7 @@ touched. Point the WI uploader at each `<device>_N` subfolder in turn.
 For John's production maintenance workflow, a requested retroactive split is a
 **post-upload operation on the Box Drive deployment copy**. Resolve and target
 the deployment below
-`/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data`; do not target
+`/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data`; do not target
 the G-DRIVE staging copy unless John explicitly requests that location. This
 operating convention is separate from the application's automatic pre-upload
 behavior for newly ingested deployments.
@@ -349,16 +432,16 @@ behavior for newly ingested deployments.
 ```bash
 # Preview one uploaded deployment in Box Drive — writes nothing (default):
 python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
 
 # Perform the verified split while preventing sleep:
 caffeinate python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
   --apply --yes
 
 # Put the Box Drive deployment back:
 python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
   --undo
 ```
 
@@ -470,7 +553,7 @@ python utils/prep_soundhub.py upload --verify-only
 | `stage --root PATH` | Scan below this folder for every deployment with an `audio_file_metadata.csv`. |
 | `upload --verify-only` | Skip the transfer; only reconcile staging against the bucket. |
 | `upload --preflight-only` | Validate exact staged-FLAC coverage in Box metadata without S3 or Box writes. |
-| `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `field_data/<year>` folder. |
+| `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `data/<year>` folder. |
 | `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
 | `clear-completed` | Read-only cleanup preflight for a fully submitted local batch. |
 | `clear-completed --apply` | Delete the preflighted derived staging project after SoundHub acceptance. |
@@ -509,7 +592,7 @@ so the submission travels to Box alongside the raw data.
   unsubmitted. The same concise Markdown report is saved into every affected
   Box deployment event's `soundhub/` folder with the destination, counts,
   manifest hashes, and verification result.
-- **Automatic year selection.** The normal Box Drive `field_data/<year>` folder
+- **Automatic year selection.** The normal Box Drive `data/<year>` folder
   is inferred from the staged deployment IDs, including future years. A staging
   tree containing multiple years is rejected; `--box-year-root` is only for a
   nonstandard Box location, not routine year selection.
@@ -576,10 +659,10 @@ Anza-Borrego BD sensor heights. It never opens or changes media or
 
 ```bash
 python utils/backfill_soundhub_fields.py \
-  --box-year-root "/path/to/Box/CASSN/field_data/2026"
+  --box-year-root "/path/to/Box/CASSN/data/2026"
 
 python utils/backfill_soundhub_fields.py \
-  --box-year-root "/path/to/Box/CASSN/field_data/2026" \
+  --box-year-root "/path/to/Box/CASSN/data/2026" \
   --apply
 ```
 
@@ -620,11 +703,11 @@ Box year folder. Directory scans only select files matching
 ```bash
 # Preview every applicable WI CSV below the 2026 Box folder:
 python utils/normalize_wi_coordinates.py \
-  "/Users/example/Library/CloudStorage/Box-Box/CASSN/field_data/2026"
+  "/Users/example/Library/CloudStorage/Box-Box/CASSN/data/2026"
 
 # Apply the reported changes:
 python utils/normalize_wi_coordinates.py \
-  "/Users/example/Library/CloudStorage/Box-Box/CASSN/field_data/2026" \
+  "/Users/example/Library/CloudStorage/Box-Box/CASSN/data/2026" \
   --apply
 ```
 

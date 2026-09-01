@@ -85,7 +85,7 @@ def parse_camera_recorded_datetime(exif_data: dict) -> str:
 
     e.g. ``'2025-12-04T15:48:05-08:00'``. When the camera recorded no
     ``OffsetTimeOriginal``, the timestamp is assumed to be local Pacific
-    time (all CASSN cameras run on Pacific) rather than dropped. Empty
+    time (all CA-SSN cameras run on Pacific) rather than dropped. Empty
     string on failure.
     """
     try:

@@ -134,7 +134,7 @@ def _fixture(tmp_path: Path):
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
 
-    box_year = tmp_path / "Box" / "field_data" / "2026"
+    box_year = tmp_path / "Box" / "data" / "2026"
     event_1 = box_year / "Reserve A" / "UC_Alpha_20260610" / "audio_file_metadata.csv"
     event_2 = box_year / "Reserve B" / "UC_Beta_20260710" / "audio_file_metadata.csv"
     _write_csv(
@@ -166,7 +166,7 @@ def test_plan_maps_exact_staged_rows_across_events(tmp_path):
     assert plan.event_ids == {"UC_Alpha_20260610", "UC_Beta_20260710"}
     assert plan.matched_file_count == 2
     assert infer_submission_year(staging) == 2026
-    assert default_box_year_root(2026).name == "2026"
+    assert default_box_year_root(2026).parts[-3:] == ("CASSN", "data", "2026")
 
 
 def test_apply_preserves_header_unrelated_cells_and_excluded_row(tmp_path):
@@ -402,7 +402,7 @@ def test_year_inference_supports_2027_and_blocks_mixed_years(tmp_path):
         [_recording("UC_Alpha_plot1_BD_20270610")],
     )
     assert infer_submission_year(staging) == 2027
-    assert default_box_year_root(2027).name == "2027"
+    assert default_box_year_root(2027).parts[-3:] == ("CASSN", "data", "2027")
 
     _write_csv(
         project_root(staging) / "recording.csv",

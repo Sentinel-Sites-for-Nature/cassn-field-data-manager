@@ -21,7 +21,7 @@ unchanged. The utility never creates a new per-device manifest.
 The offset is fully general (years/months/days/hours/minutes/seconds, add or
 subtract), not hardcoded to one year. Use --dry-run first.
 
-IMPORTANT: close the CASSN app before running. Its autosave would otherwise
+IMPORTANT: close the CA-SSN app before running. Its autosave would otherwise
 overwrite the corrected session.json.
 
 --scratch (optional speed-up for slow/HDD staging)

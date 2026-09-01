@@ -63,7 +63,7 @@ provenance stamping, and event-local submission reports.
   the same report to every affected event.
 - A Box failure after successful S3 verification produces a distinct recovery
   state that says not to re-upload.
-- A 2027 event resolves to `field_data/2027` without operator input.
+- A 2027 event resolves to `data/2027` without operator input.
 - A mixed 2026/2027 batch is blocked before any S3 write.
 - CLI output describes the same scope consistently without requiring knowledge
   of the internal provenance implementation.

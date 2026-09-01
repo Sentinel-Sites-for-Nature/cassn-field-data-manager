@@ -240,7 +240,7 @@ def default_box_year_root(year: int) -> Path:
         / "CloudStorage"
         / "Box-Box"
         / "CASSN"
-        / "field_data"
+        / "data"
         / str(year)
     )
 

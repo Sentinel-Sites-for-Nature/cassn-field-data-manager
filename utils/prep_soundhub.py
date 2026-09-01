@@ -417,7 +417,7 @@ def main() -> int:
     )
     p_stage.add_argument(
         "--box-year-root",
-        help="Override Box field_data/<year> only when checking an existing batch",
+        help="Override Box data/<year> only when checking an existing batch",
     )
     p_stage.set_defaults(func=cmd_stage)
 
@@ -443,7 +443,7 @@ def main() -> int:
     )
     p_upload.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box field_data/<year> folder",
+        help="Override the automatically inferred Box data/<year> folder",
     )
     p_upload.add_argument(
         "--submitter",
@@ -463,7 +463,7 @@ def main() -> int:
     )
     p_clear.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box field_data/<year> folder",
+        help="Override the automatically inferred Box data/<year> folder",
     )
     p_clear.set_defaults(func=cmd_clear_completed)
 

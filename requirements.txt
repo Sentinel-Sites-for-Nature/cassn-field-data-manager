@@ -16,3 +16,4 @@ boto3            # Wildlife SoundHub S3 upload
 Pillow           # image EXIF reading
 piexif           # image EXIF reading
 PyExifTool       # camera metadata (requires the exiftool binary, see note above)
+openpyxl          # data-collection summary XLSX reports and WI tracker imports

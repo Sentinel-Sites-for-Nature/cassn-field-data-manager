@@ -51,7 +51,7 @@ Usage
     python utils/backfill_box_provenance.py --dry-run "/path/dep"      # preview
     python utils/backfill_box_provenance.py --no-upload "/path/dep"    # stamp locally only
 
-    # Box-native — path is relative to the field_data root (year/reserve/deployment):
+    # Box-native — path is relative to the data root (year/reserve/deployment):
     python utils/backfill_box_provenance.py --from-box "2026/Quail Ridge Reserve/UC_QuailRidge_20260618"
     python utils/backfill_box_provenance.py --from-box --all           # sweep every deployment on Box
 
@@ -375,7 +375,7 @@ def main() -> int:
     parser.add_argument("--from-box", action="store_true",
                         help="Operate directly on Box copies (no local folder needed).")
     parser.add_argument("--all", action="store_true",
-                        help="With --from-box: process every deployment under field_data.")
+                        help="With --from-box: process every deployment under data.")
     parser.add_argument("--upload-datetime", metavar="ISO",
                         help="Override the upload time (ISO-8601). Naive values use --assume-tz.")
     parser.add_argument("--assume-tz", default=DEFAULT_ASSUME_TZ,

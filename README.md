@@ -1,6 +1,6 @@
 # CA-SSN Field Data Manager
 
-A Python desktop application for downloading, uploading, and managing wildlife image and audio data. Built for the California Sentinel Sites for Nature (CASSN) program — standardized biodiversity data collected with camera traps and acoustic recorders across California reserves and partner organizations.
+A Python desktop application for downloading, uploading, and managing wildlife image and audio data. Built for the California Sentinel Sites for Nature (CA-SSN) program — standardized biodiversity data collected with camera traps and acoustic recorders across California reserves and partner organizations.
 
 ![Version](https://img.shields.io/badge/version-4.0-blue)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
@@ -425,7 +425,7 @@ inputs. It never changes Box, S3, source WAVs, or event-local submission reports
 
 The submitter defaults to `Imperato, John`. The Box year folder is inferred from
 the staged deployment IDs and the standard Box Drive location—2027 deployments
-automatically resolve to `field_data/2027`; CLI overrides remain available for
+automatically resolve to `data/2027`; CLI overrides remain available for
 a different submitter or Box location. Mixed-year staging is rejected so each
 submission has one unambiguous Box source root.
 

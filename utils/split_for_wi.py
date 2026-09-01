@@ -21,16 +21,16 @@ Default is a DRY RUN — it reports what would change and writes nothing. Pass
 Examples:
   # Preview one uploaded deployment in Box Drive (writes nothing):
   python utils/split_for_wi.py \
-    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
 
   # Actually split the uploaded deployment while preventing sleep:
   caffeinate python utils/split_for_wi.py \
-    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
     --apply --yes
 
   # Put the Box Drive deployment back:
   python utils/split_for_wi.py \
-    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/field_data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
+    --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
     --undo
 """
 from __future__ import annotations

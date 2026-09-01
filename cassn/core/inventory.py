@@ -594,7 +594,7 @@ def generate_session_summary(
     metadata = normalize_deployment_event_metadata(metadata)
     lines = []
     lines.append("=" * 60)
-    lines.append("CASSN DEPLOYMENT SUMMARY")
+    lines.append("CA-SSN DEPLOYMENT SUMMARY")
     lines.append("=" * 60)
     lines.append(f"Generated:        {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"Site name:        {metadata.get('site_name', '?')}")

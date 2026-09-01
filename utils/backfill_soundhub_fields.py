@@ -326,7 +326,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--box-year-root",
         required=True,
-        help="Box Drive field_data year folder containing the source events",
+        help="Box Drive data year folder containing the source events",
     )
     parser.add_argument("--apply", action="store_true", help="Apply the validated repair")
     return parser
