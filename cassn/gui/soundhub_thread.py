@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from cassn.soundhub.export import (
+    build_recording_rows,
     enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
@@ -57,6 +58,10 @@ class SoundHubStageThread(QThread):
                     {},
                 )
                 return
+
+            # Fail before a potentially hours-long transcode if the recording
+            # manifest cannot be completed from the source metadata.
+            build_recording_rows(audio_rows)
 
             result = stage_deployment(
                 self.deployment_folder,

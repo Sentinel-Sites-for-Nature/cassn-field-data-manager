@@ -75,6 +75,20 @@ class CompletedBatchClearResult:
     report_name: str
 
 
+def staging_extension_blockers(plan: CompletedBatchPlan) -> list[str]:
+    """Return only errors that make the *local* batch unsafe to extend.
+
+    Once a provenance plan exists, remaining errors describe Box metadata or
+    submission-report state.  Those are strict upload/cleanup prerequisites,
+    but they are independent of adding another validated deployment to local
+    staging.  Errors encountered before provenance planning indicate an unsafe
+    staging path or layout and remain blocking.
+    """
+    if plan.provenance is not None:
+        return []
+    return list(plan.errors)
+
+
 def _safe_cleanup_paths(staging_root: Path) -> tuple[Path, Path, list[str]]:
     """Resolve the two exact staging children and reject unsafe layouts."""
     errors: list[str] = []

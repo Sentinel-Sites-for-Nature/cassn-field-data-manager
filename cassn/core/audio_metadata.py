@@ -390,3 +390,42 @@ def parse_audiomoth_guano(wav_path: Path) -> dict:
     except Exception as e:
         print(f"    WARNING: failed to parse GUANO chunk at {wav_path}: {e}")
     return result
+
+
+def refresh_audiomoth_inventory_metadata(entry: dict, wav_path: Path) -> bool:
+    """Refresh one persisted audio inventory row from its staged WAV.
+
+    The verified deployment copy is a safer metadata source than the removable
+    card: a reader can disconnect after its bytes have copied successfully but
+    before the per-file metadata pass runs.  GUANO values take precedence over
+    the older ICMT comment, matching the normal ingest path.  Only values that
+    can be recovered authoritatively from the WAV are changed.
+
+    Returns ``True`` when at least one inventory value changed.
+    """
+    wav_path = Path(wav_path)
+    comment = parse_audiomoth_wav_comment(wav_path)
+    guano = parse_audiomoth_guano(wav_path)
+
+    recovered = {
+        "recording_duration_sec": comment.get("recording_duration_sec"),
+        "recording_stop_reason": comment.get("recording_stop_reason"),
+        "sample_rate_hz": comment.get("sample_rate_hz"),
+        "gain": comment.get("gain_setting"),
+        "device_id": guano.get("device_id") or comment.get("device_id"),
+        "recorded_datetime": guano.get("recorded_datetime"),
+        "ARU_make": guano.get("ARU_make") or comment.get("ARU_make"),
+        "ARU_model": guano.get("ARU_model") or comment.get("ARU_model"),
+        "battery_voltage": (
+            guano.get("battery_voltage") or comment.get("battery_voltage")
+        ),
+        "temperature_c": guano.get("temperature_c") or comment.get("temperature_c"),
+    }
+
+    changed = False
+    for field, value in recovered.items():
+        if value in (None, "") or entry.get(field) == value:
+            continue
+        entry[field] = value
+        changed = True
+    return changed

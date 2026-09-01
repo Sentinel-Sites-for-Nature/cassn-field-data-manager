@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from cassn.core.image_metadata import ReconyxExtractor
-from cassn.core.inventory import count_expected_files
+from cassn.core.inventory import count_expected_files, inventory_storage_relpath
 from cassn.core.quality_control import append_qc_report
 
 
@@ -55,8 +55,10 @@ class _WorkerContext:
         self.metadata = dict(metadata)
         self.lookups = lookups
         self.file_inventory = [dict(entry) for entry in inventory]
-        self._initial_count = len(self.file_inventory)
-        self._emitted_count = self._initial_count
+        self._emitted_rows = {
+            inventory_storage_relpath(row): dict(row)
+            for row in self.file_inventory
+        }
         self._last_session_save = time.monotonic()
         self._registry = registry
         self._uncommitted_hashes: set[str] = set()
@@ -70,10 +72,16 @@ class _WorkerContext:
         return not self.thread.checkpoint_failed()
 
     def emit_checkpoint(self) -> None:
-        if len(self.file_inventory) <= self._emitted_count:
+        rows: list[dict] = []
+        for row in self.file_inventory:
+            key = inventory_storage_relpath(row)
+            if self._emitted_rows.get(key) == row:
+                continue
+            copied = dict(row)
+            rows.append(copied)
+            self._emitted_rows[key] = copied
+        if not rows:
             return
-        rows = [dict(row) for row in self.file_inventory[self._emitted_count :]]
-        self._emitted_count = len(self.file_inventory)
         self.thread.rows_ready.emit(self.thread.device_label, rows)
         self._uncommitted_hashes.difference_update(
             row.get("file_hash_sha256", "")

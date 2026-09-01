@@ -76,9 +76,13 @@ from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
+    validate_staging_manifests,
     write_deployment_copy,
 )
-from cassn.soundhub.lifecycle import plan_completed_batch_cleanup
+from cassn.soundhub.lifecycle import (
+    plan_completed_batch_cleanup,
+    staging_extension_blockers,
+)
 from cassn.soundhub.staging import flac_available, fragments_root, project_root
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
@@ -108,6 +112,7 @@ from cassn.core.audio_metadata import (
     parse_audiomoth_guano,
     parse_audiomoth_recorded_datetime,
     parse_audiomoth_wav_comment,
+    refresh_audiomoth_inventory_metadata,
 )
 from cassn.core.image_metadata import (
     EXIF_AVAILABLE,
@@ -1796,6 +1801,9 @@ class FieldDataWizard(QMainWindow):
             if prior is not None:
                 if prior.get("file_hash_sha256") != row.get("file_hash_sha256"):
                     self.log(f"✗ [{device_label}] Inventory collision at {relative}")
+                    continue
+                prior.clear()
+                prior.update(row)
                 continue
             self.file_inventory.append(row)
             existing[relative] = row
@@ -2089,6 +2097,20 @@ class FieldDataWizard(QMainWindow):
                         and (not expected_size or prior_dest.stat().st_size == expected_size)
                     )
                     if staged_is_complete:
+                        if (
+                            file_type == "audio"
+                            and refresh_audiomoth_inventory_metadata(
+                                prior_entry, prior_dest
+                            )
+                        ):
+                            self.log(
+                                f"  Recovered audio metadata from verified staged "
+                                f"file: {prior_dest.name}"
+                            )
+                            if not self.save_session():
+                                raise OSError(
+                                    "Could not persist repaired audio metadata"
+                                )
                         continue
 
                     expected_sha256 = str(prior_entry.get("file_hash_sha256", ""))
@@ -2303,7 +2325,11 @@ class FieldDataWizard(QMainWindow):
                 # AudioMoth WAV comment (per-file, overrides CONFIG.TXT where redundant)
                 wav_data = {}
                 if file_type == "audio":
-                    wav_data = parse_audiomoth_wav_comment(source_path)
+                    # The destination has already passed source/destination hash
+                    # verification. Read metadata from that durable copy so a
+                    # reader disconnect immediately after copying cannot leave
+                    # an otherwise valid recording with blank metadata.
+                    wav_data = parse_audiomoth_wav_comment(dest_path)
                     # WAV comment is authoritative for device_id if found
                     if wav_data.get("device_id"):
                         device_id = wav_data["device_id"]
@@ -2314,7 +2340,7 @@ class FieldDataWizard(QMainWindow):
                     # (no DST guesswork, unlike the filename); serial, battery, and
                     # temperature come straight from the device. The ICMT/CONFIG
                     # values parsed above remain the fallback for older files.
-                    guano_data = parse_audiomoth_guano(source_path)
+                    guano_data = parse_audiomoth_guano(dest_path)
                     if guano_data.get("recorded_datetime"):
                         recorded_datetime = guano_data["recorded_datetime"]
                     if guano_data.get("device_id"):
@@ -3560,7 +3586,24 @@ class FieldDataWizard(QMainWindow):
 
         staging_root = self._soundhub_staging_root()
         root = project_root(staging_root)
-        if root.exists() or fragments_root(staging_root).exists():
+        fragments = fragments_root(staging_root)
+        has_fragments = fragments.is_dir() and any(
+            path.is_dir() for path in fragments.iterdir()
+        )
+        has_manifests = any(
+            (root / name).exists() for name in ("deployment.csv", "recording.csv")
+        )
+        if has_fragments or has_manifests:
+            try:
+                validate_staging_manifests(staging_root)
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Existing SoundHub Batch Needs Attention",
+                    "The existing local SoundHub batch is not internally valid "
+                    f"and cannot be safely extended:\n\n{e}",
+                )
+                return
             try:
                 lifecycle = plan_completed_batch_cleanup(staging_root)
             except Exception as e:
@@ -3587,14 +3630,24 @@ class FieldDataWizard(QMainWindow):
                     f"{detail}",
                 )
                 return
-            if lifecycle.errors:
+            # A local batch does not need to exist on Box before another event
+            # is added.  Box provenance is mandatory only at upload preflight.
+            # Errors before a provenance plan exists still indicate an unsafe
+            # local path/layout and remain blocking.
+            extension_blockers = staging_extension_blockers(lifecycle)
+            if extension_blockers:
                 QMessageBox.warning(
                     self,
                     "Existing SoundHub Batch Needs Attention",
                     "The existing staging batch cannot be safely extended:\n\n"
-                    + "\n".join(f"• {error}" for error in lifecycle.errors),
+                    + "\n".join(f"• {error}" for error in extension_blockers),
                 )
                 return
+            if lifecycle.errors:
+                self.log(
+                    "SoundHub staging remains open; Box provenance will be "
+                    "required and rechecked before upload."
+                )
 
         def row_count(name):
             path = root / name

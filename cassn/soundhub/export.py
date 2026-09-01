@@ -29,7 +29,11 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
     SOUNDHUB_RECORDING_FIELDS,
 )
-from cassn.export.wildlife_insights import SUBPROJECT_DESIGN, subproject_for
+from cassn.export.wildlife_insights import (
+    SUBPROJECT_DESIGN,
+    format_wi_coordinate,
+    subproject_for,
+)
 from cassn.soundhub.staging import SoundHubStagingError, fragments_root, project_root
 
 DEPLOYMENT_CSV = "deployment.csv"
@@ -216,6 +220,8 @@ def build_deployment_rows(audio_rows: list[dict]) -> list[dict]:
         row = {field: source.get(field, "") for field in SOUNDHUB_DEPLOYMENT_FIELDS}
         row["project_short_name"] = SOUNDHUB_PROJECT_SHORT_NAME
         row["deployment_id"] = deployment_id
+        row["longitude"] = format_wi_coordinate(row.get("longitude", ""))
+        row["latitude"] = format_wi_coordinate(row.get("latitude", ""))
         out.append(row)
     return sorted(out, key=lambda r: r["deployment_id"])
 
@@ -276,6 +282,28 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
     tmp.replace(path)
 
 
+def _write_manifest_pair(out_dir: Path, audio_rows: list[dict]) -> None:
+    """Validate both SoundHub manifests before replacing either file.
+
+    Building ``recording.csv`` can fail when a recording timestamp has no
+    recoverable duration.  Constructing both row sets first prevents that
+    validation failure from leaving a new ``deployment.csv`` beside a missing
+    or stale ``recording.csv``.
+    """
+    deployment_rows = build_deployment_rows(audio_rows)
+    recording_rows = build_recording_rows(audio_rows)
+    _write_csv(
+        out_dir / DEPLOYMENT_CSV,
+        SOUNDHUB_DEPLOYMENT_FIELDS,
+        deployment_rows,
+    )
+    _write_csv(
+        out_dir / RECORDING_CSV,
+        SOUNDHUB_RECORDING_FIELDS,
+        recording_rows,
+    )
+
+
 def write_deployment_fragments(staging_root, audio_rows: list[dict]) -> list[Path]:
     """Record each deployment's CSV rows outside the S3 mirror, one dir per id.
 
@@ -290,16 +318,7 @@ def write_deployment_fragments(staging_root, audio_rows: list[dict]) -> list[Pat
     written: list[Path] = []
     for deployment_id, rows in group_by_deployment(audio_rows).items():
         fragment_dir = fragments_root(staging_root) / deployment_id
-        _write_csv(
-            fragment_dir / DEPLOYMENT_CSV,
-            SOUNDHUB_DEPLOYMENT_FIELDS,
-            build_deployment_rows(rows),
-        )
-        _write_csv(
-            fragment_dir / RECORDING_CSV,
-            SOUNDHUB_RECORDING_FIELDS,
-            build_recording_rows(rows),
-        )
+        _write_manifest_pair(fragment_dir, rows)
         written.append(fragment_dir)
     return written
 
@@ -307,16 +326,7 @@ def write_deployment_fragments(staging_root, audio_rows: list[dict]) -> list[Pat
 def write_deployment_copy(deployment_folder, audio_rows: list[dict]) -> Path:
     """Write both CSVs into the deployment folder so they reach Box too."""
     out_dir = Path(deployment_folder) / "soundhub"
-    _write_csv(
-        out_dir / DEPLOYMENT_CSV,
-        SOUNDHUB_DEPLOYMENT_FIELDS,
-        build_deployment_rows(audio_rows),
-    )
-    _write_csv(
-        out_dir / RECORDING_CSV,
-        SOUNDHUB_RECORDING_FIELDS,
-        build_recording_rows(audio_rows),
-    )
+    _write_manifest_pair(out_dir, audio_rows)
     return out_dir
 
 

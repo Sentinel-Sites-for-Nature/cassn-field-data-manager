@@ -12,6 +12,7 @@ from cassn.core.audio_metadata import (
     normalize_gain,
     parse_audiomoth_config_file,
     parse_audiomoth_wav_comment,
+    refresh_audiomoth_inventory_metadata,
 )
 
 # Verbatim from a real deployment's WAV ICMT chunk — AudioMoth writes the gain
@@ -29,6 +30,49 @@ Gain                            : High
 Filter                          : -
 Recording period 1              : 00:00 - 09:00 (UTC-8)
 """
+
+
+def test_refresh_inventory_metadata_uses_authoritative_staged_wav(
+    tmp_path, monkeypatch
+):
+    wav = tmp_path / "verified.wav"
+    wav.write_bytes(b"verified")
+    entry = {
+        "recorded_datetime": "2026-05-10T00:00:00-07:00",
+        "recording_duration_sec": "",
+        "battery_voltage": "",
+        "temperature_c": "",
+    }
+    monkeypatch.setattr(
+        "cassn.core.audio_metadata.parse_audiomoth_wav_comment",
+        lambda path: {
+            "recording_duration_sec": 32400,
+            "sample_rate_hz": "48000",
+            "gain_setting": "High",
+            "device_id": "COMMENT-ID",
+            "battery_voltage": "4.4",
+            "temperature_c": "12.0",
+        },
+    )
+    monkeypatch.setattr(
+        "cassn.core.audio_metadata.parse_audiomoth_guano",
+        lambda path: {
+            "recorded_datetime": "2026-05-10T00:00:00-08:00",
+            "device_id": "GUANO-ID",
+            "ARU_make": "Open Acoustic Devices",
+            "ARU_model": "AudioMoth-Firmware-Basic 1.11.1",
+            "battery_voltage": "4.5",
+            "temperature_c": "12.1",
+        },
+    )
+
+    assert refresh_audiomoth_inventory_metadata(entry, wav)
+    assert entry["recording_duration_sec"] == 32400
+    assert entry["recorded_datetime"] == "2026-05-10T00:00:00-08:00"
+    assert entry["device_id"] == "GUANO-ID"
+    assert entry["battery_voltage"] == "4.5"
+    assert entry["temperature_c"] == "12.1"
+    assert entry["gain"] == "High"
 
 
 def write_wav_with_comment(path, comment: str) -> None:

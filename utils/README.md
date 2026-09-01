@@ -108,11 +108,11 @@ If the path is omitted it checks the normal local lookup cache.
 ## `box_auth_setup.py`
 
 Runs the Box OAuth setup flow and writes reusable Box tokens to
-`~/.cassn_credentials/box_tokens.json`.
+`~/.cassn_config/box_tokens.json`.
 
 ### When to use
 
-Use this script the first time you connect `cassn_field_data_manager.py` to Box,
+Use this script the first time you connect the CA-SSN Field Data Manager to Box,
 or any time your saved Box tokens stop working and need to be refreshed.
 
 ### Requirements
@@ -120,7 +120,7 @@ or any time your saved Box tokens stop working and need to be refreshed.
 pip install box-sdk-gen
 ```
 
-You also need `~/.cassn_credentials/config.json` with your Box app
+You also need `~/.cassn_config/config.json` with your Box app
 `client_id` and `client_secret`.
 
 To verify `box-sdk-gen` is installed:
@@ -133,14 +133,14 @@ python3 -c "import box_sdk_gen; print('box-sdk-gen ok')"
 
 1. Confirm your Box credentials file exists:
    ```bash
-   ls ~/.cassn_credentials/config.json
+   ls ~/.cassn_config/config.json
    ```
-2. If `~/.cassn_credentials/config.json` does not exist, create it from the example file:
+2. If `~/.cassn_config/config.json` does not exist, create it from the example file:
    ```bash
-   mkdir -p ~/.cassn_credentials
-   cp config.json.example ~/.cassn_credentials/config.json
+   mkdir -p ~/.cassn_config
+   cp config.json.example ~/.cassn_config/config.json
    ```
-3. Edit `~/.cassn_credentials/config.json` and add your Box app `client_id` and `client_secret`.
+3. Edit `~/.cassn_config/config.json` and add your Box app `client_id` and `client_secret`.
 
 ### Run
 ```bash
@@ -153,139 +153,26 @@ During the OAuth flow, `box_auth_setup.py` will:
 2. Ask you to log in and grant access.
 3. Ask you to paste the full redirect URL back into the terminal.
 4. Exchange that authorization code for tokens.
-5. Save `box_tokens.json` to `~/.cassn_credentials/`.
+5. Save `box_tokens.json` to `~/.cassn_config/`.
 
 ### Output
 
 On success, the script writes:
 
 ```text
-~/.cassn_credentials/box_tokens.json
+~/.cassn_config/box_tokens.json
 ```
 
-That token file is then used by:
-
-- `cassn_field_data_manager.py`
-- `recover_file_metadata.py`
+That token file is then used by the application and every Box-backed utility.
+Those commands consume the saved token; they do not run this setup script.
 
 ### Notes
 
 - If the script finds an existing token file, it tests that connection first
 - If the existing token is invalid, it falls back to a fresh OAuth flow
-- Refreshed tokens are written back to `~/.cassn_credentials/box_tokens.json` automatically
+- Refreshed tokens are written back to `~/.cassn_config/box_tokens.json` automatically
 - The browser may redirect to a page that does not load; that is expected
 - Paste the entire redirect URL, not just the authorization code
-
----
-
-## `recover_file_metadata.py`
-
-Recovers a deployment by downloading the full Box folder to the staging drive,
-then regenerating:
-
-- `file_metadata.csv`
-- `deployment_event_record.json`
-- `recovery_report.json`
-
-### When to use
-
-Use this script when a deployment was successfully uploaded to Box but the
-local metadata artifacts were missing, incomplete, or need to be rebuilt.
-
-### Requirements
-```bash
-pip install Pillow box-sdk-gen
-```
-
-Pillow is required. The script fails immediately if EXIF support is unavailable.
-
-### Setup
-
-1. Confirm Box credentials exist in `~/.cassn_credentials/`:
-   - `config.json`
-   - `box_tokens.json`
-   ```bash
-   ls ~/.cassn_credentials/config.json ~/.cassn_credentials/box_tokens.json
-   ```
-2. Open [`utils/recover_file_metadata.py`](/Users/johnimperato/GitHub/cassn-field-data-manager/utils/recover_file_metadata.py) and confirm the hard-coded recovery root matches your machine:
-   - `RECOVERY_ROOT = Path("/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging")`
-   - Change this path if you want recovered deployments written somewhere else
-   ```bash
-   rg -n 'RECOVERY_ROOT' utils/recover_file_metadata.py
-   ```
-3. Confirm that recovery path exists and is writable on your machine.
-   ```bash
-   ls "/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging"
-   ```
-4. Find the Box deployment folder ID from the Box URL:
-   - `https://app.box.com/folder/123456789012`
-   - Use the top-level deployment folder ID, not the `raw_data` subfolder ID
-5. Confirm local plot metadata exists for label recovery:
-   ```bash
-   ls local_data/plots.csv
-   ```
-
-### Run
-```bash
-python3 utils/recover_file_metadata.py BOX_FOLDER_ID
-```
-
-Replace `BOX_FOLDER_ID` with the numeric deployment folder ID from Box. 
-
-The script recovers exactly one deployment folder per run.
-
-Progress is printed to the terminal as files are downloaded and processed.
-
-Example terminal output during a live recovery run:
-
-![Recovery progress](../screenshots/04-recover-file-metadata-progress.png)
-
-### Output
-
-The script creates a local recovery folder under:
-
-```text
-/Volumes/G-DRIVE ArmorATD/cassn-field-data-staging/<deployment-folder-name>/
-```
-
-That recovery folder contains:
-
-- the downloaded Box deployment contents
-- `file_metadata.csv`
-- `deployment_event_record.json`
-- `recovery_report.json`
-
-If the deployment folder already exists locally, the script fails and does not overwrite it.
-
-### Notes
-
-- Authenticates using `~/.cassn_credentials/box_tokens.json` — no
-  separate authentication step needed
-- Downloads the entire deployment and preserves the Box folder structure
-- Uses Box modified time for the recovered `timestamp` field
-- Sets unrecoverable fields such as `original_filename` and `source_path` to `NA`
-- Writes recovered outputs locally only; it does not upload `file_metadata.csv`
-  or `deployment_event_record.json` back to Box
-- Writes `recovery_report.json` even when the run completes with failures
-- Uses `local_data/plots.csv` for plot-label lookup; `example_lookups/` files are templates only
-
----
-
-## `generate_occurrences.py`
-
-Joins pre-processing file metadata (`file_metadata.csv`) with post-processing Wildlife Insights results (`images.csv`) to produce a deployment event occurrence record CSV. Each row is an animal detection with a unique file identifier, timestamp, and spatial coordinates. Blanks, humans, vehicles, and unidentified results are excluded.
-
-### Run
-```bash
-python3 utils/generate_occurrences.py <file_metadata.csv> <images.csv> <output_dir>
-```
-
-### Output
-
-```text
-<output_dir>/
-└── UC_SITE_YYYYMMDD_occurrences.csv
-```
 
 ---
 
@@ -622,6 +509,10 @@ existing SoundHub staging tree. The utility updates both the cumulative project
 coordinates. The hidden fragment directory is outside the S3 mirror and is
 never uploaded.
 
+New SoundHub manifests apply this formatting automatically. Keep this command
+as a general recovery tool for legacy, externally edited, or interrupted
+staging trees.
+
 The default is a read-only dry run. Blank, invalid, non-finite, or out-of-range
 coordinates are blocking errors, as are schema problems or any non-coordinate
 difference between the project manifest and its fragments.
@@ -646,55 +537,15 @@ before uploading.
 
 ---
 
-## `backfill_soundhub_fields.py`
-
-Repairs the approved pre-upload SoundHub metadata fields in one synchronized,
-dry-run-first operation. It updates the cumulative and fragment deployment
-manifests plus the matching Box Drive `audio_file_metadata.csv` and
-event-local `soundhub/deployment.csv` copies. The repair standardizes
-`subproject`, writes the literal subproject naming methodology, fills the
-Survey123-supported `metal_pole` mounting value, and restores the four known
-Anza-Borrego BD sensor heights. It never opens or changes media or
-`recording.csv`.
-
-```bash
-python utils/backfill_soundhub_fields.py \
-  --box-year-root "/path/to/Box/CASSN/data/2026"
-
-python utils/backfill_soundhub_fields.py \
-  --box-year-root "/path/to/Box/CASSN/data/2026" \
-  --apply
-```
-
-## `backfill_anza_soundhub_durations.py`
-
-Recovers the 48 missing legacy Anza-Borrego recording durations directly from
-the staged FLAC STREAMINFO headers. It synchronizes the duration column in the
-Box event's `audio_file_metadata.csv` with the `end` values in the cumulative
-staging manifest, four per-deployment fragments, and Box event-local SoundHub
-copy. The three 488-byte header-only WAV failures remain documented but blank.
-Audio bytes, filenames, identifiers, starts, and deployment dates are untouched.
-
-The default is a dry run:
-
-```bash
-python utils/backfill_anza_soundhub_durations.py \
-  --box-event-root "/path/to/UC_AnzaBorrego_20260516"
-python utils/backfill_anza_soundhub_durations.py \
-  --box-event-root "/path/to/UC_AnzaBorrego_20260516" \
-  --apply
-```
-
-Rerun the dry run after applying and require zero pending changes.
-
----
-
 ## `normalize_wi_coordinates.py`
 
 Updates latitude and longitude in existing Wildlife Insights deployment CSVs
 to exactly eight decimal places. Values with fewer decimal places are padded
 with trailing zeroes; values with greater precision are rounded. Source lookup
 tables and general image metadata are not modified.
+
+New WI exports apply this formatting automatically. Keep this command as a
+general recovery tool for legacy or externally edited exports.
 
 The utility accepts one CSV, one deployment folder, or a broader root such as a
 Box year folder. Directory scans only select files matching

@@ -39,11 +39,22 @@ class _FakeLookups:
         }
 
 
+class _AudioLookups(_FakeLookups):
+    def active_deployment_for_label(self, label):
+        plot = label[1]
+        return {
+            "deployment_id": f"UC_Test_plot{plot}_BD_20260101",
+            "deployment_start_date": "2026-01-01",
+            "deployment_end_date": "2026-01-02",
+            "device_id": f"AUDIO{plot}",
+        }
+
+
 class _ProcessContext:
-    def __init__(self, root, registry):
+    def __init__(self, root, registry, lookups=None):
         self.current_deployment_folder = root
         self.metadata = {"site_short_name": "Test"}
-        self.lookups = _FakeLookups()
+        self.lookups = lookups or _FakeLookups()
         self.file_inventory = []
         self._last_session_save = time.monotonic()
         self.registry = registry
@@ -172,6 +183,46 @@ def test_card_worker_emits_checkpoint_and_success(tmp_path, monkeypatch):
         "hash_mismatches": 0,
         "source_dir": str(source),
     }]
+
+
+def test_card_worker_emits_repaired_existing_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _DummyReconyx)
+    source = tmp_path / "card"
+    source.mkdir()
+    existing = {
+        "device_label": "p1_BD",
+        "new_filename": "recording.wav",
+        "storage_relpath": "raw_data/p1_BD/recording.wav",
+        "file_hash_sha256": "hash-one",
+        "file_type": "audio",
+        "recording_duration_sec": "",
+    }
+
+    def processor(context, *_args):
+        context.file_inventory[0]["recording_duration_sec"] = 32400
+        context.save_session()
+        return 0, 0, 0
+
+    worker = CardIngestThread(
+        processor=processor,
+        source_dir=source,
+        deployment_folder=tmp_path / "event",
+        plot_num=1,
+        plot_label="Plot 1",
+        device_code="BD",
+        device_label="p1_BD",
+        metadata={},
+        lookups=object(),
+        inventory=[existing],
+        hash_registry=IngestHashRegistry(),
+    )
+    checkpoints = []
+    worker.rows_ready.connect(lambda _label, rows: checkpoints.extend(rows))
+
+    worker.run()
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["recording_duration_sec"] == 32400
 
 
 def test_cancelled_card_worker_reports_retryable_state(tmp_path, monkeypatch):
@@ -320,6 +371,104 @@ def test_two_device_copy_engines_run_concurrently_without_state_collisions(
     # lossless QC report.
     report = json.loads((event / "qc" / "qc_report.json").read_text())
     assert set(report["history"]["devices"]) == {"p1_ML", "p2_ML"}
+
+
+def test_audio_metadata_is_read_from_verified_destination(tmp_path, monkeypatch):
+    import cassn.gui.wizard as wizard_module
+
+    event = tmp_path / "event"
+    event.mkdir()
+    source = tmp_path / "card"
+    source.mkdir()
+    (source / "20260510_000000.WAV").write_bytes(b"audio bytes")
+    destination = event / "raw_data" / "p1_BD"
+    destination.mkdir(parents=True)
+    seen_paths = []
+
+    def comment(path):
+        seen_paths.append(path)
+        return {
+            "recording_duration_sec": 32400,
+            "sample_rate_hz": "48000",
+            "gain_setting": "High",
+        }
+
+    def guano(path):
+        seen_paths.append(path)
+        return {"recorded_datetime": "2026-05-10T00:00:00-08:00"}
+
+    monkeypatch.setattr(wizard_module, "parse_audiomoth_wav_comment", comment)
+    monkeypatch.setattr(wizard_module, "parse_audiomoth_guano", guano)
+    context = _ProcessContext(event, IngestHashRegistry(), _AudioLookups())
+
+    result = FieldDataWizard.process_sd_card_files(
+        context,
+        source,
+        destination,
+        1,
+        "Plot 1",
+        "BD",
+        "p1_BD",
+        _DummyReconyx(),
+    )
+
+    assert result == (1, 0, 0)
+    assert len(seen_paths) == 2
+    assert all(path.parent == destination for path in seen_paths)
+    assert context.file_inventory[0]["recording_duration_sec"] == 32400
+    assert context.file_inventory[0]["recorded_datetime"] == "2026-05-10T00:00:00-08:00"
+
+
+def test_resume_repairs_audio_metadata_from_staged_destination(tmp_path, monkeypatch):
+    import cassn.gui.wizard as wizard_module
+
+    event = tmp_path / "event"
+    source = tmp_path / "card"
+    source.mkdir()
+    source_file = source / "20260510_000000.WAV"
+    source_file.write_bytes(b"audio bytes")
+    destination = event / "raw_data" / "p1_BD"
+    destination.mkdir(parents=True)
+    staged = destination / "UC_Test_plot1_BD_20260101_00001.wav"
+    staged.write_bytes(source_file.read_bytes())
+    existing = {
+        "device_label": "p1_BD",
+        "new_filename": staged.name,
+        "storage_relpath": f"raw_data/p1_BD/{staged.name}",
+        "source_relpath": source_file.name,
+        "file_type": "audio",
+        "file_size_bytes": staged.stat().st_size,
+        "file_hash_sha256": "sha256",
+        "file_hash_sha1": "sha1",
+        "recording_duration_sec": "",
+    }
+    repaired_paths = []
+
+    def repair(entry, path):
+        repaired_paths.append(path)
+        entry["recording_duration_sec"] = 32400
+        return True
+
+    monkeypatch.setattr(
+        wizard_module, "refresh_audiomoth_inventory_metadata", repair
+    )
+    context = _ProcessContext(event, IngestHashRegistry(), _AudioLookups())
+    context.file_inventory = [existing]
+
+    result = FieldDataWizard.process_sd_card_files(
+        context,
+        source,
+        destination,
+        1,
+        "Plot 1",
+        "BD",
+        "p1_BD",
+        _DummyReconyx(),
+    )
+
+    assert result == (0, 0, 0)
+    assert repaired_paths == [staged]
+    assert existing["recording_duration_sec"] == 32400
 
 
 def test_concurrent_cards_deduplicate_identical_media_across_devices(

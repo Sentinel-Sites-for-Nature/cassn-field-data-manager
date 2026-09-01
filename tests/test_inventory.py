@@ -10,6 +10,7 @@ from cassn.core.inventory import (
     count_expected_files,
     deduplicate_exact_storage_entries,
     default_storage_relpath,
+    find_all_sessions,
     format_staged_event_tree,
     index_inventory_by_storage_relpath,
     inventory_by_source_relpath,
@@ -266,6 +267,36 @@ def test_write_session_reports_replace_failure(tmp_path, monkeypatch):
 
     assert "Could not save session recovery file" in error
     assert "Input/output error" in error
+
+
+def test_find_sessions_sorts_mixed_timezone_timestamp_styles(tmp_path):
+    older = tmp_path / "older"
+    newer = tmp_path / "newer"
+    older.mkdir()
+    newer.mkdir()
+    write_session(
+        older,
+        {
+            "schema_version": 1,
+            "deployment_folder": str(older),
+            "saved_at": "2026-08-27T11:00:00",
+        },
+    )
+    write_session(
+        newer,
+        {
+            "schema_version": 1,
+            "deployment_folder": str(newer),
+            "saved_at": "2026-08-27T19:05:00+00:00",
+        },
+    )
+
+    sessions = find_all_sessions(tmp_path)
+
+    assert [session["path"].parent.name for session in sessions] == [
+        "newer",
+        "older",
+    ]
 
 
 def test_reconcile_device_dir_removes_only_orphans(tmp_path):

@@ -338,6 +338,13 @@ def test_deployment_rows_carry_no_utc_offset(deployment):
     assert "-07:00" not in row["deployment_start_time"]
 
 
+def test_deployment_rows_format_coordinates_to_eight_decimal_places(deployment):
+    row = build_deployment_rows(read_bd_audio_rows(deployment))[0]
+
+    assert row["longitude"] == "-121.16320390"
+    assert row["latitude"] == "36.84449545"
+
+
 def test_recording_rows_use_flac_names_and_offsets(deployment):
     rows = build_recording_rows(read_bd_audio_rows(deployment))
     assert list(rows[0]) == SOUNDHUB_RECORDING_FIELDS
@@ -481,6 +488,27 @@ def test_deployment_copy_lands_in_the_deployment_folder(deployment):
     assert (out / "deployment.csv").exists()
     assert (out / "recording.csv").exists()
     assert out == deployment / "soundhub"
+
+
+def test_deployment_copy_validation_failure_preserves_manifest_pair(tmp_path):
+    deployment = tmp_path / "event"
+    valid = [audio_row("UC_QuailRidge_plot1_BD_20260118", "00001")]
+    out = write_deployment_copy(deployment, valid)
+    before_deployment = (out / "deployment.csv").read_bytes()
+    before_recording = (out / "recording.csv").read_bytes()
+    invalid = [
+        audio_row(
+            "UC_QuailRidge_plot1_BD_20260118",
+            "00001",
+            recording_duration_sec="",
+        )
+    ]
+
+    with pytest.raises(SoundHubStagingError, match="no usable recording_duration_sec"):
+        write_deployment_copy(deployment, invalid)
+
+    assert (out / "deployment.csv").read_bytes() == before_deployment
+    assert (out / "recording.csv").read_bytes() == before_recording
 
 
 # ---------------------------------------------------------------------------

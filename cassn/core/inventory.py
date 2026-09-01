@@ -32,12 +32,13 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from cassn.core.audio_metadata import hz_to_khz
 from cassn.core.classification import classify_file
 from cassn.core.quality_control import append_qc_report, qc_path_for
+from cassn.config import PACIFIC_TZ
 from cassn.lookups import normalize_deployment_event_metadata
 
 
@@ -682,6 +683,14 @@ def generate_session_summary(
 SESSION_SCHEMA_VERSION = 1
 
 
+def _sortable_session_datetime(value: str) -> datetime:
+    """Parse old/new session timestamps into one naive UTC representation."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=PACIFIC_TZ)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def write_session(deployment_folder: Path, session: dict) -> str:
     """Atomically persist a session dict to ``session.json`` in the deployment.
 
@@ -737,7 +746,9 @@ def find_all_sessions(staging_root: Path) -> list:
             folder = Path(data.get("deployment_folder", ""))
             if not folder.exists():
                 continue
-            saved_at = datetime.fromisoformat(data.get("saved_at", "2000-01-01"))
+            saved_at = _sortable_session_datetime(
+                data.get("saved_at", "2000-01-01")
+            )
             sessions.append({"path": session_file, "data": data, "status": "ok",
                              "saved_at": saved_at, "error_msg": ""})
         except json.JSONDecodeError as e:

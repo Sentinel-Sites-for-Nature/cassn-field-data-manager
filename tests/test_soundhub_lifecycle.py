@@ -12,6 +12,7 @@ from cassn.soundhub.lifecycle import (
     SoundHubLifecycleError,
     clear_completed_batch,
     plan_completed_batch_cleanup,
+    staging_extension_blockers,
 )
 from cassn.soundhub.provenance import (
     apply_submission_provenance,
@@ -71,7 +72,7 @@ def _fixture(tmp_path: Path):
     fragments.mkdir()
     (fragments / "durable.csv").write_text("fragment\n")
 
-    box_year = tmp_path / "Box" / "field_data" / "2026"
+    box_year = tmp_path / "Box" / "data" / "2026"
     event_roots = [
         box_year / "Reserve A" / "UC_Alpha_20260610",
         box_year / "Reserve B" / "UC_Beta_20260710",
@@ -118,6 +119,18 @@ def test_active_batch_is_not_closed_or_clearable(tmp_path):
     assert not plan.clearable
     assert plan.pending_count == 2
     assert not plan.errors
+
+
+def test_missing_box_metadata_does_not_block_local_staging_extension(tmp_path):
+    staging, box_year, event_roots = _fixture(tmp_path)
+    for event_root in event_roots:
+        (event_root / "audio_file_metadata.csv").unlink()
+
+    plan = plan_completed_batch_cleanup(staging, box_year)
+
+    assert plan.provenance is not None
+    assert any("Box metadata is missing" in error for error in plan.errors)
+    assert staging_extension_blockers(plan) == []
 
 
 def test_completed_batch_requires_one_shared_verified_report(tmp_path):

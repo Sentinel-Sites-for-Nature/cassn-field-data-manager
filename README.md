@@ -711,7 +711,7 @@ cassn-field-data-manager/
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
-│   ├── generate_occurrences.py       # Wildlife Insights occurrences CSV generator
+│   ├── generate_data_collection_summary.py # Box data summary report generator
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
 │   ├── sites.csv
