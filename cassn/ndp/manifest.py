@@ -319,7 +319,10 @@ def _recording_window(
 
 
 def _content_counts(
-    rows: list[dict], allowed_types: frozenset[str], errors: list[str]
+    rows: list[dict],
+    allowed_types: frozenset[str],
+    errors: list[str],
+    warnings: list[str],
 ) -> tuple[dict[str, int] | None, int | None]:
     """File-type breakdown and total size over every staged row."""
     counts: dict[str, int] = {}
@@ -346,6 +349,11 @@ def _content_counts(
             continue
         total_bytes += parsed
     _report(errors, bad_sizes, "file_size_bytes is not a non-negative integer")
+    # A recorder that failed before writing anything still leaves its CONFIG.TXT,
+    # and that sidecar is the only record that the device was ever set up. Keep
+    # the deployment, but say so — four such deployments exist on Box today.
+    if CONFIG_FILE_TYPE in counts and len(counts) == 1:
+        warnings.append("this deployment holds config sidecars and no media")
     return dict(sorted(counts.items())), (None if bad_sizes else total_bytes)
 
 
@@ -586,7 +594,7 @@ def build_manifest(
 
     _check_filenames(rows, errors)
     _check_hashes(rows, errors)
-    counts, total_bytes = _content_counts(rows, allowed_types, errors)
+    counts, total_bytes = _content_counts(rows, allowed_types, errors, warnings)
     recorded_first, recorded_last = _recording_window(rows, errors, warnings)
     coordinates = _coordinates(rows, plot_coordinates, errors, warnings)
     placement = _placement(lookup_row, errors) if lookup_row else None

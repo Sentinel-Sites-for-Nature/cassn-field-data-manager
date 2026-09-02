@@ -193,6 +193,23 @@ def test_config_sidecars_count_and_hash_but_do_not_set_the_recording_window():
     assert content_digest(rows) != content_digest(rows[:2])
 
 
+def test_a_config_only_deployment_is_kept_with_a_warning():
+    rows = [
+        _audio_row(
+            "CONFIG_01.txt",
+            file_type="config",
+            file_size_bytes="500",
+            recorded_datetime="",
+        )
+    ]
+    build = _build(rows, kind="audio", lookup=_audio_lookup())
+
+    assert build.ok, build.errors
+    assert build.manifest["content"]["file_counts_by_type"] == {"config": 1}
+    assert build.manifest["content"]["recorded_first"] is None
+    assert any("no media" in warning for warning in build.warnings)
+
+
 def test_content_digest_ignores_row_order_but_not_duplicates():
     rows = [_image_row(f"img_{index}.jpg") for index in range(4)]
     assert content_digest(rows) == content_digest(list(reversed(rows)))
