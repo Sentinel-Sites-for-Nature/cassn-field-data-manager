@@ -1,11 +1,15 @@
 """
 National Data Platform staging for the CA-SSN source namespace.
 
-Box holds the archival originals. NDP gets a per-deployment copy under
-``ssn/ca/UC-Nature/source/<deployment_event_id>/<deployment_id>/``, described by
-a ``manifest.json`` and a ``file_metadata.csv`` split out of the deployment
-event's filed metadata. This package builds that description; nothing here
-copies media, and nothing here writes to Box.
+Box holds the archival originals. NDP gets a per-deployment copy beneath a
+user-specified OSDF source collection root::
+
+    <source-root>/<deployment_event_id>/<deployment_id>/
+
+Each deployment is described by a ``manifest.json`` and a
+``metadata/file_metadata.csv`` partitioned out of the deployment event's filed
+metadata. This package builds the description and transfers media with hash
+verification; nothing here writes to Box.
 
 Named for the destination platform rather than the transport, matching
 :mod:`cassn.soundhub`. OSDF is the storage federation and Pelican the transfer
@@ -18,6 +22,10 @@ Layers, bottom up:
   no network.
 * :mod:`cassn.ndp.staging` — read one event's metadata, split it per
   deployment, render the output tree, and apply it idempotently.
+* :mod:`cassn.ndp.transfer` — resolve the described inventory to exact Box
+  objects and a user-specified OSDF destination.
+* :mod:`cassn.ndp.submission` — download, verify, sync, and record resumable
+  media-transfer state without yet publishing control files.
 
 Neither imports Qt.
 """

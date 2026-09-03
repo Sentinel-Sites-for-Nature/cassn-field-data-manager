@@ -3,9 +3,8 @@
 
 The default is a read-only preflight.  ``--apply`` downloads media through the
 Box API, verifies its recorded SHA-256, syncs one deployment at a time to
-Pelican, and records remote stat results.  It deliberately does not publish the
-three control files or update Box provenance while their contract is under
-review.
+Pelican, and records remote stat results. It deliberately does not yet publish
+the manifest/inventory controls or update Box provenance.
 """
 
 from __future__ import annotations
@@ -62,8 +61,8 @@ def _parser() -> argparse.ArgumentParser:
         "--destination-root",
         required=True,
         help=(
-            "Exact OSDF source root, for example "
-            "osdf:///ndp/private/cassn/ca/UC-Nature/source"
+            "User-specified OSDF source collection root; must begin "
+            "osdf:///ndp/private/ or osdf:///ndp/public/"
         ),
     )
     parser.add_argument("--token", type=Path, help="Optional Pelican token file")
@@ -112,8 +111,8 @@ def _print_plan(plan, *, apply: bool) -> None:
     for error in plan.errors:
         print(f"ERROR: {error}")
     print(
-        "NOTICE: media only; manifest, README, file_metadata.csv, and Box "
-        "provenance publication remain disabled pending review."
+        "NOTICE: media only; manifest, file_metadata.csv, and Box provenance "
+        "publication are not yet performed."
     )
 
 

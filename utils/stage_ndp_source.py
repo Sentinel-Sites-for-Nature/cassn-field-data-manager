@@ -30,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
         "--staging-root",
         type=Path,
         required=True,
-        help="Local root corresponding to private/ssn/ca/UC-Nature/source",
+        help="Local staging root for the user-specified OSDF source collection",
     )
     parser.add_argument(
         "--lookup-dir",

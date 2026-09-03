@@ -1,8 +1,8 @@
 """Resumable execution of the review-independent NDP media transfer phases.
 
-This module intentionally stops after media sync and remote stat checks.  It
-does not publish README/manifest/metadata controls and does not stamp Box
-provenance; both depend on the pending manifest and multi-destination review.
+This module intentionally stops after media sync and remote stat checks. It
+does not publish the manifest/inventory controls or stamp Box provenance; both
+depend on the pending publication-transaction and multi-destination work.
 """
 
 from __future__ import annotations

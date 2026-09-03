@@ -13,8 +13,8 @@ serial and ARU `asset_tag` is the four-digit field label. Retired `devices.csv`,
 Preflights one staged NDP source event against the live Box API, then optionally
 downloads and hash-checks its media one deployment at a time before syncing the
 deployment's `data/` collection to Pelican. The destination is always explicit,
-so the same program can target the temporary `cassn` prefix and the later `ssn`
-prefix without a code change.
+so the same program can target any user-specified path beneath the assigned
+NDP private or public namespace without a code change.
 
 The command is a read-only preflight unless `--apply` is supplied. Control-file
 publication and Box provenance updates remain disabled pending the SCIL indexing
@@ -25,11 +25,14 @@ rules are documented in `NDP_SOURCE_VERSIONING.md`.
 ```bash
 .venv/bin/python utils/transfer_ndp_source.py \
   --event "/path/to/Box-Box/CASSN/data/2026/Reserve/Event" \
-  --staging-root "/path/to/ndp/staging/cassn/ca/UC-Nature/source" \
+  --staging-root "/path/to/ndp/staging/user-specified-path/source" \
   --lookup-dir "/path/to/Box-Box/CASSN/app_config" \
   --scratch-root "/path/to/ndp/transfer_scratch" \
-  --destination-root "osdf:///ndp/private/cassn/ca/UC-Nature/source"
+  --destination-root "osdf:///ndp/private/user-specified-path/source"
 ```
+
+Here `user-specified-path` is a placeholder for the namespace path assigned for
+that publication; the tool does not infer or hardcode organization segments.
 
 Before the first live `--apply`, complete a disposable Pelican protocol test.
 An interrupted exact run resumes from its atomic local state.
