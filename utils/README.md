@@ -17,8 +17,8 @@ so the same program can target the temporary `cassn` prefix and the later `ssn`
 prefix without a code change.
 
 The command is a read-only preflight unless `--apply` is supplied. Control-file
-publication and Box provenance updates remain disabled pending the manifest and
-multi-destination review; see `docs/ndp_media_transfer_checkpoint.md`.
+publication and Box provenance updates remain disabled pending manifest and
+multi-destination review.
 
 ```bash
 .venv/bin/python utils/transfer_ndp_source.py \
@@ -29,10 +29,10 @@ multi-destination review; see `docs/ndp_media_transfer_checkpoint.md`.
   --destination-root "osdf:///ndp/private/cassn/ca/UC-Nature/source"
 ```
 
-Before the first live `--apply`, complete the disposable Pelican protocol test
-described in the checkpoint. An interrupted exact run resumes from its atomic
-local state. `--abandonment-plan` lists partial remote collections requiring
-explicit deletion but never deletes them.
+Before the first live `--apply`, complete a disposable Pelican protocol test.
+An interrupted exact run resumes from its atomic local state.
+`--abandonment-plan` lists partial remote collections requiring explicit
+deletion but never deletes them.
 
 ## `clear_box_verified_staging.py`
 

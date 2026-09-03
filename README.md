@@ -202,8 +202,6 @@ manual operation.
 
 ### 3. Workflow
 
-For a sequential workflow diagram, see [`docs/workflow.md`](docs/workflow.md).
-
 #### Step 1: Deployment Metadata
 - Select your organization (driven by the synced `program_config.json`)
 - Choose the formal site name from the dropdown; the stable short name and acronym fill automatically
@@ -294,9 +292,6 @@ The app verifies the resulting structure and updates the session inventory befor
 starting Box. Cancellation or a structural error prevents Box upload; clicking
 upload again resumes completed file moves. A deployment with prior Box-upload
 history is never reorganized automatically.
-
-See [the real-data acceptance checklist](docs/wi_split_acceptance_test.md) when
-validating this workflow against a Box-connected deployment.
 
 ## Wildlife SoundHub Preparation
 
@@ -683,26 +678,7 @@ in Box `app_config`. Box is the distributed current snapshot for all
 installations; `~/.cassn_config/lookup_tables/` is only a validated offline
 cache. Startup synchronizes Box before constructing `LookupTables`.
 `devices.csv`, `cameras.csv`, `ARUs.csv`, and Survey123 exports are not runtime
-fallbacks. See `docs/deployment_lookup_contract.md` for the authoritative
-definitions, identifier rules, and historical-compatibility policy.
-
-### Example and historical lookup files
-
-The tracked `example_lookups/sites.csv` and `example_lookups/plots.csv` document
-the current canonical site schema. The historical ARU example remains for
-reference only; the app does not read it:
-
-- `example_lookups/sites.csv`
-- `example_lookups/plots.csv`
-- `example_lookups/wi_config.json`
-- `example_lookups/soundhub_config.json`
-- `example_lookups/ARUs.csv`
-
-Field notes:
-
-- **`wi_config.json`**: Wildlife Insights project IDs and upload defaults. Edit `project_id_ML` and `project_id_SA` to match your project IDs in Wildlife Insights.
-- **`soundhub_config.json`**: Static ARU hardware defaults that apply to all deployments — `ARU_make`, `ARU_model`, `ARU_microphone`, container types, sample rates, and schedule. Values are copied into `audio_file_metadata.csv` at processing time.
-- **`ARUs.csv`**: Retired historical format. ARU compatibility views are built from curated device-level `deployments.csv`.
+fallbacks.
 
 > Standalone maintenance tools may use explicitly supplied local inputs. See
 > [`utils/README.md`](utils/README.md) for each tool's lookup behavior.
@@ -728,15 +704,8 @@ cassn-field-data-manager/
 │   ├── generate_data_collection_summary.py # Box data summary report generator
 │   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
-├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
-│   ├── sites.csv
-│   ├── plots.csv
-│   ├── wi_config.json
-│   ├── soundhub_config.json
-│   └── ARUs.csv
 ├── assets/                           # Logos / icon used by the UI
 ├── screenshots/                      # Application screenshots for this README
-├── docs/                             # Supplementary docs (workflow diagram)
 ├── config.json.example               # Box config template → ~/.cassn_config/config.json
 ├── requirements.txt                  # Python dependencies
 ├── .gitignore
