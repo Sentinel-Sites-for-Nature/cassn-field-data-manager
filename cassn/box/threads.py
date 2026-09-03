@@ -161,11 +161,6 @@ class BoxUploadThread(QThread):
                 for path in self.deployment_folder.rglob("*")
                 if path.is_file() and storage.should_upload_file(path)
             ]
-            total_files = len(uploadable_files)
-            completed = 0
-            uploaded = 0
-            skipped = 0
-            versioned = 0
 
             # Full paths keep hashes unambiguous across flat and split layouts.
             inventory_entry_by_path = index_inventory_by_storage_relpath(
@@ -192,6 +187,18 @@ class BoxUploadThread(QThread):
             manifest_path = qc_path_for(self.deployment_folder, "box_upload_manifest.json")
             with open(manifest_path, "w") as f:
                 json.dump(manifest_data, f, indent=2)
+
+            # The manifest describes the pre-upload snapshot and therefore does
+            # not list itself, but it is still an uploadable QC artifact. The
+            # historical ordering wrote it after ``uploadable_files`` was
+            # collected and unintentionally left it local-only.
+            if manifest_path not in uploadable_files:
+                uploadable_files.append(manifest_path)
+            total_files = len(uploadable_files)
+            completed = 0
+            uploaded = 0
+            skipped = 0
+            versioned = 0
 
             # PHASE 1 — Pre-resolve all unique destination folders and prime caches.
             # Doing this once up-front (instead of per file) eliminates ~2 API
