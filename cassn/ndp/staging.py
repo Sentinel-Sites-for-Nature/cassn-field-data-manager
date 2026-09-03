@@ -85,6 +85,13 @@ class NdpStagingError(Exception):
     """A staging precondition failed. Raised before any file is written."""
 
 
+def _safe_path_component(value: str) -> bool:
+    """Whether ``value`` is one ordinary directory name, not a path."""
+    return bool(value) and value not in {".", ".."} and not any(
+        separator in value for separator in ("/", "\\", "\x00")
+    )
+
+
 @dataclass(frozen=True)
 class MetadataDocument:
     """One filed metadata CSV, with its header preserved in source order."""
@@ -401,6 +408,12 @@ def plan_event(
             plan.warnings.append(f"{document.path.name} has no rows")
 
     for deployment_id, (document, rows) in sorted(groups.items()):
+        if not _safe_path_component(deployment_id):
+            label = deployment_id or "<blank>"
+            plan.errors.append(
+                f"{label}: deployment_id must be one safe directory name"
+            )
+            continue
         planned, build = _plan_deployment(
             deployment_id,
             document,
@@ -482,8 +495,20 @@ def apply_plan(plan: StagingPlan) -> ApplyResult:
     pending: list[tuple[Path, bytes]] = []
     unchanged: list[Path] = []
     for deployment in plan.deployments:
+        if not _safe_path_component(deployment.deployment_id):
+            raise NdpStagingError(
+                f"Unsafe deployment_id in staging plan: {deployment.deployment_id!r}"
+            )
         for relative, payload in deployment.files.items():
             path = plan.event_root / deployment.deployment_id / relative
+            try:
+                path.resolve(strict=False).relative_to(
+                    plan.event_root.resolve(strict=False)
+                )
+            except ValueError as exc:
+                raise NdpStagingError(
+                    f"Refusing to write outside the event root: {path}"
+                ) from exc
             if not path.exists():
                 pending.append((path, payload))
             elif path.is_file() and path.read_bytes() == payload:

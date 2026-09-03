@@ -15,6 +15,7 @@ from cassn.ndp.staging import (
     README_FILENAME,
     REQUIRED_COLUMNS_BY_KIND,
     NdpStagingError,
+    PlannedDeployment,
     apply_plan,
     plan_event,
     read_event_documents,
@@ -347,6 +348,33 @@ def test_event_folder_name_is_the_authoritative_event_id(tmp_path, lookups):
 
     assert not plan.ok
     assert any("does not match the event folder" in error for error in plan.errors)
+
+
+def test_unsafe_deployment_id_is_rejected_before_staging(tmp_path, lookups):
+    event = tmp_path / "box" / EVENT_ID
+    row = _image_row("img_1.jpg")
+    row["deployment_id"] = "../escaped"
+    lookup = _lookup_row("../escaped", "ML", "08019434", "1")
+    lookups.deployments_by_id["../escaped"] = lookup
+    _write_csv(event / "image_file_metadata.csv", IMAGE_FIELDS, [row])
+
+    plan = plan_event(event, tmp_path / "staging", lookups)
+
+    assert not plan.ok
+    assert any("safe directory name" in error for error in plan.errors)
+
+
+def test_apply_rechecks_deployment_id_path_safety(event_dir, lookups, tmp_path):
+    plan = plan_event(event_dir, tmp_path / "staging", lookups)
+    original = plan.deployments[0]
+    plan.deployments[0] = PlannedDeployment(
+        "../escaped", original.files, original.warnings
+    )
+
+    with pytest.raises(NdpStagingError, match="Unsafe deployment_id"):
+        apply_plan(plan)
+
+    assert not (tmp_path / "staging" / "escaped").exists()
 
 
 def test_a_document_missing_a_required_column_is_rejected(tmp_path):
