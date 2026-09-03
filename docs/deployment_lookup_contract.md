@@ -27,15 +27,20 @@ Required columns:
 
 ```text
 deployment_id,deployment_event_id,deployment_sequence,site_short_name,
-plot_number,device_type,device_id,deployment_start_date,deployment_end_date,
-identifier_policy,feature_type,mounted_on,sensor_height_meters
+plot_number,device_type,deployment_start_date,deployment_end_date,
+identifier_policy,device_id,asset_tag,feature_type,mounted_on,
+sensor_height_meters
 ```
 
 The schema intentionally contains only fields required by the application or
 its current Wildlife Insights and SoundHub outputs. `device_id` is the physical
 device identifier for every device type and is also the downstream `camera_id`
-for ML and SA rows. There is no duplicate `camera_id` lookup column. Hardware
-identifiers may be blank when the Survey123 value is not trustworthy.
+for ML and SA rows. For BD and BT rows it is the 16-character uppercase
+hexadecimal AudioMoth serial reported by the recorder. `asset_tag` preserves the
+four-digit field inventory label for ARUs and is blank for cameras. There is no
+duplicate `camera_id` lookup column. A physical identifier may remain blank
+when no recorder-derived or filed source supports it; `asset_tag` must never be
+substituted into `device_id`.
 
 Each field has one authority. Camera `feature_type`, ARU `mounted_on`, and ARU
 `sensor_height_meters` come from the deployment Survey123 record. Camera
@@ -118,6 +123,11 @@ For new runtime lookup snapshots:
 - open deployments have neither an event ID nor a deployment ID, but may have
   a nonzero sequence assigned by a known mid-event redeployment;
 - no missing retrieval date may be replaced with a plausible inferred date;
+- every populated BD/BT `device_id` is a 16-character uppercase hexadecimal
+  AudioMoth serial, and every populated ARU `asset_tag` is four digits;
+- camera rows have a blank `asset_tag`;
+- one AudioMoth serial cannot occupy overlapping deployment slots in the same
+  event or pending field round;
 - retrieval matching must use source timestamps and may not close a successor
   that started at or after the retrieval timestamp.
 

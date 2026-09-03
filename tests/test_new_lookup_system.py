@@ -35,6 +35,7 @@ FIELDS = [
     "plot_number",
     "device_type",
     "device_id",
+    "asset_tag",
     "deployment_start_date",
     "deployment_end_date",
     "identifier_policy",
@@ -60,6 +61,7 @@ def placement(**changes) -> dict:
         "plot_number": "1",
         "device_type": "ML",
         "device_id": "CAM-OLD",
+        "asset_tag": "",
         "deployment_start_date": "2026-01-08",
         "deployment_end_date": "2026-04-24",
         "identifier_policy": "filed_legacy",
@@ -155,13 +157,15 @@ def test_sequential_deployments_remain_individually_addressable():
     first = placement(
         deployment_id="UC_TestSite_plot1_BD_20260424",
         device_type="BD",
-        device_id="ARU-OLD",
+        device_id="24F3190464890001",
+        asset_tag="0001",
     )
     successor = placement(
         deployment_id="UC_TestSite_plot1_BD_20260424-seq01",
         deployment_sequence="1",
         device_type="BD",
-        device_id="ARU-NEW",
+        device_id="24F3190464890002",
+        asset_tag="0002",
         deployment_start_date="2026-04-23",
     )
     events, rows_by_round = build_deployment_rounds(
@@ -181,7 +185,9 @@ def test_sequential_deployments_remain_individually_addressable():
     rows = lookups.active_rows_for_slot("TestSite", 1, "BD")
     assert [row["deployment_sequence"] for row in rows] == ["0", "1"]
     assert [deployment_storage_label(row) for row in rows] == ["p1_BD", "p1_BD_seq01"]
-    assert lookups.active_deployment_for_label("p1_BD_seq01")["device_id"] == "ARU-NEW"
+    assert lookups.active_deployment_for_label("p1_BD_seq01")["device_id"] == (
+        "24F3190464890002"
+    )
 
 
 def test_event_record_adds_exact_id_only_for_prospective_inventory():
@@ -320,7 +326,8 @@ def test_events_follow_curated_id_and_activate_historical_devices(tmp_path):
         placement(
             deployment_id="dep-aru",
             device_type="BD",
-            device_id="ARU-1",
+            device_id="24F3190464890003",
+            asset_tag="0003",
             deployment_start_date="2026-03-04",
             mounted_on="Tree",
             sensor_height_meters="1.5",
@@ -392,7 +399,9 @@ def test_events_follow_curated_id_and_activate_historical_devices(tmp_path):
     assert lookups.current_rounds("TestSite")[0]["deployment_event_id"] == ""
     lookups.activate_deployment_round(april["deployment_round_id"])
     assert lookups.cameras[("TestSite", 1, "ML")]["camera_id"] == "CAM-OLD"
-    assert lookups.arus[("TestSite", 1, "BD")]["device_id"] == "ARU-1"
+    assert lookups.arus[("TestSite", 1, "BD")]["device_id"] == (
+        "24F3190464890003"
+    )
 
     lookups.activate_deployment_round(may["deployment_round_id"])
     assert lookups.cameras[("TestSite", 1, "ML")]["camera_id"] == "CAM-NEW"
@@ -410,7 +419,8 @@ def test_adjacent_dates_do_not_merge_distinct_curated_events(tmp_path):
             deployment_id="curated-two",
             deployment_event_id="UC_TestSite_20260425",
             device_type="BD",
-            device_id="ARU-1",
+            device_id="24F3190464890003",
+            asset_tag="0003",
             deployment_end_date="2026-04-25",
         ),
     ]
@@ -449,7 +459,8 @@ def test_all_open_placements_at_a_site_form_one_current_field_set():
         deployment_start_date="2026-06-11",
         plot_number="2",
         device_type="BD",
-        device_id="ARU-CURRENT",
+        device_id="24F3190464890004",
+        asset_tag="0004",
     )
 
     events, rows_by_round = build_deployment_rounds(
@@ -471,7 +482,8 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
         placement(
             deployment_id="dep-aru",
             device_type="BD",
-            device_id="ARU-1",
+            device_id="24F3190464890003",
+            asset_tag="0003",
             deployment_start_date="2026-03-04",
             mounted_on="Tree",
             sensor_height_meters="1.5",
@@ -817,4 +829,33 @@ def test_event_only_legacy_deployments_schema_is_rejected(tmp_path):
     )
 
     with pytest.raises(LookupSchemaError, match="wrong schema"):
+        load_device_deployments(path)
+
+
+def test_aru_identity_schema_separates_serial_from_asset_tag(tmp_path):
+    path = tmp_path / "deployments.csv"
+    row = placement(
+        deployment_id="UC_TestSite_plot1_BD_20260424",
+        device_type="BD",
+        device_id="24F3190464890001",
+        asset_tag="0001",
+        identifier_policy="",
+    )
+    write_csv(path, FIELDS, [row])
+    assert load_device_deployments(path)[0]["asset_tag"] == "0001"
+
+    row["device_id"] = "0001"
+    write_csv(path, FIELDS, [row])
+    with pytest.raises(LookupSchemaError, match="AudioMoth device_id"):
+        load_device_deployments(path)
+
+    row["device_id"] = ""
+    row["asset_tag"] = "tag-1"
+    write_csv(path, FIELDS, [row])
+    with pytest.raises(LookupSchemaError, match="ARU asset_tag"):
+        load_device_deployments(path)
+
+    row = placement(asset_tag="0001")
+    write_csv(path, FIELDS, [row])
+    with pytest.raises(LookupSchemaError, match="asset_tag to a camera"):
         load_device_deployments(path)

@@ -1344,10 +1344,23 @@ class FieldDataWizard(QMainWindow):
                         label = "" if len(rows) == 1 else f"seq{sequence:02d}"
                         cb = QCheckBox(label)
                         cb.setChecked(True)
-                        cb.setToolTip(
-                            f"{row['deployment_id']}\n"
-                            f"{row['deployment_start_date']} → {row['deployment_end_date']}"
-                        )
+                        identity_lines = []
+                        if row.get("device_id"):
+                            identity_label = (
+                                "AudioMoth serial"
+                                if dev_code in AUDIO_DEVICE_TYPES
+                                else "Camera ID"
+                            )
+                            identity_lines.append(
+                                f"{identity_label}: {row['device_id']}"
+                            )
+                        if row.get("asset_tag"):
+                            identity_lines.append(f"Asset tag: {row['asset_tag']}")
+                        cb.setToolTip("\n".join([
+                            row["deployment_id"],
+                            f"{row['deployment_start_date']} → {row['deployment_end_date']}",
+                            *identity_lines,
+                        ]))
                         checks.append((row, cb))
                         cell_layout.addWidget(cb, alignment=Qt.AlignCenter)
                     self.grid_layout.addWidget(cell, row_idx, col, Qt.AlignCenter)
@@ -2044,7 +2057,12 @@ class FieldDataWizard(QMainWindow):
             deployment_device_id = deployment_row.get("device_id", "")
             device_id = parse_audiomoth_device_id(source_dir) or deployment_device_id
             if not device_id:
-                self.log(f"  Warning: could not find AudioMoth Device ID in {source_dir}")
+                asset_tag = deployment_row.get("asset_tag", "")
+                tag_note = f" (asset tag {asset_tag})" if asset_tag else ""
+                self.log(
+                    f"  Warning: could not find AudioMoth Device ID in {source_dir}"
+                    f"{tag_note}"
+                )
         else:
             device_id = deployment_row.get("device_id", "")
             if not device_id:
