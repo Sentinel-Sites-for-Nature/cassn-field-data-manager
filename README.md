@@ -498,7 +498,7 @@ One row per camera trap file (images and associated files). Fields map directly 
 | `plot_treatment`, `plot_treatment_description`, `detection_distance` | Reserved WI columns; currently blank |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
-| `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
+| `is_uploaded_to_osdf`, `osdf_uploader`, `osdf_upload_datetime` | Verified OSDF publication provenance; independent of the transfer client |
 | `is_submitted_to_wi`, `wi_submitter`, `wi_submission_datetime` | WI submission provenance |
 | `notes` | Free text |
 
@@ -517,7 +517,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from AudioMoth filename |
 | `latitude`, `longitude`, `elevation_m` | Plot coordinates and elevation (metres) from `plots.csv` |
-| `ARU_make`, `ARU_model` | Hardcoded `AudioMoth`; model from CONFIG.TXT firmware string |
+| `ARU_make`, `ARU_model`, `ARU_firmware` | AudioMoth manufacturer, hardware model, and firmware as distinct fields |
 | `sample_rate_hz` | From WAV header or CONFIG.TXT |
 | `gain` | Recording gain from WAV comment or CONFIG.TXT |
 | `filter_type_khz` | High-pass filter cutoff in kHz (blank for BD) |
@@ -529,7 +529,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `feature_type`, `feature_type_details`, `ARU_container`, `ARU_microphone`, `ARU_status` | Protocol/hardware values from `soundhub_config.json` or reserved blank columns |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
-| `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
+| `is_uploaded_to_osdf`, `osdf_uploader`, `osdf_upload_datetime` | Verified OSDF publication provenance; independent of the transfer client |
 | `is_submitted_to_soundhub`, `soundhub_submitter`, `soundhub_submission_datetime` | SoundHub submission provenance |
 | `is_submitted_to_nabat`, `nabat_submitter`, `nabat_submission_datetime` | NABat submission provenance |
 | `notes` | Free text |

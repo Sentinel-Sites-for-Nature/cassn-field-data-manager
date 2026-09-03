@@ -176,6 +176,26 @@ For Box Drive files, back up first and add `--in-place` to retain the existing
 Box file IDs and version history. The command preserves CSV headers, encoding,
 line endings, unrelated values, and is safe to rerun.
 
+## `rename_osdf_provenance.py`
+
+Renames the three unused `pelican_*` metadata columns to `osdf_*`, reflecting
+that OSDF is the archive while Pelican is only a transfer client. It preserves
+every byte after the CSV header and refuses populated, partial, or mixed
+provenance schemas. Preview first; on Box Drive, apply in place to preserve Box
+file IDs and version history:
+
+```bash
+.venv/bin/python utils/rename_osdf_provenance.py \
+  --root "/path/to/Box-Box/CASSN/data" \
+  --expect-files 51
+
+.venv/bin/python utils/rename_osdf_provenance.py \
+  --root "/path/to/Box-Box/CASSN/data" \
+  --expect-files 51 \
+  --apply \
+  --in-place
+```
+
 ## `backfill_box_provenance.py`
 
 Backfills `is_uploaded_to_box`, `box_uploader`, and `box_upload_datetime` in

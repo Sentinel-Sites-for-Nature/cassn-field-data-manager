@@ -158,9 +158,9 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
             'is_uploaded_to_box': False,
             'box_uploader':       '',
             'box_upload_datetime': '',
-            'is_uploaded_to_pelican': False,
-            'pelican_uploader':   '',
-            'pelican_upload_datetime': '',
+            'is_uploaded_to_osdf': False,
+            'osdf_uploader':      '',
+            'osdf_upload_datetime': '',
             'notes':              '',
         }
 

@@ -122,7 +122,7 @@ IMAGE_FIELDS = [
     "plot_treatment", "plot_treatment_description", "detection_distance",
     "app_version", "processing_datetime",
     "is_uploaded_to_box", "box_uploader", "box_upload_datetime",
-    "is_uploaded_to_pelican", "pelican_uploader", "pelican_upload_datetime",
+    "is_uploaded_to_osdf", "osdf_uploader", "osdf_upload_datetime",
     "is_submitted_to_wi", "wi_submitter", "wi_submission_datetime",
     "notes",
 ]
@@ -144,7 +144,7 @@ AUDIO_FIELDS = [
     "mounted_on", "sensor_height_meters", "ARU_status",
     "app_version", "processing_datetime",
     "is_uploaded_to_box", "box_uploader", "box_upload_datetime",
-    "is_uploaded_to_pelican", "pelican_uploader", "pelican_upload_datetime",
+    "is_uploaded_to_osdf", "osdf_uploader", "osdf_upload_datetime",
     "is_submitted_to_soundhub", "soundhub_submitter", "soundhub_submission_datetime",
     "is_submitted_to_nabat", "nabat_submitter", "nabat_submission_datetime",
     "notes",
