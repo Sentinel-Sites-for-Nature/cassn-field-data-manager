@@ -352,10 +352,10 @@ def parse_audiomoth_guano(wav_path: Path) -> dict:
     already encodes the device's *configured* UTC offset, so no DST guesswork
     is needed (unlike the filename-derived datetime).
 
-    Returns a dict with whichever of ``recorded_datetime``, ``device_id``,
-    ``battery_voltage``, and ``temperature_c`` the chunk provides. Returns an
-    empty dict for pre-1.10.0 files (no ``guan`` chunk) or on any parse error,
-    so callers transparently fall back to the ICMT/CONFIG values.
+    Returns a dict containing whichever authoritative timestamp, device
+    identity, firmware, battery, and temperature fields the chunk provides.
+    Returns an empty dict for pre-1.10.0 files (no ``guan`` chunk) or on any
+    parse error, so callers transparently fall back to the ICMT/CONFIG values.
     """
     result: dict = {}
     try:

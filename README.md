@@ -3,8 +3,7 @@
 A Python desktop application for downloading, uploading, and managing wildlife image and audio data. Built for the California Sentinel Sites for Nature (CA-SSN) program — standardized biodiversity data collected with camera traps and acoustic recorders across California reserves and partner organizations.
 
 ![Version](https://img.shields.io/badge/version-4.0-blue)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 
 ## Features
 
@@ -32,7 +31,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - pip package manager
 
 ### Install Dependencies
@@ -685,6 +684,14 @@ fallbacks.
 
 ## Development
 
+Install the tested application and development dependencies, then run the full
+test suite with warnings treated as errors:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q -W error
+```
+
 ### Project Structure
 
 ```
@@ -708,6 +715,7 @@ cassn-field-data-manager/
 ├── screenshots/                      # Application screenshots for this README
 ├── config.json.example               # Box config template → ~/.cassn_config/config.json
 ├── requirements.txt                  # Python dependencies
+├── requirements-dev.txt              # Application dependencies plus test tooling
 ├── .gitignore
 └── README.md                         # This file
 ```

@@ -10,10 +10,10 @@
 #   macOS:   brew install flac
 #   Windows: download from https://xiph.org/flac and add it to PATH
 
-PySide6          # Qt GUI
-box-sdk-gen      # Box cloud storage + OAuth
-boto3            # Wildlife SoundHub S3 upload
-Pillow           # image EXIF reading
-piexif           # image EXIF reading
-PyExifTool       # camera metadata (requires the exiftool binary, see note above)
-openpyxl          # data-collection summary XLSX reports and WI tracker imports
+PySide6==6.11.2          # Qt GUI
+box-sdk-gen==1.17.0      # Box cloud storage + OAuth
+boto3==1.43.86           # Wildlife SoundHub S3 upload
+Pillow==12.3.0           # image EXIF reading
+piexif==1.1.3            # image EXIF reading
+PyExifTool==0.5.6        # camera metadata (requires the exiftool binary, see note above)
+openpyxl==3.1.5          # data-collection summary XLSX reports and WI tracker imports

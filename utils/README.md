@@ -153,6 +153,50 @@ header-only recordings remain blank and are documented in the audit.
 .venv/bin/python -u utils/backfill_audio_durations.py --year 2026 --apply
 ```
 
+## `backfill_aru_identity.py`
+
+Corrects historical audio metadata in which an AudioMoth firmware string was
+stored in `ARU_model`. It adds `ARU_firmware` immediately after `ARU_model`,
+moves recoverable firmware values into that column, and normalizes the make and
+model to `Open Acoustic Devices` and `AudioMoth`. It does not read media files.
+
+The default is a read-only recursive preview. Review the counts before applying:
+
+```bash
+.venv/bin/python utils/backfill_aru_identity.py --root /path/to/data
+.venv/bin/python utils/backfill_aru_identity.py --root /path/to/data --apply
+```
+
+For Box Drive files, back up first and add `--in-place` to retain the existing
+Box file IDs and version history. The command preserves CSV headers, encoding,
+line endings, unrelated values, and is safe to rerun.
+
+## `backfill_box_provenance.py`
+
+Backfills `is_uploaded_to_box`, `box_uploader`, and `box_upload_datetime` in
+historical image/audio metadata CSVs, then versions only the corrected CSVs on
+Box. It never re-uploads media. Box-native mode derives the original upload
+time from Box metadata; local mode uses the deployment's QC record unless an
+explicit timestamp is supplied.
+
+Always preview with `--dry-run` first. Unlike most maintenance utilities, local
+mode writes and uploads by default when `--dry-run` is omitted:
+
+```bash
+.venv/bin/python utils/backfill_box_provenance.py --dry-run /path/to/deployment
+.venv/bin/python utils/backfill_box_provenance.py /path/to/deployment
+
+.venv/bin/python utils/backfill_box_provenance.py \
+  --from-box "2026/Reserve/Deployment" \
+  --dry-run
+.venv/bin/python utils/backfill_box_provenance.py \
+  --from-box "2026/Reserve/Deployment"
+```
+
+Use `--from-box --all` only after reviewing a targeted Box-native run.
+`--force` can replace existing timestamps and should be reserved for a known
+correction. Re-running without `--force` leaves already stamped rows alone.
+
 ## `validate_curated_lookups.py`
 
 Read-only validation for a complete candidate runtime lookup directory:

@@ -534,6 +534,9 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
             "device_type": "BD",
             "file_type": "audio",
             "device_id": "ARU-1",
+            "ARU_make": "Open Acoustic Devices",
+            "ARU_model": "AudioMoth",
+            "ARU_firmware": "AudioMoth-Firmware-Basic 1.11.1",
         },
     ]
 
@@ -560,6 +563,9 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     assert images[0]["site_short_name"] == "TestSite"
     assert images[0]["site_code"] == "TST"
     assert audio[0]["date_installed"] == "2026-03-04"
+    assert audio[0]["ARU_make"] == "Open Acoustic Devices"
+    assert audio[0]["ARU_model"] == "AudioMoth"
+    assert audio[0]["ARU_firmware"] == "AudioMoth-Firmware-Basic 1.11.1"
     assert audio[0]["subproject_design"] == SUBPROJECT_DESIGN
     assert audio[0]["mounted_on"] == "Tree"
     assert images[0]["elevation_m"] == "128"

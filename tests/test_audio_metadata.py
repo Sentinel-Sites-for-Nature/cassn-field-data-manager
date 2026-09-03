@@ -11,6 +11,7 @@ from cassn.core.audio_metadata import (
     GAIN_SETTINGS,
     normalize_gain,
     parse_audiomoth_config_file,
+    parse_audiomoth_guano,
     parse_audiomoth_wav_comment,
     refresh_audiomoth_inventory_metadata,
 )
@@ -60,7 +61,8 @@ def test_refresh_inventory_metadata_uses_authoritative_staged_wav(
             "recorded_datetime": "2026-05-10T00:00:00-08:00",
             "device_id": "GUANO-ID",
             "ARU_make": "Open Acoustic Devices",
-            "ARU_model": "AudioMoth-Firmware-Basic 1.11.1",
+            "ARU_model": "AudioMoth",
+            "ARU_firmware": "AudioMoth-Firmware-Basic 1.11.1",
             "battery_voltage": "4.5",
             "temperature_c": "12.1",
         },
@@ -70,6 +72,9 @@ def test_refresh_inventory_metadata_uses_authoritative_staged_wav(
     assert entry["recording_duration_sec"] == 32400
     assert entry["recorded_datetime"] == "2026-05-10T00:00:00-08:00"
     assert entry["device_id"] == "GUANO-ID"
+    assert entry["ARU_make"] == "Open Acoustic Devices"
+    assert entry["ARU_model"] == "AudioMoth"
+    assert entry["ARU_firmware"] == "AudioMoth-Firmware-Basic 1.11.1"
     assert entry["battery_voltage"] == "4.5"
     assert entry["temperature_c"] == "12.1"
     assert entry["gain"] == "High"
@@ -90,6 +95,25 @@ def write_wav_with_comment(path, comment: str) -> None:
     # AudioMoth places the comment in the header; the reader only scans the
     # first 4 KiB, so splice it in just after the RIFF/WAVE preamble.
     data[12:12] = chunk
+    struct.pack_into("<I", data, 4, len(data) - 8)
+    path.write_bytes(bytes(data))
+
+
+def write_wav_with_guano(path, guano: str) -> None:
+    """Write a minimal WAV with a standards-compliant trailing GUANO chunk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(48000)
+        wav.writeframes(b"\x00\x00" * 48)
+
+    payload = guano.encode("utf-8")
+    chunk = b"guan" + struct.pack("<I", len(payload)) + payload
+    if len(payload) % 2:
+        chunk += b"\x00"
+    data = bytearray(path.read_bytes())
+    data.extend(chunk)
     struct.pack_into("<I", data, 4, len(data) - 8)
     path.write_bytes(bytes(data))
 
@@ -136,6 +160,38 @@ def test_config_file_gain_is_canonical(tmp_path):
     config = tmp_path / "CONFIG.TXT"
     config.write_text(REAL_CONFIG)
     assert parse_audiomoth_config_file(config)["gain_setting"] == "High"
+
+
+def test_config_file_routes_firmware_to_its_own_field(tmp_path):
+    config = tmp_path / "CONFIG.TXT"
+    config.write_text(REAL_CONFIG)
+
+    parsed = parse_audiomoth_config_file(config)
+
+    assert parsed["ARU_firmware"] == "AudioMoth-Firmware-Basic 1.11.1"
+    assert "ARU_model" not in parsed
+
+
+def test_guano_keeps_make_model_and_firmware_separate(tmp_path):
+    wav = tmp_path / "recording.wav"
+    write_wav_with_guano(
+        wav,
+        "\n".join(
+            [
+                "Timestamp: 2026-05-10T00:00:00-08:00",
+                "Serial: 243B1F026488A78B",
+                "Make: Open Acoustic Devices",
+                "Model: AudioMoth",
+                "Firmware Version: AudioMoth-Firmware-Basic (1.11.0)",
+            ]
+        ),
+    )
+
+    parsed = parse_audiomoth_guano(wav)
+
+    assert parsed["ARU_make"] == "Open Acoustic Devices"
+    assert parsed["ARU_model"] == "AudioMoth"
+    assert parsed["ARU_firmware"] == "AudioMoth-Firmware-Basic 1.11.0"
 
 
 def test_wav_comment_gain_is_canonical(tmp_path):
