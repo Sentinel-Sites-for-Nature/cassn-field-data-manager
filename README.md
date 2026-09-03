@@ -160,6 +160,19 @@ is active. To install the command on another workstation, make
 .venv/bin/python -m cassn
 ```
 
+On macOS, install or refresh a clickable copy in `~/Applications` with:
+
+```bash
+.venv/bin/python utils/install_macos_app.py --open
+```
+
+The resulting **CA-SSN Field Data Manager.app** uses the same repository and
+virtual environment as `cassn-app`; it does not duplicate or freeze the Python
+application. It also installs the `cassn-clear-staging` command. To retain the
+application in the Dock, right-click its icon while it is open and choose
+**Options → Keep in Dock**. Finder/Dock launches write diagnostics to
+`~/Library/Logs/CA-SSN Field Data Manager/launcher.log`.
+
 On launch the app first downloads the complete Box `app_config` snapshot to
 temporary files. It validates `deployment_events.csv` and `deployments.csv`
 together, validates their canonical event, site, plot, sequence, and interval
@@ -658,7 +671,7 @@ deployment intervals, and export defaults:
 - `sites.csv` — `site_name,site_short_name,site_code`, where the values are the formal name, stable relational/deployment-ID token, and acronym
 - `plots.csv` — plot names, numbers, coordinates, and hand-entered `elevation_m`, joined to sites by `site_short_name`
 - `deployment_events.csv` — canonical event ID, site, `deployment_event_start_date`, and `deployment_event_end_date`; this is the sole runtime authority for event naming and dates
-- `deployments.csv` — one curated row per monitoring interval, joined to events by `deployment_event_id` and to sites by `site_short_name`, including a stable sequence-aware deployment ID, plot, optional hardware identity, observations, and export fields
+- `deployments.csv` — one curated row per monitoring interval, joined to events by `deployment_event_id` and to sites by `site_short_name`; `device_id` holds the physical camera or AudioMoth serial, while ARU `asset_tag` preserves the four-digit field label
 - `wi_config.json` — Wildlife Insights project IDs and upload defaults
 - `soundhub_config.json` — ARU hardware defaults (make, model, microphone, containers)
 - `program_config.json` — organization label(s) and observer names for the dropdowns
@@ -711,7 +724,9 @@ cassn-field-data-manager/
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
+│   ├── clear_box_verified_staging.py # Box-verified local staging cleanup
 │   ├── generate_data_collection_summary.py # Box data summary report generator
+│   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── example_lookups/                  # Tracked example lookup tables (schema reference / seed)
 │   ├── sites.csv

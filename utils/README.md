@@ -4,8 +4,45 @@ Helper scripts for maintenance and data recovery tasks.
 
 The active lookup contract uses `site_name,site_short_name,site_code` in
 `sites.csv`; `plots.csv` and curated `deployments.csv` join by
-`site_short_name`. Retired `devices.csv`, `cameras.csv`,
+`site_short_name`. In `deployments.csv`, `device_id` is the physical device
+serial and ARU `asset_tag` is the four-digit field label. Retired `devices.csv`, `cameras.csv`,
 `ARUs.csv`, and event-only `deployments.csv` are not app inputs.
+
+## `clear_box_verified_staging.py`
+
+Permanently clears local deployment-event folders only after each event passes
+a fresh, metadata-only Box verification. The command compares the SHA-1 values
+recorded at ingest with Box's server-side SHA-1 values. It does not download
+Box media or re-hash local images and recordings.
+
+The normal command uses the staging root currently saved by the application in
+`~/.cassn_config/config.json` and performs a read-only dry run:
+
+```bash
+cassn-clear-staging
+```
+
+Use `--staging-root` only for a different staging location, and `--event` to
+limit the check to one direct child folder:
+
+```bash
+cassn-clear-staging \
+  --staging-root /path/to/other/staging \
+  --event UC_Site_20260424
+```
+
+After reviewing the `SAFE TO CLEAR` and `BLOCKED` results, permanently delete
+only the safe events with:
+
+```bash
+cassn-clear-staging --apply
+```
+
+An event is blocked unless device collection is complete, all metadata rows are
+stamped as uploaded to Box, the normal post-upload verification artifact
+passed, every local raw file is represented in `session.json`, and a live Box
+listing contains matching paths and server-side hashes. Box is never modified,
+and no cleanup receipt or other persistent record is created.
 
 ## `generate_data_collection_summary.py`
 
