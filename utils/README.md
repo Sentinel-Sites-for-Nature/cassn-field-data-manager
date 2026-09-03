@@ -8,6 +8,32 @@ The active lookup contract uses `site_name,site_short_name,site_code` in
 serial and ARU `asset_tag` is the four-digit field label. Retired `devices.csv`, `cameras.csv`,
 `ARUs.csv`, and event-only `deployments.csv` are not app inputs.
 
+## `transfer_ndp_source.py`
+
+Preflights one staged NDP source event against the live Box API, then optionally
+downloads and hash-checks its media one deployment at a time before syncing the
+deployment's `data/` collection to Pelican. The destination is always explicit,
+so the same program can target the temporary `cassn` prefix and the later `ssn`
+prefix without a code change.
+
+The command is a read-only preflight unless `--apply` is supplied. Control-file
+publication and Box provenance updates remain disabled pending the manifest and
+multi-destination review; see `docs/ndp_media_transfer_checkpoint.md`.
+
+```bash
+.venv/bin/python utils/transfer_ndp_source.py \
+  --event "/path/to/Box-Box/CASSN/data/2026/Reserve/Event" \
+  --staging-root "/path/to/ndp/staging/cassn/ca/UC-Nature/source" \
+  --lookup-dir "/path/to/Box-Box/CASSN/app_config" \
+  --scratch-root "/path/to/ndp/transfer_scratch" \
+  --destination-root "osdf:///ndp/private/cassn/ca/UC-Nature/source"
+```
+
+Before the first live `--apply`, complete the disposable Pelican protocol test
+described in the checkpoint. An interrupted exact run resumes from its atomic
+local state. `--abandonment-plan` lists partial remote collections requiring
+explicit deletion but never deletes them.
+
 ## `clear_box_verified_staging.py`
 
 Permanently clears local deployment-event folders only after each event passes
