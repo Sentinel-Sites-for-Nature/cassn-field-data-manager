@@ -217,6 +217,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'device_id':             entry.get('device_id', ''),
                 'ARU_make':              entry.get('ARU_make', '') or soundhub_config.get('ARU_make', ''),
                 'ARU_model':             entry.get('ARU_model', '') or soundhub_config.get('ARU_model', ''),
+                'ARU_firmware':          entry.get('ARU_firmware', ''),
                 'sample_rate_hz':        entry.get('sample_rate_hz', '') or soundhub_config.get(f'sample_rate_hz_{dev_type}', ''),
                 # Normalized again here, not only at extraction: gain is written
                 # into session.json per file as the card is copied, so a

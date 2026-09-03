@@ -167,8 +167,9 @@ def enrich_audio_rows(audio_rows: list[dict], lookups) -> list[dict]:
             row.get("ARU_microphone") or config.get("ARU_microphone", "")
         )
         row["feature_type"] = row.get("feature_type") or config.get("feature_type", "")
-        # Preserve CONFIG/GUANO-derived make and firmware model when present;
-        # the protocol values are fallbacks for older metadata only.
+        # Preserve CONFIG/GUANO-derived make and model when present; the
+        # protocol values are fallbacks for older metadata only. Firmware is not
+        # sent to SoundHub and has no protocol default.
         row["ARU_make"] = row.get("ARU_make") or config.get("ARU_make", "")
         row["ARU_model"] = row.get("ARU_model") or config.get("ARU_model", "")
         enriched.append(row)
