@@ -17,6 +17,10 @@ done
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd)
 venv_python=$repo_dir/.venv/bin/python
 
+# Finder/Dock launches receive a minimal PATH. Include the normal Homebrew
+# locations so ExifTool and FLAC are available just as they are in Terminal.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 if [ ! -x "$venv_python" ]; then
     printf '%s\n' \
         "Field Data Manager virtual environment was not found:" \
@@ -26,4 +30,7 @@ if [ ! -x "$venv_python" ]; then
 fi
 
 cd "$repo_dir"
+if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || printf '0')" = "1" ]; then
+    exec /usr/bin/arch -arm64 "$venv_python" -m cassn "$@"
+fi
 exec "$venv_python" -m cassn "$@"
