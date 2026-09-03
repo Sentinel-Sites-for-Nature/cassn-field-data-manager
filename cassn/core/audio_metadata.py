@@ -112,7 +112,7 @@ def parse_audiomoth_config_file(config_path: Path) -> dict:
 
             if key == "Firmware":
                 # "AudioMoth-Firmware-Basic (1.11.0)" -> "AudioMoth-Firmware-Basic 1.11.0"
-                result["ARU_model"] = re.sub(r"\((.+?)\)", r"\1", val).strip()
+                result["ARU_firmware"] = re.sub(r"\((.+?)\)", r"\1", val).strip()
             elif key == "Sample rate (Hz)":
                 result["sample_rate_hz"] = val if val != "-" else ""
             elif key == "Gain":
@@ -373,16 +373,21 @@ def parse_audiomoth_guano(wav_path: Path) -> dict:
             result["recorded_datetime"] = _normalize_guano_timestamp(fields["Timestamp"])
         if fields.get("Serial"):
             result["device_id"] = fields["Serial"]
-        # Hardware identity, straight from the device. GUANO is authoritative:
-        # "Make: Open Acoustic Devices", "Model: AudioMoth". The firmware string
-        # is stored as ARU_model to match the CONFIG.TXT-derived value, e.g.
-        # "AudioMoth-Firmware-Basic (1.11.0)" -> "AudioMoth-Firmware-Basic 1.11.0".
+        # Hardware identity, straight from the device. GUANO reports make, model
+        # and firmware as three separate fields, so each keeps its own column:
+        # "Make: Open Acoustic Devices", "Model: AudioMoth",
+        # "Firmware Version: AudioMoth-Firmware-Basic (1.11.0)". Until 2026-09-02
+        # the firmware string was written into ARU_model to match the
+        # CONFIG.TXT-derived value, which put a firmware version in a model field
+        # and made a deployment's config row disagree with its media rows.
         if fields.get("Make"):
             result["ARU_make"] = fields["Make"]
-        if fields.get("Firmware Version"):
-            result["ARU_model"] = re.sub(r"\((.+?)\)", r"\1", fields["Firmware Version"]).strip()
-        elif fields.get("Model"):
+        if fields.get("Model"):
             result["ARU_model"] = fields["Model"]
+        if fields.get("Firmware Version"):
+            result["ARU_firmware"] = re.sub(
+                r"\((.+?)\)", r"\1", fields["Firmware Version"]
+            ).strip()
         if fields.get("OAD|Battery Voltage"):
             result["battery_voltage"] = fields["OAD|Battery Voltage"]
         if fields.get("Temperature Int"):
@@ -416,6 +421,7 @@ def refresh_audiomoth_inventory_metadata(entry: dict, wav_path: Path) -> bool:
         "recorded_datetime": guano.get("recorded_datetime"),
         "ARU_make": guano.get("ARU_make") or comment.get("ARU_make"),
         "ARU_model": guano.get("ARU_model") or comment.get("ARU_model"),
+        "ARU_firmware": guano.get("ARU_firmware") or comment.get("ARU_firmware"),
         "battery_voltage": (
             guano.get("battery_voltage") or comment.get("battery_voltage")
         ),

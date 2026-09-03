@@ -135,7 +135,7 @@ AUDIO_FIELDS = [
     "plot_number", "device_type", "device_id", "file_type",
     "file_size_bytes", "file_hash_sha256", "file_hash_sha1", "recorded_datetime",
     "latitude", "longitude", "elevation_m",
-    "ARU_make", "ARU_model", "sample_rate_hz", "gain", "filter_type_khz",
+    "ARU_make", "ARU_model", "ARU_firmware", "sample_rate_hz", "gain", "filter_type_khz",
     "battery_voltage", "temperature_c",
     "date_installed", "deployment_start_time", "deployment_end_time",
     "frequency", "duration", "recording_duration_sec", "recording_stop_reason",

@@ -437,6 +437,7 @@ def build_inventory_record(
         # soundhub_config.json default applied downstream in metadata_csv.
         'ARU_make':    wav_data.get('ARU_make', '') or config_data.get('ARU_make', ''),
         'ARU_model':   wav_data.get('ARU_model', '') or config_data.get('ARU_model', ''),
+        'ARU_firmware': wav_data.get('ARU_firmware', '') or config_data.get('ARU_firmware', ''),
         'sample_rate_hz': wav_data.get('sample_rate_hz', '') or config_data.get('sample_rate_hz', ''),
         'gain':        wav_data.get('gain_setting', '') or config_data.get('gain_setting', ''),
         'filter_type_khz': hz_to_khz(
