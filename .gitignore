@@ -81,3 +81,9 @@ tmp/
 
 # Local agent operating instructions
 AGENTS.md
+
+# Internal planning documents (local only; never publish)
+/docs/**/*.md
+
+# Temporarily local until the example lookup schemas are settled
+/example_lookups/
