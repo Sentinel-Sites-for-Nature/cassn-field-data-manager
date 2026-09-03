@@ -23,12 +23,11 @@ Neither imports Qt.
 """
 
 from cassn.ndp.manifest import (
+    INVENTORY_REVISION,
     MANIFEST_TYPE,
-    MANIFEST_VERSION,
-    SNAPSHOT_VERSION,
+    SCHEMA_VERSION,
     ManifestBuild,
     build_manifest,
-    content_digest,
 )
 from cassn.ndp.staging import (
     ApplyResult,
@@ -39,7 +38,6 @@ from cassn.ndp.staging import (
     apply_plan,
     plan_event,
     read_event_documents,
-    read_event_recorded_by,
 )
 from cassn.ndp.submission import MediaTransferResult, execute_media_transfer
 from cassn.ndp.transfer import (
@@ -52,8 +50,9 @@ from cassn.ndp.transfer import (
 
 __all__ = [
     "ApplyResult",
+    "INVENTORY_REVISION",
     "MANIFEST_TYPE",
-    "MANIFEST_VERSION",
+    "SCHEMA_VERSION",
     "ManifestBuild",
     "MediaTransferPlan",
     "MediaTransferResult",
@@ -61,16 +60,13 @@ __all__ = [
     "NdpStagingError",
     "NdpTransferError",
     "PlannedDeployment",
-    "SNAPSHOT_VERSION",
     "StagingPlan",
     "TransferFile",
     "DeploymentTransfer",
     "apply_plan",
     "build_manifest",
-    "content_digest",
     "execute_media_transfer",
     "plan_media_transfer",
     "plan_event",
     "read_event_documents",
-    "read_event_recorded_by",
 ]

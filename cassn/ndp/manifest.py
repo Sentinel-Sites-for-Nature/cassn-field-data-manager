@@ -1,14 +1,17 @@
-"""Deployment manifest construction for the NDP source namespace.
+"""Build the minimal deployment-level contract for the NDP source namespace.
 
-One ``manifest.json`` describes one deployment: who placed what device where,
-over which interval, and exactly which files came off the card. Authoritative
-placement and device identity come from the curated lookup snapshot; the filed
-metadata rows cross-check it and supply the file inventory.
+``manifest.json`` is an immutable package envelope, not a second scientific
+metadata table.  It gives machines a stable deployment summary across the
+historical CSV schemas and binds that summary to the exact per-file inventory.
+The inventory retains the detailed file metadata and every media checksum.
 
-This module is pure. It touches no filesystem, no clock, and no network, so
-every fact it needs — the rendered CSV's SHA-256, the ``generated`` instant, the
-lookup row — arrives as an argument. That keeps the manifest reproducible: the
-same rows and the same lookup snapshot always yield the same bytes.
+Curated deployment/site/plot lookups are authoritative for deployment-level
+identity, placement, and coordinates.  Filed metadata rows cross-check those
+facts and supply the content inventory and observed recording interval.
+
+This module is pure. It touches no filesystem, clock, or network. The same rows,
+lookup tables, inventory revision, and rendered CSV hash always yield the same
+manifest bytes.
 
 Findings are collected rather than raised. A hard error means the manifest is
 not written; the caller validates a whole event before writing anything, so one
@@ -17,26 +20,25 @@ bad deployment surfaces beside the other fifteen instead of hiding them.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from cassn.config import AUDIO_DEVICE_TYPES, CAMERA_DEVICE_TYPES, VERSION
+from cassn.config import AUDIO_DEVICE_TYPES, CAMERA_DEVICE_TYPES
 from cassn.lookups import ASSET_TAG_PATTERN, AUDIOMOTH_SERIAL_PATTERN, Site
 
-MANIFEST_VERSION = 1
+SCHEMA_VERSION = 1
 MANIFEST_TYPE = "cassn.source.deployment"
-GENERATOR_NAME = "cassn-field-data-manager"
-ACCESS = "private"
+ORGANIZATION = "UC-Nature"
 
-# Untagged means v00 everywhere under the namespace, so a manifest generated
-# from an uncorrected deployment always states snapshot 0. Corrections take the
-# next suffix as a new path and carry the next snapshot number.
-SNAPSHOT_VERSION = 0
+# Source data is versioned per logical file, while the manifest and inventory
+# advance together whenever the deployment's authoritative file selection
+# changes. Untagged control filenames are revision 00. A future correction may
+# publish manifest-v01.json and metadata/file_metadata-v01.csv without renaming
+# the stable deployment directory or unchanged media objects.
+INVENTORY_REVISION = 0
 
 METADATA_FILENAME = "metadata/file_metadata.csv"
-CHECKSUM_ALGORITHM = "sha256"
 CHECKSUM_COLUMN = "file_hash_sha256"
 
 # The document family a deployment's rows came from, and the row ``file_type``
@@ -47,6 +49,7 @@ AUDIO_FILE_TYPES = frozenset({"audio", "config"})
 CONFIG_FILE_TYPE = "config"
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+COORDINATE_TOLERANCE_DEGREES = 1e-7
 
 
 @dataclass(frozen=True)
@@ -61,24 +64,6 @@ class ManifestBuild:
     @property
     def ok(self) -> bool:
         return not self.errors
-
-
-def content_digest(rows: list[dict]) -> str:
-    """Roll every row's SHA-256 into one digest for the whole deployment.
-
-    Sorting makes the digest independent of row order; duplicates stay in the
-    list so a file counted twice changes the result. No delimiter is needed
-    because every element is exactly 64 ASCII bytes. Config sidecar hashes are
-    included alongside media, so a changed CONFIG.TXT changes the rollup.
-
-    Recomputable from a staged ``file_metadata.csv`` alone. It detects a changed
-    multiset of content hashes and nothing else, which is why the manifest also
-    carries ``content.metadata_sha256``.
-    """
-    hashes = sorted(
-        str(row.get(CHECKSUM_COLUMN) or "").strip().lower() for row in rows
-    )
-    return hashlib.sha256("".join(hashes).encode("ascii")).hexdigest()
 
 
 def _report(errors: list[str], offenders: list[str], label: str) -> None:
@@ -183,7 +168,13 @@ def _coordinates(
     errors: list[str],
     warnings: list[str],
 ) -> dict | None:
-    """Resolve the deployment's position, preferring the filed metadata."""
+    """Return the authoritative WGS84 plot point and cross-check filed rows.
+
+    Both image and audio inventory records receive their coordinates from the
+    selected ``plots.csv`` row at ingest.  The manifest therefore reads the
+    lookup directly; metadata values are evidence to validate, never a fallback
+    authority with potentially different semantics.
+    """
     latitudes = _distinct(rows, "latitude")
     longitudes = _distinct(rows, "longitude")
     if len(latitudes) > 1 or len(longitudes) > 1:
@@ -193,27 +184,56 @@ def _coordinates(
         )
         return None
 
-    latitude, longitude = (
-        (latitudes[0], longitudes[0]) if latitudes and longitudes else ("", "")
-    )
-    source = "metadata"
-    if not latitude or not longitude:
-        fallback = plot_coordinates or {}
-        latitude = str(fallback.get("latitude") or "").strip()
-        longitude = str(fallback.get("longitude") or "").strip()
-        source = "plots.csv"
-    if not latitude or not longitude:
-        warnings.append(
-            "no coordinates in the metadata or plots.csv; recorded as null"
-        )
+    lookup = plot_coordinates or {}
+    latitude = str(lookup.get("latitude") or "").strip()
+    longitude = str(lookup.get("longitude") or "").strip()
+    if not latitude and not longitude:
+        warnings.append("plots.csv has no coordinates; recorded as null")
+        if latitudes or longitudes:
+            warnings.append(
+                "metadata coordinates were not used because plots.csv is authoritative"
+            )
         return None
-    if source == "plots.csv":
-        warnings.append("coordinates taken from plots.csv; the metadata has none")
+    if not latitude or not longitude:
+        errors.append("plots.csv has only one of latitude and longitude")
+        return None
 
-    parsed_latitude = _coordinate(latitude, "latitude", 90.0, errors)
-    parsed_longitude = _coordinate(longitude, "longitude", 180.0, errors)
+    parsed_latitude = _coordinate(latitude, "plots.csv latitude", 90.0, errors)
+    parsed_longitude = _coordinate(longitude, "plots.csv longitude", 180.0, errors)
     if parsed_latitude is None or parsed_longitude is None:
         return None
+
+    if not latitudes and not longitudes:
+        warnings.append(
+            "metadata has no coordinates; the manifest records plots.csv"
+        )
+    elif not latitudes or not longitudes:
+        warnings.append(
+            "metadata has only one of latitude and longitude; the manifest records "
+            "plots.csv"
+        )
+    else:
+        filed_latitude = _coordinate(
+            latitudes[0], "metadata latitude", 90.0, errors
+        )
+        filed_longitude = _coordinate(
+            longitudes[0], "metadata longitude", 180.0, errors
+        )
+        if (
+            filed_latitude is not None
+            and filed_longitude is not None
+            and (
+                abs(filed_latitude - parsed_latitude)
+                > COORDINATE_TOLERANCE_DEGREES
+                or abs(filed_longitude - parsed_longitude)
+                > COORDINATE_TOLERANCE_DEGREES
+            )
+        ):
+            errors.append(
+                "metadata coordinates "
+                f"{filed_latitude}/{filed_longitude} disagree with plots.csv "
+                f"{parsed_latitude}/{parsed_longitude}"
+            )
     return {"latitude": parsed_latitude, "longitude": parsed_longitude}
 
 
@@ -221,8 +241,8 @@ def _placement(lookup_row: dict, errors: list[str]) -> dict | None:
     """The curated placement interval; the media never overrides it."""
     placement = {}
     for key, column in (
-        ("start_date", "deployment_start_date"),
-        ("end_date", "deployment_end_date"),
+        ("start", "deployment_start_date"),
+        ("end", "deployment_end_date"),
     ):
         value = str(lookup_row.get(column) or "").strip()
         if not value:
@@ -266,7 +286,7 @@ def _check_placement(
     if placement is None:
         return
     start_column, end_column = _placement_columns(rows)
-    for column, key in ((start_column, "start_date"), (end_column, "end_date")):
+    for column, key in ((start_column, "start"), (end_column, "end")):
         filed = _distinct(rows, column)
         drifted = [value for value in filed if _as_date(value) != placement[key]]
         if drifted:
@@ -275,15 +295,15 @@ def _check_placement(
                 f"with deployments.csv {placement[key]!r}; the manifest records "
                 "deployments.csv"
             )
-    if recorded_first and recorded_first[:10] < placement["start_date"]:
+    if recorded_first and recorded_first[:10] < placement["start"]:
         warnings.append(
             f"first recording {recorded_first} predates the curated placement start "
-            f"{placement['start_date']}"
+            f"{placement['start']}"
         )
-    if recorded_last and recorded_last[:10] > placement["end_date"]:
+    if recorded_last and recorded_last[:10] > placement["end"]:
         warnings.append(
             f"last recording {recorded_last} postdates the curated placement end "
-            f"{placement['end_date']}"
+            f"{placement['end']}"
         )
 
 
@@ -402,8 +422,8 @@ def _device(
     device_type: str,
     errors: list[str],
     warnings: list[str],
-) -> dict:
-    """Device identity: the lookup states it, the metadata cross-checks it."""
+) -> None:
+    """Cross-check device identity without copying hardware fields to the manifest."""
     if device_type in CAMERA_DEVICE_TYPES:
         id_column, make_column, model_column = "camera_id", "camera_make", "camera_model"
     else:
@@ -415,30 +435,28 @@ def _device(
         errors.append(f"{id_column} is mixed across rows: " + ", ".join(metadata_ids))
     metadata_id = metadata_ids[0] if len(metadata_ids) == 1 else ""
 
-    device_id: str | None = lookup_id or metadata_id or None
     if lookup_id and metadata_id and lookup_id != metadata_id:
         if device_type in AUDIO_DEVICE_TYPES and _is_tag_serial_pair(
             lookup_id, metadata_id
         ):
             warnings.append(
                 f"deployments.csv device_id {lookup_id!r} is an asset tag while the "
-                f"metadata holds serial {metadata_id!r}; recording what the lookup says"
+                f"metadata holds serial {metadata_id!r}; device identity remains in "
+                "the detailed inventory only"
             )
         else:
             errors.append(
                 f"device_id disagrees: deployments.csv says {lookup_id!r}, "
                 f"the metadata {id_column} says {metadata_id!r}"
             )
-            device_id = None
-    elif not device_id:
+    elif not (lookup_id or metadata_id):
         warnings.append(
             f"no device identifier in deployments.csv or the metadata {id_column}; "
-            "recorded as null"
+            "device identity could not be cross-checked"
         )
 
-    make = _single_value(rows, make_column, errors, warnings, required=False)
-    model = _single_value(rows, model_column, errors, warnings, required=False)
-    return {"id": device_id, "make": make, "model": model}
+    _single_value(rows, make_column, errors, warnings, required=False)
+    _single_value(rows, model_column, errors, warnings, required=False)
 
 
 def _site_block(
@@ -467,9 +485,8 @@ def _site_block(
                 f"with sites.csv {canonical!r}; the manifest records sites.csv"
             )
     return {
-        "short_name": site.site_short_name,
-        "full_name": site.site_name,
-        "code": site.site_code,
+        "id": site.site_short_name,
+        "name": site.site_name,
     }
 
 
@@ -482,8 +499,6 @@ def build_manifest(
     lookup_row: dict,
     site: Site | None,
     plot_coordinates: dict | None,
-    event_recorded_by: str,
-    generated: str,
     metadata_sha256: str,
 ) -> ManifestBuild:
     """Build one ``cassn.source.deployment`` manifest from staged rows.
@@ -522,7 +537,10 @@ def build_manifest(
             f"metadata deployment_event_id {filed_event_id!r} does not match the "
             f"event folder {deployment_event_id!r}"
         )
-    organization = _single_value(rows, "organization", errors, warnings, required=True)
+    # The filed value is still checked for blank/mixed rows, but it uses an old
+    # short vocabulary (normally ``UC``). The source namespace's organization
+    # identity is the canonical ``UC-Nature`` value below.
+    _single_value(rows, "organization", errors, warnings, required=True)
 
     device_type = str(lookup_row.get("device_type") or "").strip()
     plot_value = str(lookup_row.get("plot_number") or "").strip()
@@ -585,13 +603,6 @@ def build_manifest(
         if lookup_row
         else None
     )
-    recorded_by = _single_value(rows, "recorded_by", errors, warnings, required=False)
-    if recorded_by is None and event_recorded_by:
-        recorded_by = event_recorded_by
-        warnings.append(
-            "recorded_by taken from the deployment event record; the metadata has none"
-        )
-
     _check_filenames(rows, errors)
     _check_hashes(rows, errors)
     counts, total_bytes = _content_counts(rows, allowed_types, errors, warnings)
@@ -599,46 +610,37 @@ def build_manifest(
     coordinates = _coordinates(rows, plot_coordinates, errors, warnings)
     placement = _placement(lookup_row, errors) if lookup_row else None
     _check_placement(rows, placement, recorded_first, recorded_last, warnings)
-    device = _device(rows, lookup_row, device_type, errors, warnings)
+    _device(rows, lookup_row, device_type, errors, warnings)
 
     if errors:
         return ManifestBuild(deployment_id, None, tuple(errors), tuple(warnings))
 
     manifest = {
-        "manifest_version": MANIFEST_VERSION,
         "manifest_type": MANIFEST_TYPE,
-        "snapshot_version": SNAPSHOT_VERSION,
-        "generated": generated,
-        "generator": {"name": GENERATOR_NAME, "version": VERSION},
-        "access": ACCESS,
+        "schema_version": SCHEMA_VERSION,
+        "inventory_revision": INVENTORY_REVISION,
         "deployment": {
             "deployment_id": deployment_id,
             "deployment_event_id": deployment_event_id,
-            "organization": organization,
+            "organization": ORGANIZATION,
             "site": site_block,
             "plot_number": plot_number,
             "device_type": device_type,
-            "device": device,
             "coordinates": coordinates,
-            "placement": placement,
-            "recorded_by": recorded_by,
+            "deployment_interval": placement,
         },
         "content": {
             "media_type": media_type,
-            "file_count": len(rows),
-            "file_counts_by_type": counts,
-            "total_bytes": total_bytes,
-            "recorded_first": recorded_first,
-            "recorded_last": recorded_last,
-            "metadata_file": METADATA_FILENAME,
-            "metadata_sha256": metadata_sha256,
-            "checksum_algorithm": CHECKSUM_ALGORITHM,
-            "checksum_column": CHECKSUM_COLUMN,
-            "content_digest": content_digest(rows),
+            "recording_interval": {
+                "start": recorded_first,
+                "end": recorded_last,
+            },
+            "inventory": {
+                "path": METADATA_FILENAME,
+                "sha256": metadata_sha256,
+                "file_counts": counts,
+                "total_bytes": total_bytes,
+            },
         },
-        # A freshly generated manifest has compared nothing against the media it
-        # describes. Only the later transfer phase, after checking each staged
-        # object against its recorded hash, may write "verified".
-        "verification": {"status": "metadata_only"},
     }
     return ManifestBuild(deployment_id, manifest, (), tuple(warnings))

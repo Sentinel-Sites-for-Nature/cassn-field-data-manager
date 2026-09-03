@@ -26,6 +26,10 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
 - **Wildlife SoundHub Submission**: Bird audio is transcoded to lossless FLAC into a local tree mirroring SoundHub's S3 bucket, with `deployment.csv` and `recording.csv` projected from `audio_file_metadata.csv`, then uploaded and verified. Box keeps the original WAVs untouched. See the Wildlife SoundHub Preparation section.
 - **Session Persistence**: Interrupted downloads resume automatically. Concurrent workers checkpoint through one session writer; previously copied files are skipped and sequence/event numbering continues correctly.
+- **Immutable NDP Source Versioning**: OSDF object paths are never reused. Media
+  corrections are versioned per logical file, while deployment inventories and
+  manifests advance together and are published only after verified transfer.
+  See [CASSN NDP source versioning](NDP_SOURCE_VERSIONING.md).
 
 ## Installation
 
@@ -703,6 +707,7 @@ cassn-field-data-manager/
 │   ├── box/                          # Box auth, client, and upload/verify threads
 │   ├── core/                         # Classification, metadata extraction, inventory, QC
 │   ├── export/                       # Wildlife Insights / metadata CSV writers
+│   ├── ndp/                          # NDP source manifest, staging, and Pelican transfer
 │   ├── soundhub/                     # SoundHub FLAC staging, CSV export, S3 upload
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
@@ -712,7 +717,9 @@ cassn-field-data-manager/
 │   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── assets/                           # Logos / icon used by the UI
+├── schemas/                          # Published machine-readable data contracts
 ├── screenshots/                      # Application screenshots for this README
+├── NDP_SOURCE_VERSIONING.md          # Append-only OSDF source versioning rules
 ├── config.json.example               # Box config template → ~/.cassn_config/config.json
 ├── requirements.txt                  # Python dependencies
 ├── requirements-dev.txt              # Application dependencies plus test tooling

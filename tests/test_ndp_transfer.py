@@ -128,7 +128,6 @@ def _fixtures(tmp_path, contents=None):
         event,
         tmp_path / "staging",
         EVENT_ID,
-        "2026-09-02T12:00:00-07:00",
         [
             PlannedDeployment(
                 DEPLOYMENT_ID,
@@ -420,7 +419,7 @@ def test_media_execution_resumes_after_sync_failure_and_never_publishes_controls
     assert len(pelican.syncs) == 1
     assert not (plan.scratch_root / EVENT_ID / DEPLOYMENT_ID / "data").exists()
     assert not any(
-        path.name in {"manifest.json", "README.md", "file_metadata.csv"}
+        path.name in {"manifest.json", "file_metadata.csv"}
         for path in plan.scratch_root.rglob("*")
     )
 

@@ -12,14 +12,12 @@ from cassn.lookups import LookupTables, Site
 from cassn.ndp.manifest import METADATA_FILENAME
 from cassn.ndp.staging import (
     MANIFEST_FILENAME,
-    README_FILENAME,
     REQUIRED_COLUMNS_BY_KIND,
     NdpStagingError,
     PlannedDeployment,
     apply_plan,
     plan_event,
     read_event_documents,
-    read_event_recorded_by,
 )
 
 
@@ -179,7 +177,12 @@ def lookups() -> LookupTables:
     tables.deployments_by_id = {
         row["deployment_id"]: row for row in tables.device_deployments
     }
-    tables.plot_coords = {}
+    tables.plot_coords = {
+        ("QuailRidge", 1): {
+            "latitude": "38.51695783",
+            "longitude": "-122.1516454",
+        }
+    }
     return tables
 
 
@@ -229,7 +232,6 @@ def test_plan_splits_an_event_into_one_directory_per_deployment(event_dir, looku
     ]
     for deployment in plan.deployments:
         assert set(deployment.files) == {
-            README_FILENAME,
             MANIFEST_FILENAME,
             METADATA_FILENAME,
         }
@@ -239,17 +241,20 @@ def test_plan_splits_an_event_into_one_directory_per_deployment(event_dir, looku
     )
 
 
-def test_staged_csv_is_a_faithful_row_subset_of_its_source(event_dir, lookups, tmp_path):
+def test_staged_csv_preserves_source_fields_order_and_row_values(event_dir, lookups, tmp_path):
     plan = plan_event(event_dir, tmp_path / "staging", lookups)
-    source = (event_dir / "image_file_metadata.csv").read_bytes()
+    source_path = event_dir / "image_file_metadata.csv"
     staged = next(
         d for d in plan.deployments if d.deployment_id == CAMERA_DEPLOYMENT
     ).files[METADATA_FILENAME]
 
-    source_lines = source.split(b"\r\n")
-    staged_lines = staged.split(b"\r\n")
-    assert staged_lines[0] == source_lines[0]
-    assert all(line in source_lines for line in staged_lines if line)
+    with source_path.open(encoding="utf-8", newline="") as stream:
+        source_reader = csv.DictReader(stream)
+        source_fields = source_reader.fieldnames
+        source_rows = list(source_reader)
+    staged_reader = csv.DictReader(staged.decode("utf-8").splitlines())
+    assert staged_reader.fieldnames == source_fields
+    assert list(staged_reader) == source_rows
 
 
 def test_a_source_written_with_unix_newlines_keeps_them(tmp_path, lookups):
@@ -272,41 +277,37 @@ def test_manifest_records_the_hash_of_the_staged_csv_bytes(event_dir, lookups, t
     for deployment in plan.deployments:
         manifest = json.loads(deployment.files[MANIFEST_FILENAME])
         digest = hashlib.sha256(deployment.files[METADATA_FILENAME]).hexdigest()
-        assert manifest["content"]["metadata_sha256"] == digest
-        assert manifest["content"]["metadata_file"] == METADATA_FILENAME
+        assert manifest["content"]["inventory"]["sha256"] == digest
+        assert manifest["content"]["inventory"]["path"] == METADATA_FILENAME
 
 
 def test_apply_writes_the_tree_and_is_idempotent(event_dir, lookups, tmp_path):
     staging_root = tmp_path / "staging"
     result = apply_plan(plan_event(event_dir, staging_root, lookups))
 
-    assert len(result.written) == 6
+    assert len(result.written) == 4
     assert result.unchanged == ()
     event_root = staging_root / EVENT_ID
     assert (event_root / CAMERA_DEPLOYMENT / MANIFEST_FILENAME).is_file()
     assert (event_root / CAMERA_DEPLOYMENT / METADATA_FILENAME).is_file()
     assert not (event_root / CAMERA_DEPLOYMENT / "data").exists()
 
-    # A rerun reuses the published instant, so nothing is rewritten.
+    # The manifest is content-deterministic, so a rerun changes nothing.
     rerun = plan_event(event_dir, staging_root, lookups)
-    first_manifest = json.loads(
-        (event_root / CAMERA_DEPLOYMENT / MANIFEST_FILENAME).read_text()
-    )
-    assert rerun.generated == first_manifest["generated"]
     second = apply_plan(rerun)
     assert second.written == ()
-    assert len(second.unchanged) == 6
+    assert len(second.unchanged) == 4
 
 
 def test_apply_finishes_an_interrupted_run(event_dir, lookups, tmp_path):
     staging_root = tmp_path / "staging"
     apply_plan(plan_event(event_dir, staging_root, lookups))
-    (staging_root / EVENT_ID / CAMERA_DEPLOYMENT / README_FILENAME).unlink()
+    (staging_root / EVENT_ID / CAMERA_DEPLOYMENT / MANIFEST_FILENAME).unlink()
 
     result = apply_plan(plan_event(event_dir, staging_root, lookups))
 
     assert len(result.written) == 1
-    assert len(result.unchanged) == 5
+    assert len(result.unchanged) == 3
 
 
 def test_apply_refuses_to_replace_a_file_whose_bytes_differ(event_dir, lookups, tmp_path):
@@ -405,22 +406,3 @@ def test_a_raw_data_folder_no_deployment_covers_is_reported(event_dir, lookups, 
     assert plan.ok, plan.errors
     assert any("raw_data/p2_SA" in warning for warning in plan.warnings)
     assert not any("p1_ML" in warning for warning in plan.warnings)
-
-
-def test_the_legacy_event_record_supplies_an_observer(tmp_path):
-    event = tmp_path / "box" / EVENT_ID
-    event.mkdir(parents=True)
-    (event / "deployment_event_record.json").write_text(
-        json.dumps(
-            {
-                "deployment_info": {
-                    "deployment_start": "2025-11-07",
-                    "deployment_end": "2026-01-08",
-                    "observer": "Imperato, John",
-                }
-            }
-        )
-    )
-
-    assert read_event_recorded_by(event) == "Imperato, John"
-    assert read_event_recorded_by(tmp_path) == ""

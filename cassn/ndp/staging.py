@@ -4,7 +4,6 @@ Reads the two metadata CSVs at a deployment-event root, groups their rows by
 ``deployment_id``, and renders one staging directory per deployment::
 
     <staging_root>/<deployment_event_id>/<deployment_id>/
-    ├── README.md
     ├── manifest.json
     └── metadata/file_metadata.csv
 
@@ -12,11 +11,10 @@ No ``data/`` is created. Empty directories do not survive object storage, and
 media movement belongs to the later transfer phase — this step copies no media,
 opens no media file, and writes nothing to Box.
 
-The staged ``file_metadata.csv`` is a faithful row subset of its Box original:
-the source header and column order are preserved exactly and no value is
-rewritten, so the only difference between the two files is which rows are in
-them. Renaming the ``camera_*``/``ARU_*`` and date columns belongs to the Box
-reorganization, not to a copy (D18).
+The staged ``file_metadata.csv`` is a semantically faithful row subset of its
+Box original: source columns and values are retained, while CSV quoting may be
+normalized when selected rows are rendered. Renaming the ``camera_*``/``ARU_*``
+and date columns belongs to the Box reorganization, not to a copy (D18).
 
 The whole event is validated and rendered in memory before anything is written,
 and writes are idempotent: an identical file is left alone, a missing one is
@@ -33,20 +31,15 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
-from cassn.config import PACIFIC_TZ
 from cassn.lookups import (
     LookupTables,
     deployment_storage_label,
-    normalize_deployment_event_metadata,
 )
 from cassn.ndp.manifest import METADATA_FILENAME, ManifestBuild, build_manifest
 
 MANIFEST_FILENAME = "manifest.json"
-README_FILENAME = "README.md"
-EVENT_RECORD_FILENAME = "deployment_event_record.json"
 
 # Only these two documents at the event root are read. Everything else beside
 # them — WI exports, per-device folders, reports — belongs to another workflow.
@@ -119,7 +112,6 @@ class StagingPlan:
     event_dir: Path
     staging_root: Path
     deployment_event_id: str
-    generated: str
     deployments: list[PlannedDeployment] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -202,31 +194,8 @@ def read_event_documents(event_dir: Path) -> list[MetadataDocument]:
     return documents
 
 
-def read_event_recorded_by(event_dir: Path) -> str:
-    """Return the observer named by the optional legacy event record.
-
-    ``deployment_event_record.json`` is the only fallback when a metadata
-    document carries no ``recorded_by``. It is a historical artifact written in
-    several shapes, so its keys are normalized on the way in and its absence is
-    not an error.
-    """
-    path = Path(event_dir) / EVENT_RECORD_FILENAME
-    if not path.is_file():
-        return ""
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    info = normalize_deployment_event_metadata(record.get("deployment_info") or record)
-    for key in ("recorded_by", "observer"):
-        value = str(info.get(key) or "").strip()
-        if value:
-            return value
-    return ""
-
-
 def _render_metadata_csv(document: MetadataDocument, rows: list[dict]) -> bytes:
-    """Re-emit ``rows`` under the source header, byte-for-byte as filed."""
+    """Re-emit selected rows with the source fields, order, and values."""
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
         buffer, fieldnames=document.fieldnames, lineterminator=document.line_terminator
@@ -240,54 +209,6 @@ def _render_manifest(manifest: dict) -> bytes:
     return (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def _render_readme(manifest: dict) -> bytes:
-    """A short human-readable card, derived only from manifest facts.
-
-    Everything here restates the manifest, so the README can never disagree with
-    it and re-rendering the same manifest always produces the same bytes.
-    """
-    deployment = manifest["deployment"]
-    content = manifest["content"]
-    site = deployment["site"]
-    placement = deployment["placement"]
-    device = deployment["device"]
-    counts = ", ".join(
-        f"{count:,} {file_type}" for file_type, count in content["file_counts_by_type"].items()
-    )
-    lines = [
-        f"# {deployment['deployment_id']}",
-        "",
-        f"{site['full_name']} ({site['short_name']}), plot {deployment['plot_number']}, "
-        f"device type {deployment['device_type']}.",
-        f"Placed {placement['start_date']} to {placement['end_date']} by "
-        f"{deployment['recorded_by'] or 'an unrecorded observer'}.",
-        "",
-        "## Contents",
-        "",
-        f"- Primary media: {content['media_type']}",
-        f"- Files described: {content['file_count']:,} ({counts})",
-        f"- Total size: {content['total_bytes']:,} bytes",
-        f"- Recorded: {content['recorded_first'] or 'unknown'} to "
-        f"{content['recorded_last'] or 'unknown'}",
-        f"- Device: {device['make'] or 'unknown make'} {device['model'] or ''}".rstrip()
-        + f", id {device['id'] or 'unknown'}",
-        "",
-        "## Reading this directory",
-        "",
-        f"`{MANIFEST_FILENAME}` is a `{manifest['manifest_type']}` document and is the "
-        "authoritative description of this deployment.",
-        f"`{METADATA_FILENAME}` lists every file with its size, SHA-256, and "
-        "acquisition metadata; it is a faithful row subset of the deployment event's "
-        "filed metadata on Box, with the source columns unchanged.",
-        "",
-        f"Verification status is `{manifest['verification']['status']}`: this snapshot "
-        "describes the deployment from its filed metadata and has not been checked "
-        "against the transferred media.",
-        "",
-    ]
-    return "\n".join(lines).encode("utf-8")
-
-
 def _plan_deployment(
     deployment_id: str,
     document: MetadataDocument,
@@ -295,10 +216,8 @@ def _plan_deployment(
     lookups: LookupTables,
     *,
     deployment_event_id: str,
-    event_recorded_by: str,
-    generated: str,
 ) -> tuple[PlannedDeployment | None, ManifestBuild]:
-    """Render one deployment's three files, or report why it cannot be."""
+    """Render one deployment's two control files, or report why it cannot be."""
     csv_bytes = _render_metadata_csv(document, rows)
     lookup_row = lookups.deployment_for_id(deployment_id)
     site_short_name = str(lookup_row.get("site_short_name") or "")
@@ -318,8 +237,6 @@ def _plan_deployment(
         lookup_row=lookup_row,
         site=site,
         plot_coordinates=plot_coordinates,
-        event_recorded_by=event_recorded_by,
-        generated=generated,
         metadata_sha256=hashlib.sha256(csv_bytes).hexdigest(),
     )
     if build.manifest is None:
@@ -328,7 +245,6 @@ def _plan_deployment(
         PlannedDeployment(
             deployment_id,
             {
-                README_FILENAME: _render_readme(build.manifest),
                 MANIFEST_FILENAME: _render_manifest(build.manifest),
                 METADATA_FILENAME: csv_bytes,
             },
@@ -338,40 +254,10 @@ def _plan_deployment(
     )
 
 
-def _existing_generated(event_root: Path) -> str:
-    """Reuse the ``generated`` instant already published under this event.
-
-    All manifests in one plan share one instant, so a rerun that finishes an
-    interrupted apply must reuse it rather than stamp a second one — otherwise
-    every already-written manifest would differ from its rebuild and the apply
-    would refuse to proceed.
-    """
-    if not event_root.is_dir():
-        return ""
-    instants: dict[str, str] = {}
-    for path in sorted(event_root.glob(f"*/{MANIFEST_FILENAME}")):
-        try:
-            manifest = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        instant = str(manifest.get("generated") or "")
-        if instant:
-            instants.setdefault(instant, path.parent.name)
-    if len(instants) > 1:
-        raise NdpStagingError(
-            f"Manifests already under {event_root} carry different generated "
-            "instants, so they were not written by one plan: "
-            + ", ".join(f"{instant} ({name})" for instant, name in sorted(instants.items()))
-        )
-    return next(iter(instants), "")
-
-
 def plan_event(
     event_dir: Path,
     staging_root: Path,
     lookups: LookupTables,
-    *,
-    generated: str = "",
 ) -> StagingPlan:
     """Validate and render an entire deployment event without writing anything.
 
@@ -382,14 +268,7 @@ def plan_event(
     staging_root = Path(staging_root).expanduser()
     deployment_event_id = event_dir.name
     documents = read_event_documents(event_dir)
-    event_recorded_by = read_event_recorded_by(event_dir)
-
-    if not generated:
-        generated = _existing_generated(
-            staging_root / deployment_event_id
-        ) or datetime.now(PACIFIC_TZ).replace(microsecond=0).isoformat()
-
-    plan = StagingPlan(event_dir, staging_root, deployment_event_id, generated)
+    plan = StagingPlan(event_dir, staging_root, deployment_event_id)
 
     groups: dict[str, tuple[MetadataDocument, list[dict]]] = {}
     for document in documents:
@@ -420,8 +299,6 @@ def plan_event(
             rows,
             lookups,
             deployment_event_id=deployment_event_id,
-            event_recorded_by=event_recorded_by,
-            generated=generated,
         )
         label = deployment_id or f"<blank deployment_id in {document.path.name}>"
         plan.errors.extend(f"{label}: {message}" for message in build.errors)
@@ -483,8 +360,8 @@ def apply_plan(plan: StagingPlan) -> ApplyResult:
     """Write a validated plan, leaving anything already correct untouched.
 
     An existing file with the same bytes is left alone; one whose bytes differ
-    is refused, because a differing manifest or metadata table describes a
-    different snapshot and belongs at the next version suffix, not in place.
+    is refused, because a differing manifest or metadata table describes a new
+    inventory revision and belongs at the next version suffix, not in place.
     """
     if not plan.ok:
         raise NdpStagingError("Refusing to apply a plan that has validation errors")

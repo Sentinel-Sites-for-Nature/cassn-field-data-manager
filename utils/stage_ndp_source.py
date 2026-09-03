@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Stage one Box deployment event for the NDP source namespace.
 
-Writes ``README.md``, ``manifest.json``, and ``metadata/file_metadata.csv`` per
-deployment beneath ``--staging-root``. The default is a read-only validation
-pass; pass ``--apply`` to write. No media is copied and nothing is written to
-Box.
+Writes ``manifest.json`` and ``metadata/file_metadata.csv`` per deployment
+beneath ``--staging-root``. The default is a read-only validation pass; pass
+``--apply`` to write. No media is copied and nothing is written to Box.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ def _print_plan(plan, *, apply: bool) -> None:
     print(f"Event: {plan.deployment_event_id}")
     print(f"Source: {plan.event_dir}")
     print(f"Staging root: {plan.staging_root}")
-    print(f"Generated: {plan.generated}")
     print(f"Deployments rendered: {len(plan.deployments)}")
     print(f"Files planned: {plan.file_count}")
     for deployment in plan.deployments:

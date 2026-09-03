@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
-from cassn.config import VERSION
+from jsonschema import Draft202012Validator, FormatChecker
+
 from cassn.lookups import Site
 from cassn.ndp.manifest import (
+    INVENTORY_REVISION,
     MANIFEST_TYPE,
-    SNAPSHOT_VERSION,
+    ORGANIZATION,
+    SCHEMA_VERSION,
     build_manifest,
-    content_digest,
 )
 
 
@@ -17,7 +21,12 @@ EVENT_ID = "UC_QuailRidge_20260108"
 CAMERA_DEPLOYMENT = "UC_QuailRidge_plot1_ML_20260108"
 AUDIO_DEPLOYMENT = "UC_QuailRidge_plot1_BD_20260108"
 SITE = Site("Quail Ridge Reserve", "QuailRidge", "QRR")
-GENERATED = "2026-09-02T14:00:00-07:00"
+PLOT_COORDINATES = {"latitude": "38.51695783", "longitude": "-122.1516454"}
+SCHEMA_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "cassn-source-deployment-v1.schema.json"
+)
 
 
 def _hash(seed: str) -> str:
@@ -108,15 +117,21 @@ def _audio_row(filename: str, **overrides) -> dict:
     return row
 
 
-def _build(rows, *, kind="image", lookup=None, site=SITE, **overrides):
+def _build(
+    rows,
+    *,
+    kind="image",
+    lookup=None,
+    site=SITE,
+    plot_coordinates=PLOT_COORDINATES,
+    **overrides,
+):
     keywords = {
         "document_kind": kind,
         "deployment_event_id": EVENT_ID,
         "lookup_row": _camera_lookup() if lookup is None else lookup,
         "site": site,
-        "plot_coordinates": None,
-        "event_recorded_by": "",
-        "generated": GENERATED,
+        "plot_coordinates": plot_coordinates,
         "metadata_sha256": _hash("csv"),
     }
     keywords.update(overrides)
@@ -132,26 +147,25 @@ def test_camera_manifest_carries_lookup_placement_and_media_rollup():
     assert build.warnings == ()
     manifest = build.manifest
     assert manifest["manifest_type"] == MANIFEST_TYPE
-    assert manifest["snapshot_version"] == SNAPSHOT_VERSION
-    assert manifest["generated"] == GENERATED
-    assert manifest["generator"] == {"name": "cassn-field-data-manager", "version": VERSION}
-    assert manifest["verification"] == {"status": "metadata_only"}
+    assert manifest["schema_version"] == SCHEMA_VERSION
+    assert manifest["inventory_revision"] == INVENTORY_REVISION
+    assert "generated" not in manifest
+    assert "generator" not in manifest
+    assert "access" not in manifest
+    assert "verification" not in manifest
 
     deployment = manifest["deployment"]
     assert deployment["site"] == {
-        "short_name": "QuailRidge",
-        "full_name": "Quail Ridge Reserve",
-        "code": "QRR",
+        "id": "QuailRidge",
+        "name": "Quail Ridge Reserve",
     }
+    assert deployment["organization"] == ORGANIZATION == "UC-Nature"
     assert deployment["plot_number"] == 1
-    assert deployment["device"] == {
-        "id": "08019434",
-        "make": "RECONYX",
-        "model": "HYPERFIRE HP4K",
-    }
-    assert deployment["placement"] == {
-        "start_date": "2025-11-07",
-        "end_date": "2026-01-08",
+    assert "device" not in deployment
+    assert "recorded_by" not in deployment
+    assert deployment["deployment_interval"] == {
+        "start": "2025-11-07",
+        "end": "2026-01-08",
     }
     assert deployment["coordinates"] == {
         "latitude": 38.51695783,
@@ -160,11 +174,37 @@ def test_camera_manifest_carries_lookup_placement_and_media_rollup():
 
     content = manifest["content"]
     assert content["media_type"] == "image"
-    assert content["file_count"] == 3
-    assert content["file_counts_by_type"] == {"image": 3}
-    assert content["total_bytes"] == 3000
-    assert content["metadata_sha256"] == _hash("csv")
-    assert content["content_digest"] == content_digest(rows)
+    assert content["recording_interval"] == {
+        "start": "2025-11-08T04:37:30-08:00",
+        "end": "2025-11-08T04:37:30-08:00",
+    }
+    assert content["inventory"] == {
+        "path": "metadata/file_metadata.csv",
+        "sha256": _hash("csv"),
+        "file_counts": {"image": 3},
+        "total_bytes": 3000,
+    }
+
+
+def test_manifest_satisfies_the_published_json_schema():
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    manifests = [
+        _build([_image_row("img_1.jpg")]).manifest,
+        _build(
+            [_audio_row("rec_1.wav")],
+            kind="audio",
+            lookup=_audio_lookup(),
+        ).manifest,
+    ]
+
+    for manifest in manifests:
+        errors = sorted(
+            validator.iter_errors(manifest),
+            key=lambda error: list(error.absolute_path),
+        )
+        assert not errors, [error.message for error in errors]
 
 
 def test_config_sidecars_count_and_hash_but_do_not_set_the_recording_window():
@@ -183,14 +223,10 @@ def test_config_sidecars_count_and_hash_but_do_not_set_the_recording_window():
     assert build.ok, build.errors
     content = build.manifest["content"]
     assert content["media_type"] == "audio"
-    assert content["file_count"] == 3
-    assert content["file_counts_by_type"] == {"audio": 2, "config": 1}
-    assert content["total_bytes"] == 4500
-    assert content["recorded_first"] == "2025-12-13T00:00:00-08:00"
-    assert content["recorded_last"] == "2025-12-19T20:00:00-08:00"
-    # The sidecar's hash is in the rollup even though its timestamp is not.
-    assert content["content_digest"] == content_digest(rows)
-    assert content_digest(rows) != content_digest(rows[:2])
+    assert content["inventory"]["file_counts"] == {"audio": 2, "config": 1}
+    assert content["inventory"]["total_bytes"] == 4500
+    assert content["recording_interval"]["start"] == "2025-12-13T00:00:00-08:00"
+    assert content["recording_interval"]["end"] == "2025-12-19T20:00:00-08:00"
 
 
 def test_a_config_only_deployment_is_kept_with_a_warning():
@@ -205,18 +241,9 @@ def test_a_config_only_deployment_is_kept_with_a_warning():
     build = _build(rows, kind="audio", lookup=_audio_lookup())
 
     assert build.ok, build.errors
-    assert build.manifest["content"]["file_counts_by_type"] == {"config": 1}
-    assert build.manifest["content"]["recorded_first"] is None
+    assert build.manifest["content"]["inventory"]["file_counts"] == {"config": 1}
+    assert build.manifest["content"]["recording_interval"]["start"] is None
     assert any("no media" in warning for warning in build.warnings)
-
-
-def test_content_digest_ignores_row_order_but_not_duplicates():
-    rows = [_image_row(f"img_{index}.jpg") for index in range(4)]
-    assert content_digest(rows) == content_digest(list(reversed(rows)))
-    assert content_digest(rows) != content_digest(rows + rows[:1])
-    # Case and surrounding whitespace are normalized before the rollup.
-    shouty = [dict(row, file_hash_sha256=f"  {row['file_hash_sha256'].upper()}  ") for row in rows]
-    assert content_digest(shouty) == content_digest(rows)
 
 
 def test_duplicate_flattened_filename_is_a_hard_error():
@@ -243,8 +270,7 @@ def test_asset_tag_against_serial_warns_rather_than_failing():
     build = _build(rows, kind="audio", lookup=_audio_lookup(device_id="0104"))
 
     assert build.ok, build.errors
-    # The lookup is what the manifest records, even when it is the asset tag.
-    assert build.manifest["deployment"]["device"]["id"] == "0104"
+    assert "device" not in build.manifest["deployment"]
     assert any("asset tag" in warning for warning in build.warnings)
 
 
@@ -255,7 +281,7 @@ def test_two_different_camera_serials_are_a_hard_error():
     assert any("device_id disagrees" in error for error in build.errors)
 
 
-def test_missing_coordinates_fall_back_to_the_plot():
+def test_manifest_coordinates_come_from_the_plot_lookup():
     rows = [_image_row("img_1.jpg", latitude="", longitude="")]
     build = _build(
         rows,
@@ -271,12 +297,12 @@ def test_missing_coordinates_fall_back_to_the_plot():
 
 
 def test_absent_coordinates_record_null_with_a_warning():
-    rows = [_image_row("img_1.jpg", latitude="", longitude="")]
-    build = _build(rows)
+    rows = [_image_row("img_1.jpg")]
+    build = _build(rows, plot_coordinates={})
 
     assert build.ok, build.errors
     assert build.manifest["deployment"]["coordinates"] is None
-    assert any("no coordinates" in warning for warning in build.warnings)
+    assert any("plots.csv has no coordinates" in warning for warning in build.warnings)
 
 
 def test_out_of_range_coordinate_is_a_hard_error():
@@ -286,13 +312,29 @@ def test_out_of_range_coordinate_is_a_hard_error():
     assert any("out of range" in error for error in build.errors)
 
 
-def test_recorded_by_falls_back_to_the_event_record():
-    rows = [_image_row("img_1.jpg", recorded_by="")]
-    build = _build(rows, event_recorded_by="Imperato, John")
+def test_metadata_coordinates_that_disagree_with_plots_are_a_hard_error():
+    rows = [_image_row("img_1.jpg", latitude="38.6")]
+    build = _build(rows)
+
+    assert not build.ok
+    assert any("disagree with plots.csv" in error for error in build.errors)
+
+
+def test_historical_coordinate_precision_does_not_create_a_false_disagreement():
+    rows = [
+        _image_row(
+            "img_1.jpg",
+            latitude="38.516957831234",
+            longitude="-122.151645398765",
+        )
+    ]
+    build = _build(rows)
 
     assert build.ok, build.errors
-    assert build.manifest["deployment"]["recorded_by"] == "Imperato, John"
-    assert any("event record" in warning for warning in build.warnings)
+    assert build.manifest["deployment"]["coordinates"] == {
+        "latitude": 38.51695783,
+        "longitude": -122.1516454,
+    }
 
 
 def test_audio_rows_filed_in_the_image_document_are_a_hard_error():
@@ -321,7 +363,7 @@ def test_placement_disagreements_warn_and_the_lookup_still_wins():
     build = _build(rows)
 
     assert build.ok, build.errors
-    assert build.manifest["deployment"]["placement"]["start_date"] == "2025-11-07"
+    assert build.manifest["deployment"]["deployment_interval"]["start"] == "2025-11-07"
     assert any("disagrees with deployments.csv" in warning for warning in build.warnings)
     assert any("predates the curated placement start" in warning for warning in build.warnings)
 
@@ -347,7 +389,10 @@ def test_drifted_site_display_names_warn_but_sites_csv_is_recorded():
     build = _build(rows)
 
     assert build.ok, build.errors
-    assert build.manifest["deployment"]["site"]["code"] == "QRR"
+    assert build.manifest["deployment"]["site"] == {
+        "id": "QuailRidge",
+        "name": "Quail Ridge Reserve",
+    }
     assert any("site_code" in warning for warning in build.warnings)
 
 

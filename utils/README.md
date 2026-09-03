@@ -17,8 +17,10 @@ so the same program can target the temporary `cassn` prefix and the later `ssn`
 prefix without a code change.
 
 The command is a read-only preflight unless `--apply` is supplied. Control-file
-publication and Box provenance updates remain disabled pending manifest and
-multi-destination review.
+publication and Box provenance updates remain disabled pending the SCIL indexing
+and multi-destination review. The reduced v1 manifest contract is defined by
+`schemas/cassn-source-deployment-v1.schema.json`; its append-only publication
+rules are documented in `NDP_SOURCE_VERSIONING.md`.
 
 ```bash
 .venv/bin/python utils/transfer_ndp_source.py \
