@@ -124,6 +124,29 @@ That Box reports folder is ID `413722950229`. Use `--box-year-root` or
 `--output-root` to test with fixture/local folders. The default is always a dry
 run; a report with validation errors is never written.
 
+## `summarize_wav_durations.py` and `summarize_wav_durations.R`
+
+These equivalent, read-only programs recursively find ordinary PCM WAV files,
+calculate each duration from its header without reading the audio samples, and
+print per-file durations plus combined seconds, minutes, and hours. Supply the
+catalog directory as the single command-line argument.
+
+Run the Python version with:
+
+```bash
+python3 utils/summarize_wav_durations.py /path/to/wav/catalog/2026
+```
+
+Run the base-R version, which requires no R packages, with:
+
+```bash
+Rscript utils/summarize_wav_durations.R /path/to/wav/catalog/2026
+```
+
+Both programs report unreadable files separately and never modify the WAVs.
+Use a local or already-downloaded catalog: opening cloud-only placeholders
+through a sync drive may cause the provider to download the files.
+
 ## `backfill_wi_provenance.py`
 
 Backfills the durable `is_submitted_to_wi` flag in Box image metadata from an
