@@ -87,6 +87,7 @@ def _deployment(deployment_id: str) -> dict:
         ARU_container="polybag",
         ARU_microphone="internal",
         mounted_on="metal_pole",
+        ARU_status="functioning",
         sensor_height_meters="2.5",
         recorded_by="Imperato, John",
     )

@@ -562,6 +562,17 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     assert images[0]["site_name"] == "Test Reserve"
     assert images[0]["site_short_name"] == "TestSite"
     assert images[0]["site_code"] == "TST"
+    assert audio[0]["ARU_status"] == "functioning"
+    inventory[1]["recording_stop_reason"] = " LOW   VOLTAGE "
+    _, changed_audio = build_metadata_rows(
+        {"organization": "UC", "site_name": "Test Reserve",
+         "site_short_name": "TestSite", "site_code": "TST",
+         "deployment_event_start_date": event["deployment_event_start_date"],
+         "deployment_event_end_date": event["deployment_event_end_date"],
+         "deployment_event_id": event["deployment_event_id"], "observer": "Tester"},
+        inventory, lookups,
+    )
+    assert changed_audio[0]["ARU_status"] == "low voltage"
     assert audio[0]["date_installed"] == "2026-03-04"
     assert audio[0]["ARU_make"] == "Open Acoustic Devices"
     assert audio[0]["ARU_model"] == "AudioMoth"

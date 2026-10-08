@@ -306,3 +306,18 @@ def test_comment_fields_still_parse_alongside_duration(tmp_path):
     result = parse_audiomoth_wav_comment(wav)
     assert result["recording_duration_sec"] == 1
     assert result["gain_setting"] == "High"
+
+
+@pytest.mark.parametrize("ending,reason", [
+    ("due to microphone change", "microphone change"),
+    ("due to switch position change", "switch position change"),
+    ("by magnetic switch", "magnetic switch"),
+    ("due to low voltage", "low voltage"),
+    ("due to file size limit", "file size limit"),
+    ("due to SD card write error", "SD card write error"),
+])
+@pytest.mark.parametrize("verb", ["stopped", "cancelled"])
+def test_wav_stop_reason_variants(tmp_path, ending, reason, verb):
+    wav = tmp_path / "reason.wav"
+    write_wav_with_comment(wav, REAL_COMMENT + f" Recording {verb} {ending}.")
+    assert parse_audiomoth_wav_comment(wav)["recording_stop_reason"] == reason

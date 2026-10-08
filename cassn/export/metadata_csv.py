@@ -25,6 +25,7 @@ from typing import Callable
 
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, LOCAL_DATA_DIR, VERSION
 from cassn.core.audio_metadata import normalize_gain
+from cassn.core.aru_status import recording_aru_status
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
 from cassn.export.wildlife_insights import (
     SUBPROJECT_DESIGN,
@@ -244,7 +245,8 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'ARU_microphone':        aru_microphone,
                 'mounted_on':            sh_mounted_on,
                 'sensor_height_meters':  aru_row.get('sensor_height_meters', ''),
-                'ARU_status':            aru_row.get('ARU_status', ''),
+                'ARU_status':            (recording_aru_status(entry.get('recording_stop_reason'))
+                                          if file_type == 'audio' else ''),
                 'is_submitted_to_soundhub': False,
                 'soundhub_submitter':    '',
                 'soundhub_submission_datetime': '',

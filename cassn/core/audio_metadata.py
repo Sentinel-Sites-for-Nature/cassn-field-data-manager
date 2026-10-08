@@ -296,7 +296,7 @@ def parse_audiomoth_wav_comment(wav_path: Path) -> dict:
         # (normal for big bat files), "due to switch position change", or "due to
         # low voltage" (a battery death worth flagging). Captured verbatim; the
         # QC check decides which reasons are concerning.
-        m = re.search(r"Recording (?:stopped|cancelled)[^.]*?due to ([^.]+)", comment, re.IGNORECASE)
+        m = re.search(r"Recording\s+(?:stopped|cancelled)\b[^.]*?(?:due\s+to|by)\s+([^.]+)", comment, re.IGNORECASE)
         if m:
             result["recording_stop_reason"] = m.group(1).strip()
     except Exception as e:

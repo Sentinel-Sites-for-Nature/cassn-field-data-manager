@@ -794,3 +794,26 @@ def test_soundhub_csvs_are_not_box_orphans():
     assert not is_orphan_on_box("soundhub/deployment.csv")
     assert not is_orphan_on_box("soundhub/recording.csv")
     assert is_orphan_on_box("something_unexpected.csv")
+
+
+def test_excluded_low_voltage_failure_marks_only_its_deployment(deployment):
+    rows = read_bd_audio_rows(deployment)
+    failure = audio_row("UC_StrathearnRanch_plot1_BD_20260714", "99999",
+                        file_size_bytes="488", recording_duration_sec="",
+                        recording_stop_reason="low voltage")
+    # A bat failure belongs to another recorder and must not contaminate BD.
+    bat = audio_row("UC_StrathearnRanch_plot2_BT_20260714", "99999",
+                    device_type="BT", recording_stop_reason="low voltage")
+    fields = sorted({k for r in [*rows, failure, bat] for k in r
+                     if not k.startswith("_")})
+    with (deployment / "audio_file_metadata.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows([*rows, failure, bat])
+    selected = read_bd_audio_rows(deployment)
+    assert failure["filename"] not in {r["filename"] for r in selected}
+    assert all(r["ARU_status"] == "functioning" for r in selected)
+    statuses = {r["deployment_id"]: r["ARU_status"]
+                for r in build_deployment_rows(selected)}
+    assert statuses == {"UC_StrathearnRanch_plot1_BD_20260714": "low voltage",
+                        "UC_StrathearnRanch_plot2_BD_20260713": "functioning"}

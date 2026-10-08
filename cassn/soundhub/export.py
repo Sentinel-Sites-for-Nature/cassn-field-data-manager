@@ -29,6 +29,7 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
     SOUNDHUB_RECORDING_FIELDS,
 )
+from cassn.core.aru_status import deployment_aru_status, recording_aru_status
 from cassn.export.wildlife_insights import (
     SUBPROJECT_DESIGN,
     format_wi_coordinate,
@@ -103,11 +104,21 @@ def read_bd_audio_rows(deployment_folder) -> list[dict]:
         )
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
-    return [
+    bird_rows = [
         r for r in rows
         if r.get("device_type") == SOUNDHUB_DEVICE_TYPE
         and r.get("file_type") == "audio"
-        and _holds_audio(r)
+    ]
+    # Compute before excluding header-only failures. This private value travels
+    # with surviving rows and is never written as a recording metadata column.
+    statuses = {
+        deployment_id: deployment_aru_status(members)
+        for deployment_id, members in group_by_deployment(bird_rows).items()
+    }
+    return [
+        {**r, "ARU_status": recording_aru_status(r.get("recording_stop_reason")),
+         "_deployment_aru_status": statuses[r.get("deployment_id", "")]}
+        for r in bird_rows if _holds_audio(r)
     ]
 
 
@@ -221,6 +232,7 @@ def build_deployment_rows(audio_rows: list[dict]) -> list[dict]:
         row = {field: source.get(field, "") for field in SOUNDHUB_DEPLOYMENT_FIELDS}
         row["project_short_name"] = SOUNDHUB_PROJECT_SHORT_NAME
         row["deployment_id"] = deployment_id
+        row["ARU_status"] = deployment_aru_status(rows)
         row["longitude"] = format_wi_coordinate(row.get("longitude", ""))
         row["latitude"] = format_wi_coordinate(row.get("latitude", ""))
         out.append(row)
