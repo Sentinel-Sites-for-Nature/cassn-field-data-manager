@@ -53,7 +53,8 @@ def _fixture(tmp_path: Path):
         filename = f"{deployment_id}_00001.flac"
         recordings.append(
             {
-                "filename": filename,
+                "path": f"{deployment_id}/{filename}",
+                "sample_rate": "48000",
                 "deployment_id": deployment_id,
                 "start": "2026-04-01 00:00:00-07:00",
                 "end": "2026-04-01 01:00:00-07:00",

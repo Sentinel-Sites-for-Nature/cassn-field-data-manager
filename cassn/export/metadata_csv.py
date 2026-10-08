@@ -120,7 +120,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         # SoundHub config lookup (keyed by device type suffix)
         aru_container = soundhub_config.get(f'ARU_container_{dev_type}', '')
         aru_microphone = soundhub_config.get('ARU_microphone', '')
-        sh_feature_type = soundhub_config.get('feature_type', '')
+        sh_feature_type = soundhub_config.get('feature_type') or 'None'
         sh_mounted_on = aru_row.get('mounted_on', '')
 
         base = {

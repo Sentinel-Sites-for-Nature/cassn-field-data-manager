@@ -232,11 +232,23 @@ def build_deployment_rows(audio_rows: list[dict]) -> list[dict]:
         row = {field: source.get(field, "") for field in SOUNDHUB_DEPLOYMENT_FIELDS}
         row["project_short_name"] = SOUNDHUB_PROJECT_SHORT_NAME
         row["deployment_id"] = deployment_id
-        row["ARU_status"] = deployment_aru_status(rows)
+        row["aru_status"] = deployment_aru_status(rows)
+        if not str(row.get("feature_type") or "").strip():
+            row["feature_type"] = "None"
+        if row["mounted_on"] == "metal_pole":
+            row["mounted_on"] = "pole"
         row["longitude"] = format_wi_coordinate(row.get("longitude", ""))
         row["latitude"] = format_wi_coordinate(row.get("latitude", ""))
         out.append(row)
     return sorted(out, key=lambda r: r["deployment_id"])
+
+
+def _sample_rate(value, name: str) -> str:
+    """Require the measured sample rate in Hz; never assume a protocol default."""
+    text = str(value or "").strip()
+    if not text.isdigit() or int(text) <= 0:
+        raise SoundHubStagingError(f"{name}: missing or invalid sample_rate_hz")
+    return str(int(text))
 
 
 def build_recording_rows(audio_rows: list[dict]) -> list[dict]:
@@ -267,10 +279,11 @@ def build_recording_rows(audio_rows: list[dict]) -> list[dict]:
             missing.append(name)
         out.append(
             {
-                "filename": name,
+                "path": f"{row.get('deployment_id', '')}/{name}",
                 "deployment_id": row.get("deployment_id", ""),
                 "start": _format_datetime(start),
                 "end": _format_datetime(start, duration) if duration else "",
+                "sample_rate": _sample_rate(row.get("sample_rate_hz"), name),
             }
         )
     if missing:
@@ -362,11 +375,15 @@ def refresh_project_csvs(staging_root) -> dict:
     recording_rows: list[dict] = []
 
     for fragment_dir in sorted(p for p in fragments.glob("*") if p.is_dir()):
-        deployment_rows.extend(_read_csv(fragment_dir / DEPLOYMENT_CSV))
-        recording_rows.extend(_read_csv(fragment_dir / RECORDING_CSV))
+        deployment_rows.extend(
+            _require_header(fragment_dir / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS)
+        )
+        recording_rows.extend(
+            _require_header(fragment_dir / RECORDING_CSV, SOUNDHUB_RECORDING_FIELDS)
+        )
 
     deployment_rows.sort(key=lambda r: r.get("deployment_id", ""))
-    recording_rows.sort(key=lambda r: (r.get("deployment_id", ""), r.get("filename", "")))
+    recording_rows.sort(key=lambda r: (r.get("deployment_id", ""), r.get("path", "")))
 
     root = project_root(staging_root)
     _write_csv(root / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS, deployment_rows)
@@ -449,7 +466,7 @@ def validate_staging_manifests(staging_root) -> dict:
 
     expected_deployments.sort(key=lambda row: row.get("deployment_id", ""))
     expected_recordings.sort(
-        key=lambda row: (row.get("deployment_id", ""), row.get("filename", ""))
+        key=lambda row: (row.get("deployment_id", ""), row.get("path", ""))
     )
     root = project_root(staging_root)
     deployments = _require_header(root / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS)
@@ -491,6 +508,8 @@ def validate_staging_manifests(staging_root) -> dict:
                 f"{root / DEPLOYMENT_CSV} row {number}: subproject_design must be "
                 f"{SUBPROJECT_DESIGN!r}"
             )
+        if row["mounted_on"] == "metal_pole":
+            raise SoundHubStagingError("SoundHub mounted_on must use pole, not metal_pole")
         for field in ("date_installed", "deployment_start_date", "deployment_end_date"):
             _parse_iso_date(row[field], path=root / DEPLOYMENT_CSV,
                             row_number=number, field=field)
@@ -502,7 +521,7 @@ def validate_staging_manifests(staging_root) -> dict:
     for number, row in enumerate(recordings, start=2):
         key = (
             str(row.get("deployment_id") or "").strip(),
-            str(row.get("filename") or "").strip(),
+            Path(str(row.get("path") or "")).name,
         )
         if not all(key) or key in recording_keys:
             raise SoundHubStagingError(
@@ -514,6 +533,12 @@ def validate_staging_manifests(staging_root) -> dict:
                 f"{root / RECORDING_CSV} row {number}: deployment_id is absent from "
                 "deployment.csv"
             )
+        expected_path = f"{key[0]}/{key[1]}"
+        if row.get("path") != expected_path:
+            raise SoundHubStagingError(
+                f"{root / RECORDING_CSV} row {number}: path must be deployment_id/filename"
+            )
+        _sample_rate(row.get("sample_rate"), expected_path)
         if not key[1].lower().endswith(".flac"):
             raise SoundHubStagingError(
                 f"{root / RECORDING_CSV} row {number}: filename must end in .flac"

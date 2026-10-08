@@ -152,7 +152,7 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 def _manifest_key(row: dict) -> tuple[str, str]:
     return (
         str(row.get("deployment_id") or "").strip(),
-        str(row.get("filename") or "").strip(),
+        Path(str(row.get("path") or "")).name,
     )
 
 
@@ -197,6 +197,8 @@ def staged_recording_keys(staging_root: Path) -> set[tuple[str, str]]:
         key = _manifest_key(row)
         if not key[0] or not key[1]:
             raise SoundHubProvenanceError(f"{manifest} row {number}: blank key field")
+        if row.get("path") != f"{key[0]}/{key[1]}":
+            raise SoundHubProvenanceError(f"{manifest} row {number}: invalid deployment-relative path")
         if key[1].lower().endswith(".flac") is False:
             raise SoundHubProvenanceError(
                 f"{manifest} row {number}: expected a .flac filename"

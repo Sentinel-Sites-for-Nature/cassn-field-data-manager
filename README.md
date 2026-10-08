@@ -340,8 +340,10 @@ second pass over the audio is needed.
 
 **`deployment.csv`** — one row per SoundHub deployment, in the column order of the
 Deployment Template sheet of `templates/SoundHub_Metadata_Template.xlsx`. Every
-column except `project_short_name` is already an `audio_file_metadata.csv` column
-under the same name. Dates and times carry **no** UTC offset.
+column comes from `audio_file_metadata.csv`, with `ARU_status` exported as
+`aru_status` and `metal_pole` normalized to `pole`. `feature_type` and `aru_status`
+columns are always included; absent features use the template value `None`.
+Dates and times carry **no** UTC offset.
 
 Note that one CA-SSN deployment *event* (`UC_StrathearnRanch_20260714`) contains
 several SoundHub *deployments* — one per plot's recorder
@@ -357,10 +359,15 @@ resolves this.
 
 | Column | Source |
 |---|---|
-| `filename` | The staged name, with `.wav` swapped for `.flac` |
+| `path` | `<deployment_id>/<staged filename>.flac`, relative to the project root |
+| `sample_rate` | Measured `sample_rate_hz`, in Hz; missing values block staging |
 | `deployment_id` | Straight from `audio_file_metadata.csv` |
 | `start` | `recorded_datetime` — read from each WAV's GUANO chunk at ingest, so it survives the rename |
 | `end` | `start` plus `recording_duration_sec` |
+
+Legacy staging fragments must be regenerated from their source audio metadata
+before uploading with this schema. Rebuilding refuses old headers instead of
+silently dropping fields.
 
 Unlike the deployment dates, `start` and `end` **do** carry a UTC offset:
 `2026-05-11 00:00:00-07:00`.

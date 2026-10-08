@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cassn.soundhub.export import (  # noqa: E402
+    build_recording_rows,
     enrich_audio_rows,
     read_bd_audio_rows,
     refresh_project_csvs,
@@ -143,6 +144,7 @@ def cmd_stage(args) -> int:
             print(f"  [{_folder.name}] {current}/{total}  {name}", flush=True)
 
         try:
+            build_recording_rows(audio_rows)
             result = stage_deployment(folder, audio_rows, staging_root, progress=show)
             write_deployment_fragments(staging_root, audio_rows)
             write_deployment_copy(folder, audio_rows)
