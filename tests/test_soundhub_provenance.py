@@ -57,7 +57,8 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
 
 def _recording(deployment_id: str) -> dict:
     return {
-        "filename": f"{deployment_id}_00001.flac",
+        "path": f"{deployment_id}/{deployment_id}_00001.flac",
+        "sample_rate": "48000",
         "deployment_id": deployment_id,
         "start": "2026-04-01 00:00:00-07:00",
         "end": "2026-04-01 01:00:00-07:00",
@@ -86,7 +87,9 @@ def _deployment(deployment_id: str) -> dict:
         ARU_model="AudioMoth-Firmware-Basic 1.11.1",
         ARU_container="polybag",
         ARU_microphone="internal",
-        mounted_on="metal_pole",
+        mounted_on="pole",
+        aru_status="functioning",
+        feature_type="None",
         sensor_height_meters="2.5",
         recorded_by="Imperato, John",
     )
@@ -119,9 +122,10 @@ def _fixture(tmp_path: Path):
         deployment = _deployment(row["deployment_id"])
         audio = {
             **deployment,
-            "filename": Path(row["filename"]).with_suffix(".wav").name,
+            "filename": Path(row["path"]).with_suffix(".wav").name,
             "recorded_datetime": row["start"].replace(" ", "T"),
             "recording_duration_sec": "3600",
+            "sample_rate_hz": row["sample_rate"],
         }
         write_deployment_fragments(staging, [audio])
     _write_csv(
@@ -130,7 +134,7 @@ def _fixture(tmp_path: Path):
         [_deployment(DEPLOYMENT_1), _deployment(DEPLOYMENT_2)],
     )
     for row in rows:
-        media = project_root(staging) / row["deployment_id"] / row["filename"]
+        media = project_root(staging) / row["path"]
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
 
@@ -202,11 +206,11 @@ def test_mixed_provenance_within_deployment_is_blocking(tmp_path):
     rows = [_recording(DEPLOYMENT_1), _recording(DEPLOYMENT_2)]
     second = {
         **_recording(DEPLOYMENT_1),
-        "filename": f"{DEPLOYMENT_1}_00002.flac",
+        "path": f"{DEPLOYMENT_1}/{DEPLOYMENT_1}_00002.flac",
     }
     rows.append(second)
     _write_csv(project_root(staging) / "recording.csv", SOUNDHUB_RECORDING_FIELDS, rows)
-    media = project_root(staging) / DEPLOYMENT_1 / second["filename"]
+    media = project_root(staging) / second["path"]
     media.write_bytes(b"test flac 2")
     fields, metadata = _read_csv(event_1)
     metadata[0]["is_submitted_to_soundhub"] = "True"

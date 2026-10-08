@@ -122,7 +122,7 @@ IMAGE_FIELDS = [
     "plot_treatment", "plot_treatment_description", "detection_distance",
     "app_version", "processing_datetime",
     "is_uploaded_to_box", "box_uploader", "box_upload_datetime",
-    "is_uploaded_to_pelican", "pelican_uploader", "pelican_upload_datetime",
+    "is_uploaded_to_osdf", "osdf_uploader", "osdf_upload_datetime",
     "is_submitted_to_wi", "wi_submitter", "wi_submission_datetime",
     "notes",
 ]
@@ -144,7 +144,7 @@ AUDIO_FIELDS = [
     "mounted_on", "sensor_height_meters", "ARU_status",
     "app_version", "processing_datetime",
     "is_uploaded_to_box", "box_uploader", "box_upload_datetime",
-    "is_uploaded_to_pelican", "pelican_uploader", "pelican_upload_datetime",
+    "is_uploaded_to_osdf", "osdf_uploader", "osdf_upload_datetime",
     "is_submitted_to_soundhub", "soundhub_submitter", "soundhub_submission_datetime",
     "is_submitted_to_nabat", "nabat_submitter", "nabat_submission_datetime",
     "notes",
@@ -185,8 +185,8 @@ SOUNDHUB_STAGING_DEFAULT = Path.home() / "cassn" / "soundhub" / "s3_upload_stagi
 FLAC_COMPRESSION_LEVEL = 5
 
 # Deployment Template sheet of templates/SoundHub_Metadata_Template.xlsx, in
-# sheet order. Every name except project_short_name is also an AUDIO_FIELDS
-# column, so the export is a projection rather than a remapping.
+# sheet order, with aru_status lowercased for the ingest schema. Internal
+# audio metadata retains ARU_status; mapping happens at the export boundary.
 SOUNDHUB_DEPLOYMENT_FIELDS = [
     "project_short_name", "deployment_id", "subproject", "subproject_design",
     "placename", "longitude", "latitude", "date_installed",
@@ -195,14 +195,14 @@ SOUNDHUB_DEPLOYMENT_FIELDS = [
     "frequency", "duration", "gain",
     "filter_type_khz", "filter_type_duration", "filter_type_amplitude",
     "ARU_make", "ARU_model", "ARU_container", "ARU_microphone",
-    "feature_type", "feature_type_details", "ARU_status", "mounted_on",
+    "feature_type", "feature_type_details", "aru_status", "mounted_on",
     "sensor_height_meters", "recorded_by", "notes",
 ]
 
 # recording.csv carries the per-file timestamps SoundHub cannot parse out of our
-# renamed files. Fields follow the example Brian sent 2026-06-18 and accepted on
-# 2026-06-23: start/end carry a UTC offset, unlike the deployment dates/times.
-SOUNDHUB_RECORDING_FIELDS = ["filename", "deployment_id", "start", "end"]
+# renamed files. Brian's ingest feedback requires a project-relative
+# path and sample_rate in Hz. start/end retain the recording UTC offset.
+SOUNDHUB_RECORDING_FIELDS = ["path", "deployment_id", "start", "end", "sample_rate"]
 
 # "2026-05-11 00:00:00-07:00" — space-separated date and time, offset retained.
 # Rendered with ``datetime.isoformat(sep=SOUNDHUB_DATETIME_SEPARATOR)`` rather

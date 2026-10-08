@@ -27,6 +27,7 @@ from cassn.soundhub.export import (
     write_deployment_fragments,
 )
 from cassn.soundhub.staging import (
+    fragments_root,
     SoundHubStagingError,
     _index_source_wavs,
     _wav_missing_final_pad,
@@ -77,6 +78,7 @@ def audio_row(deployment_id: str, seq: str, **overrides) -> dict:
         "file_type": "audio",
         "recorded_datetime": "2026-05-11T00:00:00-07:00",
         "recording_duration_sec": "3600",
+        "sample_rate_hz": "48000",
         "placename": "StrathearnRanch_plot1",
         "latitude": "36.84449545",
         "longitude": "-121.1632039",
@@ -348,7 +350,7 @@ def test_deployment_rows_format_coordinates_to_eight_decimal_places(deployment):
 def test_recording_rows_use_flac_names_and_offsets(deployment):
     rows = build_recording_rows(read_bd_audio_rows(deployment))
     assert list(rows[0]) == SOUNDHUB_RECORDING_FIELDS
-    assert rows[0]["filename"].endswith(".flac")
+    assert rows[0]["path"].endswith(".flac")
     assert rows[0]["start"] == "2026-05-11 00:00:00-07:00"
     # end = start + recording_duration_sec (3600s)
     assert rows[0]["end"] == "2026-05-11 01:00:00-07:00"
@@ -432,7 +434,7 @@ def test_staging_validation_requires_upload_ready_metadata_and_fragment_parity(
         media = (
             project_root(staging)
             / recording["deployment_id"]
-            / recording["filename"]
+            / Path(recording["path"]).name
         )
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
@@ -459,7 +461,7 @@ def test_staging_validation_rejects_blank_owned_required_field(deployment, tmp_p
     write_deployment_fragments(staging, rows)
     refresh_project_csvs(staging)
     for recording in build_recording_rows(rows):
-        media = project_root(staging) / recording["deployment_id"] / recording["filename"]
+        media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
 
@@ -473,7 +475,7 @@ def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
     write_deployment_fragments(staging, rows)
     refresh_project_csvs(staging)
     for recording in build_recording_rows(rows):
-        media = project_root(staging) / recording["deployment_id"] / recording["filename"]
+        media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
     stale = project_root(staging) / rows[0]["deployment_id"] / "stale.flac"
@@ -794,3 +796,91 @@ def test_soundhub_csvs_are_not_box_orphans():
     assert not is_orphan_on_box("soundhub/deployment.csv")
     assert not is_orphan_on_box("soundhub/recording.csv")
     assert is_orphan_on_box("something_unexpected.csv")
+
+
+def test_brian_ingest_schema_is_explicit():
+    """Assert external requirements directly, independent of our constants."""
+    source = audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", ARU_status="Functioning")
+    deployment = build_deployment_rows([source])[0]
+    recording = build_recording_rows([source])[0]
+    assert {"feature_type", "aru_status"} <= deployment.keys()
+    assert "ARU_status" not in deployment
+    assert deployment["aru_status"] == "functioning"
+    assert deployment["mounted_on"] == "pole"
+    assert source["mounted_on"] == "metal_pole"
+    assert list(recording) == ["path", "deployment_id", "start", "end", "sample_rate"]
+    assert recording["path"] == "UC_QuailRidge_plot1_BD_20260118/UC_QuailRidge_plot1_BD_20260118_00001.flac"
+    assert recording["sample_rate"] == "48000"
+
+
+@pytest.mark.parametrize("sample_rate", ["", "0", "-48000", "unknown", "48.0"])
+def test_recording_sample_rate_must_be_positive_hz(sample_rate):
+    with pytest.raises(SoundHubStagingError, match="sample_rate_hz"):
+        build_recording_rows([audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", sample_rate_hz=sample_rate)])
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("path", "bare.flac", "path must be"),
+    ("path", "../bare.flac", "path must be"),
+    ("sample_rate", "", "sample_rate_hz"),
+    ("sample_rate", "0", "sample_rate_hz"),
+])
+def test_preflight_rejects_invalid_external_recording_values(deployment, tmp_path, field, value, message):
+    staging = tmp_path / "staging"
+    write_deployment_fragments(staging, read_bd_audio_rows(deployment))
+    # Change fragments and rebuild to exercise validation beyond parity checks.
+    for manifest in fragments_root(staging).glob("*/recording.csv"):
+        with manifest.open(newline="") as stream:
+            reader = csv.DictReader(stream)
+            fields, rows = reader.fieldnames, list(reader)
+        for row in rows:
+            row[field] = value
+        with manifest.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+    refresh_project_csvs(staging)
+    with pytest.raises(SoundHubStagingError, match=message):
+        validate_staging_manifests(staging)
+
+
+def test_rebuild_refuses_legacy_fragments_before_replacing_manifests(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    write_deployment_fragments(staging, read_bd_audio_rows(deployment))
+    refresh_project_csvs(staging)
+    cumulative = project_root(staging) / "recording.csv"
+    before = cumulative.read_bytes()
+    fragment = next(fragments_root(staging).glob("*/recording.csv"))
+    fragment.write_text("filename,deployment_id,start,end\n")
+    with pytest.raises(SoundHubStagingError, match="header does not match"):
+        refresh_project_csvs(staging)
+    assert cumulative.read_bytes() == before
+
+
+def test_excluded_low_voltage_failure_marks_only_its_deployment(deployment):
+    rows = read_bd_audio_rows(deployment)
+    failure = audio_row("UC_StrathearnRanch_plot1_BD_20260714", "99999",
+                        file_size_bytes="488", recording_duration_sec="",
+                        recording_stop_reason="low voltage")
+    # A bat failure belongs to another recorder and must not contaminate BD.
+    bat = audio_row("UC_StrathearnRanch_plot2_BT_20260714", "99999",
+                    device_type="BT", recording_stop_reason="low voltage")
+    fields = sorted({k for r in [*rows, failure, bat] for k in r
+                     if not k.startswith("_")})
+    with (deployment / "audio_file_metadata.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows([*rows, failure, bat])
+    selected = read_bd_audio_rows(deployment)
+    assert failure["filename"] not in {r["filename"] for r in selected}
+    assert all(r["ARU_status"] == "functioning" for r in selected)
+    statuses = {r["deployment_id"]: r["aru_status"]
+                for r in build_deployment_rows(selected)}
+    assert statuses == {"UC_StrathearnRanch_plot1_BD_20260714": "low voltage",
+                        "UC_StrathearnRanch_plot2_BD_20260713": "functioning"}
+
+
+@pytest.mark.parametrize("feature,expected", [("", "None"), ("  ", "None"), (None, "None"), ("Water source", "Water source")])
+def test_deployment_feature_type_uses_template_none(feature, expected):
+    row = audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", feature_type=feature)
+    assert build_deployment_rows([row])[0]["feature_type"] == expected

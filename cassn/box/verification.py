@@ -21,6 +21,43 @@ _EXPECTED_METADATA = {
 }
 
 
+def collect_box_file_hashes(
+    storage: BoxStorage,
+    folder_id: str,
+    *,
+    is_cancelled=None,
+) -> dict[str, str]:
+    """Return every file below ``folder_id`` as ``relative_path -> SHA-1``.
+
+    Box computes the hashes server-side.  Callers therefore get a byte-level
+    inventory without downloading file contents.  Blank values are retained so
+    a verifier can fail closed while Box is still calculating a fresh hash.
+    """
+    hashes: dict[str, str] = {}
+
+    def _walk(current_id: str, prefix: tuple[str, ...]) -> None:
+        if is_cancelled and is_cancelled():
+            return
+        for item in storage.iter_folder_items(
+            current_id, fields=["id", "type", "name", "sha1"]
+        ):
+            if is_cancelled and is_cancelled():
+                return
+            if item.type == "file":
+                digest = (
+                    getattr(item, "sha_1", None)
+                    or getattr(item, "sha1", None)
+                    or ""
+                )
+                relative_path = PurePosixPath(*prefix, item.name).as_posix()
+                hashes[relative_path] = str(digest).lower()
+            elif item.type == "folder":
+                _walk(item.id, (*prefix, item.name))
+
+    _walk(folder_id, ())
+    return hashes
+
+
 def is_orphan_on_box(path: str) -> bool:
     """True for an unexpected Box-only path rather than an allowed sidecar."""
     return (
@@ -65,28 +102,15 @@ def verify_box_hashes(
     _emit(0, 0, "Listing Box folder contents…")
 
     def _collect():
+        if _cancelled():
+            return
+        refreshed = collect_box_file_hashes(
+            storage, deploy_id, is_cancelled=_cancelled
+        )
         box_hashes.clear()
+        box_hashes.update(refreshed)
         box_paths.clear()
-
-        def _walk(folder_id, prefix: tuple):
-            if _cancelled():
-                return
-            for item in storage.iter_folder_items(
-                folder_id, fields=["id", "type", "name", "sha1"]
-            ):
-                if item.type == "file":
-                    box_sha1 = (
-                        getattr(item, "sha_1", None)
-                        or getattr(item, "sha1", None)
-                        or ""
-                    )
-                    relative_path = PurePosixPath(*prefix, item.name).as_posix()
-                    box_hashes[relative_path] = box_sha1.lower()
-                    box_paths.add(relative_path)
-                elif item.type == "folder":
-                    _walk(item.id, (*prefix, item.name))
-
-        _walk(deploy_id, ())
+        box_paths.update(refreshed)
 
     _collect()
     if _cancelled():

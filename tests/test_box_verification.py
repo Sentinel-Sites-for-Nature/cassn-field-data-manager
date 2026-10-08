@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 
 from cassn.box.client import BoxStorage
-from cassn.box.verification import is_orphan_on_box, verify_box_hashes
+from cassn.box.verification import (
+    collect_box_file_hashes,
+    is_orphan_on_box,
+    verify_box_hashes,
+)
 from cassn.core.hashing import sha1
 
 
@@ -22,6 +26,31 @@ class FakeStorage:
     def iter_folder_items(self, folder_id, *, fields=None):
         del fields
         yield from self.tree.get(folder_id, [])
+
+
+def test_collect_box_file_hashes_honors_cancellation_during_tree_walk():
+    class RecordingStorage(FakeStorage):
+        def __init__(self, tree):
+            super().__init__(tree)
+            self.visited = []
+
+        def iter_folder_items(self, folder_id, *, fields=None):
+            self.visited.append(folder_id)
+            yield from super().iter_folder_items(folder_id, fields=fields)
+
+    storage = RecordingStorage({
+        "deploy": [_folder("raw_data", "raw")],
+        "raw": [_file("image.jpg", "0" * 40)],
+    })
+
+    hashes = collect_box_file_hashes(
+        storage,
+        "deploy",
+        is_cancelled=lambda: len(storage.visited) >= 2,
+    )
+
+    assert hashes == {}
+    assert storage.visited == ["deploy", "raw"]
 
 
 def test_collect_file_paths_preserves_complete_nested_posix_path():

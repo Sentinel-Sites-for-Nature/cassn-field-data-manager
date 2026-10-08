@@ -54,6 +54,7 @@ def _canonical_files(root: Path) -> dict[str, bytes]:
         [
             "deployment_id", "deployment_event_id", "deployment_sequence",
             "site_short_name", "plot_number", "device_type", "device_id",
+            "asset_tag",
             "deployment_start_date", "deployment_end_date", "identifier_policy",
             "feature_type", "mounted_on", "sensor_height_meters",
         ],
@@ -62,6 +63,7 @@ def _canonical_files(root: Path) -> dict[str, bytes]:
             "deployment_sequence": "0",
             "site_short_name": "TestSite", "plot_number": "1", "device_type": "ML",
             "device_id": "CAM1",
+            "asset_tag": "",
             "deployment_start_date": "2026-01-01", "deployment_end_date": "2026-02-01",
             "identifier_policy": "", "feature_type": "Trail game",
             "mounted_on": "", "sensor_height_meters": "",
@@ -210,6 +212,50 @@ def test_validation_allows_sequential_deployments_but_rejects_duplicate_sequence
     successor["deployment_id"] = rows[0]["deployment_id"]
     _write_csv(path, fields, [rows[0], successor])
     with pytest.raises(ValueError, match="duplicate deployment_id"):
+        validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
+
+
+def test_validation_rejects_one_audiomoth_in_overlapping_event_slots(tmp_path):
+    _canonical_files(tmp_path)
+    path = tmp_path / "deployments.csv"
+    fields = [
+        "deployment_id", "deployment_event_id", "deployment_sequence",
+        "site_short_name", "plot_number", "device_type", "device_id",
+        "asset_tag", "deployment_start_date", "deployment_end_date",
+        "identifier_policy", "feature_type", "mounted_on",
+        "sensor_height_meters",
+    ]
+    common = {
+        "deployment_event_id": "UC_TestSite_20260201",
+        "deployment_sequence": "0",
+        "site_short_name": "TestSite",
+        "device_id": "24F3190464890001",
+        "deployment_start_date": "2026-01-01",
+        "deployment_end_date": "2026-02-01",
+        "identifier_policy": "",
+        "feature_type": "",
+        "mounted_on": "metal_pole",
+        "sensor_height_meters": "2.5",
+    }
+    rows = [
+        {
+            **common,
+            "deployment_id": "UC_TestSite_plot1_BD_20260201",
+            "plot_number": "1",
+            "device_type": "BD",
+            "asset_tag": "0001",
+        },
+        {
+            **common,
+            "deployment_id": "UC_TestSite_plot2_BT_20260201",
+            "plot_number": "2",
+            "device_type": "BT",
+            "asset_tag": "0002",
+        },
+    ]
+    _write_csv(path, fields, rows)
+
+    with pytest.raises(ValueError, match="overlapping device slots"):
         validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
 
 

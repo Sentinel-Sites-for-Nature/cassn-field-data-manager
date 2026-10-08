@@ -7,13 +7,14 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from cassn.box.auth import BoxConfig, get_box_client
 from cassn.box.client import BoxStorage
 from cassn.lookups import (
+    AUDIO_DEVICE_TYPES,
     BOX_MANAGED_FILENAMES,
     DEPLOYMENT_EVENTS_CSV,
     DEPLOYMENTS_CSV,
@@ -229,6 +230,50 @@ def validate_deployment_lookups(
         raise LookupSchemaError(
             f"deployments.csv has {len(duplicate_sequences)} duplicate deployment "
             f"sequence(s) within an event slot; examples: {examples}"
+        )
+
+    # A physical AudioMoth cannot occupy two device slots during overlapping
+    # intervals. Treat closed rows awaiting final event assignment and current
+    # open rows at the same site as one pending field round.
+    serial_assignments: dict[tuple[str, str], list[dict]] = {}
+    for row in deployments:
+        if row["device_type"] not in AUDIO_DEVICE_TYPES or not row.get("device_id"):
+            continue
+        round_id = row.get("deployment_event_id") or f"OPEN:{row['site_short_name']}"
+        serial_assignments.setdefault((round_id, row["device_id"]), []).append(row)
+
+    overlapping_serials: list[tuple[str, str, tuple, tuple]] = []
+    for (round_id, serial), rows in serial_assignments.items():
+        for index, first in enumerate(rows):
+            first_slot = (first["plot_number"], first["device_type"])
+            first_start = date.fromisoformat(first["deployment_start_date"])
+            first_end = (
+                date.fromisoformat(first["deployment_end_date"])
+                if first.get("deployment_end_date")
+                else date.max
+            )
+            for second in rows[index + 1:]:
+                second_slot = (second["plot_number"], second["device_type"])
+                if first_slot == second_slot:
+                    continue
+                second_start = date.fromisoformat(second["deployment_start_date"])
+                second_end = (
+                    date.fromisoformat(second["deployment_end_date"])
+                    if second.get("deployment_end_date")
+                    else date.max
+                )
+                if first_start < second_end and second_start < first_end:
+                    overlapping_serials.append(
+                        (round_id, serial, first_slot, second_slot)
+                    )
+    if overlapping_serials:
+        examples = ", ".join(
+            f"{round_id}/{serial}/plot{first[0]}_{first[1]}+plot{second[0]}_{second[1]}"
+            for round_id, serial, first, second in overlapping_serials[:5]
+        )
+        raise LookupSchemaError(
+            "deployments.csv assigns an AudioMoth serial to overlapping device "
+            f"slots; examples: {examples}"
         )
 
     return LookupValidation(

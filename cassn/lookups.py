@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -234,6 +235,7 @@ DEVICE_DEPLOYMENT_REQUIRED_FIELDS = frozenset({
     "plot_number",
     "device_type",
     "device_id",
+    "asset_tag",
     "deployment_start_date",
     "deployment_end_date",
     "identifier_policy",
@@ -242,6 +244,9 @@ DEVICE_DEPLOYMENT_REQUIRED_FIELDS = frozenset({
     "sensor_height_meters",
 })
 RUNTIME_DEVICE_TYPES = frozenset({"ML", "SA", "BD", "BT"})
+AUDIO_DEVICE_TYPES = frozenset({"BD", "BT"})
+AUDIOMOTH_SERIAL_PATTERN = re.compile(r"[0-9A-F]{16}")
+ASSET_TAG_PATTERN = re.compile(r"[0-9]{4}")
 
 
 def normalize_deployment_event_metadata(metadata: dict | None) -> dict:
@@ -348,6 +353,24 @@ def load_device_deployments(csv_path: Path) -> list[dict]:
             raise LookupSchemaError(
                 f"{csv_path.name} row {row_number} has unsupported device_type: "
                 f"{row['device_type']}"
+            )
+
+        device_id = row.get("device_id", "")
+        asset_tag = row.get("asset_tag", "")
+        if row["device_type"] in AUDIO_DEVICE_TYPES:
+            if device_id and not AUDIOMOTH_SERIAL_PATTERN.fullmatch(device_id):
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} has a noncanonical AudioMoth "
+                    "device_id; expected a 16-character uppercase hexadecimal serial"
+                )
+            if asset_tag and not ASSET_TAG_PATTERN.fullmatch(asset_tag):
+                raise LookupSchemaError(
+                    f"{csv_path.name} row {row_number} has a noncanonical ARU "
+                    "asset_tag; expected four digits"
+                )
+        elif asset_tag:
+            raise LookupSchemaError(
+                f"{csv_path.name} row {row_number} assigns asset_tag to a camera row"
             )
 
         try:

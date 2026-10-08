@@ -4,8 +4,76 @@ Helper scripts for maintenance and data recovery tasks.
 
 The active lookup contract uses `site_name,site_short_name,site_code` in
 `sites.csv`; `plots.csv` and curated `deployments.csv` join by
-`site_short_name`. Retired `devices.csv`, `cameras.csv`,
+`site_short_name`. In `deployments.csv`, `device_id` is the physical device
+serial and ARU `asset_tag` is the four-digit field label. Retired `devices.csv`, `cameras.csv`,
 `ARUs.csv`, and event-only `deployments.csv` are not app inputs.
+
+## `transfer_ndp_source.py`
+
+Preflights one staged NDP source event against the live Box API, then optionally
+downloads and hash-checks its media one deployment at a time before syncing the
+deployment's `data/` collection to Pelican. The destination is always explicit,
+so the same program can target any user-specified path beneath the assigned
+NDP private or public namespace without a code change.
+
+The command is a read-only preflight unless `--apply` is supplied. Control-file
+publication and Box provenance updates remain disabled pending the SCIL indexing
+and multi-destination review. The reduced v1 manifest contract is defined by
+`schemas/cassn-source-deployment-v1.schema.json`; its append-only publication
+rules are documented in `NDP_SOURCE_VERSIONING.md`.
+
+```bash
+.venv/bin/python utils/transfer_ndp_source.py \
+  --event "/path/to/Box-Box/CASSN/data/2026/Reserve/Event" \
+  --staging-root "/path/to/ndp/staging/user-specified-path/source" \
+  --lookup-dir "/path/to/Box-Box/CASSN/app_config" \
+  --scratch-root "/path/to/ndp/transfer_scratch" \
+  --destination-root "osdf:///ndp/private/user-specified-path/source"
+```
+
+Here `user-specified-path` is a placeholder for the namespace path assigned for
+that publication; the tool does not infer or hardcode organization segments.
+
+Before the first live `--apply`, complete a disposable Pelican protocol test.
+An interrupted exact run resumes from its atomic local state.
+`--abandonment-plan` lists partial remote collections requiring explicit
+deletion but never deletes them.
+
+## `clear_box_verified_staging.py`
+
+Permanently clears local deployment-event folders only after each event passes
+a fresh, metadata-only Box verification. The command compares the SHA-1 values
+recorded at ingest with Box's server-side SHA-1 values. It does not download
+Box media or re-hash local images and recordings.
+
+The normal command uses the staging root currently saved by the application in
+`~/.cassn_config/config.json` and performs a read-only dry run:
+
+```bash
+cassn-clear-staging
+```
+
+Use `--staging-root` only for a different staging location, and `--event` to
+limit the check to one direct child folder:
+
+```bash
+cassn-clear-staging \
+  --staging-root /path/to/other/staging \
+  --event UC_Site_20260424
+```
+
+After reviewing the `SAFE TO CLEAR` and `BLOCKED` results, permanently delete
+only the safe events with:
+
+```bash
+cassn-clear-staging --apply
+```
+
+An event is blocked unless device collection is complete, all metadata rows are
+stamped as uploaded to Box, the normal post-upload verification artifact
+passed, every local raw file is represented in `session.json`, and a live Box
+listing contains matching paths and server-side hashes. Box is never modified,
+and no cleanup receipt or other persistent record is created.
 
 ## `generate_data_collection_summary.py`
 
@@ -130,6 +198,26 @@ The default is a read-only recursive preview. Review the counts before applying:
 For Box Drive files, back up first and add `--in-place` to retain the existing
 Box file IDs and version history. The command preserves CSV headers, encoding,
 line endings, unrelated values, and is safe to rerun.
+
+## `rename_osdf_provenance.py`
+
+Renames the three unused `pelican_*` metadata columns to `osdf_*`, reflecting
+that OSDF is the archive while Pelican is only a transfer client. It preserves
+every byte after the CSV header and refuses populated, partial, or mixed
+provenance schemas. Preview first; on Box Drive, apply in place to preserve Box
+file IDs and version history:
+
+```bash
+.venv/bin/python utils/rename_osdf_provenance.py \
+  --root "/path/to/Box-Box/CASSN/data" \
+  --expect-files 51
+
+.venv/bin/python utils/rename_osdf_provenance.py \
+  --root "/path/to/Box-Box/CASSN/data" \
+  --expect-files 51 \
+  --apply \
+  --in-place
+```
 
 ## `backfill_box_provenance.py`
 

@@ -26,6 +26,10 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **SoundHub-Ready Audio Metadata**: `audio_file_metadata.csv` fields map directly to SoundHub deployment template columns — gain, filter cutoff (kHz), recording schedule, ARU hardware setup — so no field renaming is needed at submission time.
 - **Wildlife SoundHub Submission**: Bird audio is transcoded to lossless FLAC into a local tree mirroring SoundHub's S3 bucket, with `deployment.csv` and `recording.csv` projected from `audio_file_metadata.csv`, then uploaded and verified. Box keeps the original WAVs untouched. See the Wildlife SoundHub Preparation section.
 - **Session Persistence**: Interrupted downloads resume automatically. Concurrent workers checkpoint through one session writer; previously copied files are skipped and sequence/event numbering continues correctly.
+- **Immutable NDP Source Versioning**: OSDF object paths are never reused. Media
+  corrections are versioned per logical file, while deployment inventories and
+  manifests advance together and are published only after verified transfer.
+  See [CASSN NDP source versioning](NDP_SOURCE_VERSIONING.md).
 
 ## Installation
 
@@ -158,6 +162,19 @@ is active. To install the command on another workstation, make
 ```bash
 .venv/bin/python -m cassn
 ```
+
+On macOS, install or refresh a clickable copy in `~/Applications` with:
+
+```bash
+.venv/bin/python utils/install_macos_app.py --open
+```
+
+The resulting **CA-SSN Field Data Manager.app** uses the same repository and
+virtual environment as `cassn-app`; it does not duplicate or freeze the Python
+application. It also installs the `cassn-clear-staging` command. To retain the
+application in the Dock, right-click its icon while it is open and choose
+**Options → Keep in Dock**. Finder/Dock launches write diagnostics to
+`~/Library/Logs/CA-SSN Field Data Manager/launcher.log`.
 
 On launch the app first downloads the complete Box `app_config` snapshot to
 temporary files. It validates `deployment_events.csv` and `deployments.csv`
@@ -323,8 +340,10 @@ second pass over the audio is needed.
 
 **`deployment.csv`** — one row per SoundHub deployment, in the column order of the
 Deployment Template sheet of `templates/SoundHub_Metadata_Template.xlsx`. Every
-column except `project_short_name` is already an `audio_file_metadata.csv` column
-under the same name. Dates and times carry **no** UTC offset.
+column comes from `audio_file_metadata.csv`, with `ARU_status` exported as
+`aru_status` and `metal_pole` normalized to `pole`. `feature_type` and `aru_status`
+columns are always included; absent features use the template value `None`.
+Dates and times carry **no** UTC offset.
 
 Note that one CA-SSN deployment *event* (`UC_StrathearnRanch_20260714`) contains
 several SoundHub *deployments* — one per plot's recorder
@@ -340,10 +359,15 @@ resolves this.
 
 | Column | Source |
 |---|---|
-| `filename` | The staged name, with `.wav` swapped for `.flac` |
+| `path` | `<deployment_id>/<staged filename>.flac`, relative to the project root |
+| `sample_rate` | Measured `sample_rate_hz`, in Hz; missing values block staging |
 | `deployment_id` | Straight from `audio_file_metadata.csv` |
 | `start` | `recorded_datetime` — read from each WAV's GUANO chunk at ingest, so it survives the rename |
 | `end` | `start` plus `recording_duration_sec` |
+
+Legacy staging fragments must be regenerated from their source audio metadata
+before uploading with this schema. Rebuilding refuses old headers instead of
+silently dropping fields.
 
 Unlike the deployment dates, `start` and `end` **do** carry a UTC offset:
 `2026-05-11 00:00:00-07:00`.
@@ -481,7 +505,7 @@ One row per camera trap file (images and associated files). Fields map directly 
 | `plot_treatment`, `plot_treatment_description`, `detection_distance` | Reserved WI columns; currently blank |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
-| `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
+| `is_uploaded_to_osdf`, `osdf_uploader`, `osdf_upload_datetime` | Verified OSDF publication provenance; independent of the transfer client |
 | `is_submitted_to_wi`, `wi_submitter`, `wi_submission_datetime` | WI submission provenance |
 | `notes` | Free text |
 
@@ -500,7 +524,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `file_size_bytes`, `file_hash_sha256`, `file_hash_sha1` | File properties and integrity hashes. SHA-256 is the primary archival checksum; SHA-1 supports comparison with Box-reported file hashes. |
 | `recorded_datetime` | ISO 8601 datetime with UTC offset; sourced from AudioMoth filename |
 | `latitude`, `longitude`, `elevation_m` | Plot coordinates and elevation (metres) from `plots.csv` |
-| `ARU_make`, `ARU_model` | Hardcoded `AudioMoth`; model from CONFIG.TXT firmware string |
+| `ARU_make`, `ARU_model`, `ARU_firmware` | AudioMoth manufacturer, hardware model, and firmware as distinct fields |
 | `sample_rate_hz` | From WAV header or CONFIG.TXT |
 | `gain` | Recording gain from WAV comment or CONFIG.TXT |
 | `filter_type_khz` | High-pass filter cutoff in kHz (blank for BD) |
@@ -512,7 +536,7 @@ One row per AudioMoth file (WAV recordings and CONFIG.TXT files). Fields map dir
 | `feature_type`, `feature_type_details`, `ARU_container`, `ARU_microphone`, `ARU_status` | Protocol/hardware values from `soundhub_config.json` or reserved blank columns |
 | `app_version`, `processing_datetime` | Processing provenance |
 | `is_uploaded_to_box`, `box_uploader`, `box_upload_datetime` | Box upload provenance |
-| `is_uploaded_to_pelican`, `pelican_uploader`, `pelican_upload_datetime` | Pelican transfer provenance |
+| `is_uploaded_to_osdf`, `osdf_uploader`, `osdf_upload_datetime` | Verified OSDF publication provenance; independent of the transfer client |
 | `is_submitted_to_soundhub`, `soundhub_submitter`, `soundhub_submission_datetime` | SoundHub submission provenance |
 | `is_submitted_to_nabat`, `nabat_submitter`, `nabat_submission_datetime` | NABat submission provenance |
 | `notes` | Free text |
@@ -652,7 +676,7 @@ deployment intervals, and export defaults:
 - `sites.csv` — `site_name,site_short_name,site_code`, where the values are the formal name, stable relational/deployment-ID token, and acronym
 - `plots.csv` — plot names, numbers, coordinates, and hand-entered `elevation_m`, joined to sites by `site_short_name`
 - `deployment_events.csv` — canonical event ID, site, `deployment_event_start_date`, and `deployment_event_end_date`; this is the sole runtime authority for event naming and dates
-- `deployments.csv` — one curated row per monitoring interval, joined to events by `deployment_event_id` and to sites by `site_short_name`, including a stable sequence-aware deployment ID, plot, optional hardware identity, observations, and export fields
+- `deployments.csv` — one curated row per monitoring interval, joined to events by `deployment_event_id` and to sites by `site_short_name`; `device_id` holds the physical camera or AudioMoth serial, while ARU `asset_tag` preserves the four-digit field label
 - `wi_config.json` — Wildlife Insights project IDs and upload defaults
 - `soundhub_config.json` — ARU hardware defaults (make, model, microphone, containers)
 - `program_config.json` — organization label(s) and observer names for the dropdowns
@@ -690,14 +714,19 @@ cassn-field-data-manager/
 │   ├── box/                          # Box auth, client, and upload/verify threads
 │   ├── core/                         # Classification, metadata extraction, inventory, QC
 │   ├── export/                       # Wildlife Insights / metadata CSV writers
+│   ├── ndp/                          # NDP source manifest, staging, and Pelican transfer
 │   ├── soundhub/                     # SoundHub FLAC staging, CSV export, S3 upload
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
+│   ├── clear_box_verified_staging.py # Box-verified local staging cleanup
 │   ├── generate_data_collection_summary.py # Box data summary report generator
+│   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── assets/                           # Logos / icon used by the UI
+├── schemas/                          # Published machine-readable data contracts
 ├── screenshots/                      # Application screenshots for this README
+├── NDP_SOURCE_VERSIONING.md          # Append-only OSDF source versioning rules
 ├── config.json.example               # Box config template → ~/.cassn_config/config.json
 ├── requirements.txt                  # Python dependencies
 ├── requirements-dev.txt              # Application dependencies plus test tooling
