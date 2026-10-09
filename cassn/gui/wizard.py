@@ -2995,6 +2995,18 @@ class FieldDataWizard(QMainWindow):
         self.cancel_upload_btn.setText("Cancel Upload")
         self.cancel_upload_btn.show()
 
+        # Refresh the summary so Box always receives the final pre-upload state.
+        try:
+            summary_path = generate_session_summary(
+                self.current_deployment_folder,
+                self.metadata,
+                self.file_inventory,
+                self.devices,
+            )
+            self.log(f"Session summary written to: {summary_path.name}")
+        except Exception as exc:
+            self.log(f"Warning: could not write session summary before upload: {exc}")
+
         self.upload_thread = BoxUploadThread(
             self.current_deployment_folder,
             self.metadata,
