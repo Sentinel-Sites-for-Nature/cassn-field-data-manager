@@ -75,6 +75,30 @@ passed, every local raw file is represented in `session.json`, and a live Box
 listing contains matching paths and server-side hashes. Box is never modified,
 and no cleanup receipt or other persistent record is created.
 
+## `cassn-mount-sd`
+
+Uses structured `diskutil` data to select removable physical media, including
+the built-in SD slot and USB card readers. Mounts recognized filesystem volumes
+at `~/Desktop/Card_<device>` (for example `~/Desktop/Card_disk5s2`) using
+`diskutil`, without assuming a partition number or filesystem. Already mounted
+volumes are skipped. Fixed external drives are excluded. Failures return a
+nonzero exit status. These helpers use the repository virtual environment.
+
+```bash
+cassn-mount-sd
+```
+
+## `cassn-eject-sd`
+
+Lists every attached removable disk (the built-in SD slot and USB card readers,
+wherever the card is mounted) by volume name, then ejects the card you choose,
+or all of them. Failures are reported per disk and return a nonzero exit status;
+`ALL` still attempts the remaining disks after a failure:
+
+```bash
+cassn-eject-sd
+```
+
 ## `generate_data_collection_summary.py`
 
 Builds a three-sheet Excel report from confirmed Box-uploaded media metadata in

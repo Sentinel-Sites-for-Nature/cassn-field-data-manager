@@ -171,10 +171,10 @@ On macOS, install or refresh a clickable copy in `~/Applications` with:
 
 The resulting **CA-SSN Field Data Manager.app** uses the same repository and
 virtual environment as `cassn-app`; it does not duplicate or freeze the Python
-application. It also installs the `cassn-clear-staging` command. To retain the
-application in the Dock, right-click its icon while it is open and choose
-**Options → Keep in Dock**. Finder/Dock launches write diagnostics to
-`~/Library/Logs/CA-SSN Field Data Manager/launcher.log`.
+application. It also installs the `cassn-clear-staging`, `cassn-mount-sd`, and
+`cassn-eject-sd` commands. To retain the application in the Dock, right-click
+its icon while it is open and choose **Options → Keep in Dock**. Finder/Dock
+launches write diagnostics to `~/Library/Logs/CA-SSN Field Data Manager/launcher.log`.
 
 On launch the app first downloads the complete Box `app_config` snapshot to
 temporary files. It validates `deployment_events.csv` and `deployments.csv`

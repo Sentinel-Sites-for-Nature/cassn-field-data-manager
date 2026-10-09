@@ -118,8 +118,18 @@ def install_macos_app(
 
     app_command = repo_root / "utils" / "cassn-app"
     cleanup_command = repo_root / "utils" / "cassn-clear-staging"
+    eject_command = repo_root / "utils" / "cassn-eject-sd"
+    mount_command = repo_root / "utils" / "cassn-mount-sd"
+    sd_helper = repo_root / "utils" / "sd_cards.py"
     icon_source = repo_root / "assets" / "cassn_icon_macos.png"
-    for required in (app_command, cleanup_command, icon_source):
+    for required in (
+        app_command,
+        cleanup_command,
+        eject_command,
+        mount_command,
+        sd_helper,
+        icon_source,
+    ):
         if not required.is_file():
             raise RuntimeError(f"required launcher asset is missing: {required}")
 
@@ -128,6 +138,8 @@ def install_macos_app(
     if install_links:
         install_command_link(stable_app_command, app_command)
         install_command_link(command_dir / "cassn-clear-staging", cleanup_command)
+        install_command_link(command_dir / "cassn-eject-sd", eject_command)
+        install_command_link(command_dir / "cassn-mount-sd", mount_command)
     else:
         stable_app_command = app_command
 

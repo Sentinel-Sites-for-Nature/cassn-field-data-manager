@@ -23,6 +23,9 @@ def test_installer_builds_dock_ready_bundle_without_copying_python(tmp_path):
     (repo / "assets").mkdir()
     (repo / "utils" / "cassn-app").write_text("#!/bin/sh\nexit 0\n")
     (repo / "utils" / "cassn-clear-staging").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-eject-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-mount-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "sd_cards.py").write_text("# test helper\n")
     (repo / "assets" / "cassn_icon_macos.png").write_bytes(b"test icon")
     app = install_macos_app(
         repo_root=repo,
@@ -56,6 +59,9 @@ def test_installer_atomically_replaces_existing_bundle(tmp_path):
     (repo / "assets").mkdir()
     (repo / "utils" / "cassn-app").write_text("#!/bin/sh\nexit 0\n")
     (repo / "utils" / "cassn-clear-staging").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-eject-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-mount-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "sd_cards.py").write_text("# test helper\n")
     (repo / "assets" / "cassn_icon_macos.png").write_bytes(b"test icon")
     install_dir = tmp_path / "Applications"
     existing = install_dir / f"{APP_NAME}.app"
@@ -81,6 +87,9 @@ def test_installer_builds_a_real_icns_resource(tmp_path):
     (repo / "assets").mkdir()
     (repo / "utils" / "cassn-app").write_text("#!/bin/sh\nexit 0\n")
     (repo / "utils" / "cassn-clear-staging").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-eject-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "cassn-mount-sd").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "utils" / "sd_cards.py").write_text("# test helper\n")
     Image.new("RGBA", (1024, 1024), "green").save(
         repo / "assets" / "cassn_icon_macos.png"
     )
