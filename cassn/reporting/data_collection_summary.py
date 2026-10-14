@@ -15,10 +15,12 @@ field ``is_submitted_to_wi`` remains the fallback.
 from __future__ import annotations
 
 import csv
+import json
 import os
+import shutil
 import tempfile
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -30,6 +32,10 @@ TRUE_VALUES = frozenset({"1", "true", "yes", "y"})
 FALSE_VALUES = frozenset({"", "0", "false", "no", "n"})
 SUMMARY_FILENAME_TEMPLATE = "CA-SSN_data_collection_summary_{year}.xlsx"
 BOX_REPORTS_FOLDER_ID = "413722950229"
+SUMMARY_JSON_SCHEMA_VERSION = 1
+WI_VALIDATION_COMPLETE_STATUS = "wi - validation complete"
+WI_TRACKER_SNAPSHOT_STEM = "WI Processing Tracker"
+WI_TRACKER_SNAPSHOT_SUFFIXES = (".xlsx", ".csv")
 
 
 def default_box_year_root(year: int) -> Path:
@@ -86,12 +92,18 @@ class WISubmissionTracker:
             return False
         return None
 
+    def validated(self, deployment_id: str) -> bool:
+        """Return True only for the tracker's 'WI - Validation Complete' status."""
+        status = self.status_by_deployment.get(deployment_id, "")
+        return status.strip().lower() == WI_VALIDATION_COMPLETE_STATUS
+
 
 @dataclass
 class SiteTotals:
     site_name: str
     images_captured: int = 0
     images_classified_ai: int = 0
+    images_validated_human: int = 0
     bird_seconds_recorded: Decimal = Decimal(0)
     bird_seconds_classified_ai: Decimal = Decimal(0)
     bat_seconds_recorded: Decimal = Decimal(0)
@@ -281,7 +293,8 @@ def build_data_collection_summary(
     summary.quality_counts["metadata_files_scanned"] = len(documents)
     if wi_tracker is None:
         summary.warnings.append(
-            "No WI tracker supplied; image classification uses metadata provenance only."
+            "No WI tracker supplied; image classification uses metadata provenance only, "
+            "and human-validated images cannot be counted."
         )
         summary.quality_counts["wi_tracker_not_supplied"] = 1
     else:
@@ -293,6 +306,7 @@ def build_data_collection_summary(
     wi_tracker_backfills: set[str] = set()
     wi_conflicts: set[str] = set()
     tracker_deployments_seen: set[str] = set()
+    validated_deployments: set[str] = set()
 
     for document in documents:
         for row_number, row in enumerate(document.rows, start=2):
@@ -383,6 +397,10 @@ def build_data_collection_summary(
                 if submitted:
                     site.images_classified_ai += 1
                     summary.totals.images_classified_ai += 1
+                if wi_tracker is not None and wi_tracker.validated(deployment_id):
+                    validated_deployments.add(deployment_id)
+                    site.images_validated_human += 1
+                    summary.totals.images_validated_human += 1
                 continue
 
             device_type = row.get("device_type", "").strip().upper()
@@ -409,6 +427,7 @@ def build_data_collection_summary(
 
     if wi_tracker is not None:
         summary.quality_counts["wi_tracker_deployments_used"] = len(tracker_deployments_seen)
+        summary.quality_counts["wi_tracker_validated_deployments"] = len(validated_deployments)
         summary.quality_counts["wi_tracker_missing_deployments"] = len(wi_missing_deployments)
         summary.quality_counts["wi_tracker_metadata_backfill_deployments"] = len(
             wi_tracker_backfills
@@ -534,6 +553,13 @@ def render_data_collection_summary_workbook(
             "Images in WI-submitted deployments; WI classification follows upload automatically.",
         ),
         (
+            "Images validated by humans",
+            summary.totals.images_validated_human,
+            "images",
+            "Images in deployments whose WI tracker status is 'WI - Validation Complete'; "
+            "validation in progress is not counted.",
+        ),
+        (
             "Bird audio recorded",
             float(summary.totals.bird_minutes_recorded),
             "minutes",
@@ -569,15 +595,16 @@ def render_data_collection_summary_workbook(
     summary_sheet["B5"].number_format = "#,##0"
     summary_sheet["B6"].number_format = "#,##0"
     summary_sheet["B7"].number_format = "#,##0"
-    for row in (8, 9, 10):
+    summary_sheet["B8"].number_format = "#,##0"
+    for row in (9, 10, 11):
         summary_sheet.cell(row, 2).number_format = "#,##0.0"
-    summary_sheet["B11"].number_format = "#,##0.00"
+    summary_sheet["B12"].number_format = "#,##0.00"
     summary_sheet.freeze_panes = "A5"
     summary_sheet.auto_filter.ref = f"A4:D{4 + len(metrics)}"
     for column, width in enumerate((34, 18, 14, 72), start=1):
         summary_sheet.column_dimensions[get_column_letter(column)].width = width
 
-    title(by_site_sheet, f"CA-SSN {summary.year} Data Collection by Site", 7)
+    title(by_site_sheet, f"CA-SSN {summary.year} Data Collection by Site", 8)
     by_site_sheet.append([])
     by_site_sheet.append([])
     by_site_sheet.append(
@@ -585,6 +612,7 @@ def render_data_collection_summary_workbook(
             "Site Name",
             "Images Captured",
             "Images Classified with AI",
+            "Images Validated by Humans",
             "Bird Minutes Recorded",
             "Bird Minutes Classified with AI",
             "Bat Minutes Recorded",
@@ -598,27 +626,28 @@ def render_data_collection_summary_workbook(
                 site.site_name,
                 site.images_captured,
                 site.images_classified_ai,
+                site.images_validated_human,
                 float(site.bird_minutes_recorded),
                 float(site.bird_minutes_classified_ai),
                 float(site.bat_minutes_recorded),
                 float(site.data_gb),
             ]
         )
-    header(by_site_sheet, 4, 7)
+    header(by_site_sheet, 4, 8)
     last_site_row = max(4, 4 + len(summary.by_site))
     if summary.by_site:
-        body(by_site_sheet, 5, last_site_row, 7)
+        body(by_site_sheet, 5, last_site_row, 8)
     for row in range(5, last_site_row + 1):
         by_site_sheet.cell(row, 1).font = Font(name="Aptos", bold=True)
-        for column in (2, 3):
+        for column in (2, 3, 4):
             by_site_sheet.cell(row, column).number_format = "#,##0"
-        for column in (4, 5, 6):
+        for column in (5, 6, 7):
             by_site_sheet.cell(row, column).number_format = "#,##0.0"
-        by_site_sheet.cell(row, 7).number_format = "#,##0.00"
+        by_site_sheet.cell(row, 8).number_format = "#,##0.00"
     by_site_sheet.freeze_panes = "B5"
     if summary.by_site:
-        by_site_sheet.auto_filter.ref = f"A4:G{last_site_row}"
-    widths = (55, 18, 25, 21, 29, 20, 18)
+        by_site_sheet.auto_filter.ref = f"A4:H{last_site_row}"
+    widths = (55, 18, 25, 26, 21, 29, 20, 18)
     for column, width in enumerate(widths, start=1):
         by_site_sheet.column_dimensions[get_column_letter(column)].width = width
 
@@ -650,6 +679,7 @@ def render_data_collection_summary_workbook(
         ("missing_media_key_rows", "Rows missing deployment/file identity", "error"),
         ("wi_tracker_not_supplied", "WI tracker not supplied", "warning"),
         ("wi_tracker_deployments_used", "WI tracker deployments used", "info"),
+        ("wi_tracker_validated_deployments", "WI deployments with validation complete", "info"),
         ("wi_tracker_missing_deployments", "Image deployments absent from WI tracker", "warning"),
         (
             "wi_tracker_metadata_backfill_deployments",
@@ -712,6 +742,183 @@ def render_data_collection_summary_workbook(
         if tmp_path.exists():
             tmp_path.unlink()
     return output
+
+
+def _site_totals_dict(site: SiteTotals) -> dict[str, object]:
+    return {
+        "site_name": site.site_name,
+        "images_captured": site.images_captured,
+        "images_classified_ai": site.images_classified_ai,
+        "images_validated_human": site.images_validated_human,
+        "bird_minutes_recorded": float(site.bird_minutes_recorded),
+        "bird_minutes_classified_ai": float(site.bird_minutes_classified_ai),
+        "bat_minutes_recorded": float(site.bat_minutes_recorded),
+        "data_bytes": site.data_bytes,
+        "data_gb": float(site.data_gb),
+    }
+
+
+def data_collection_summary_dict(
+    summary: DataCollectionSummary,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    """Return the workbook's figures as plain JSON-serializable data."""
+    return {
+        "schema_version": SUMMARY_JSON_SCHEMA_VERSION,
+        "year": summary.year,
+        "generated_at": _generated_at(generated_at).isoformat(),
+        "site_count": summary.site_count,
+        "metadata_files_scanned": summary.metadata_files_scanned,
+        "wi_tracker_source": summary.wi_tracker_source,
+        "totals": _site_totals_dict(summary.totals),
+        "by_site": [
+            _site_totals_dict(summary.by_site[name]) for name in sorted(summary.by_site)
+        ],
+        "quality_counts": {key: int(value) for key, value in sorted(summary.quality_counts.items())},
+        "quality_details": dict(sorted(summary.quality_details.items())),
+        "warnings": list(summary.warnings),
+    }
+
+
+def render_data_collection_summary_json(
+    summary: DataCollectionSummary,
+    output_path: Path,
+    *,
+    generated_at: datetime | None = None,
+) -> Path:
+    """Write the dashboard-friendly JSON sidecar atomically."""
+    if not summary.ok:
+        raise ValueError("Cannot publish a summary with validation errors")
+    output = Path(output_path).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = data_collection_summary_dict(summary, generated_at=generated_at)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp.json", dir=output.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+        os.replace(tmp_path, output)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return output
+
+
+def json_sidecar_path(workbook_path: Path) -> Path:
+    """Return the JSON path written beside ``workbook_path``."""
+    return Path(workbook_path).with_suffix(".json")
+
+
+def default_downloads_dir() -> Path:
+    """Return the folder browsers save the WI tracker export into."""
+    return Path.home() / "Downloads"
+
+
+def find_latest_wi_tracker_download(downloads_dir: Path) -> Path | None:
+    """Return the newest ``WI Processing Tracker*`` export, or None.
+
+    Browsers name repeat downloads ``WI Processing Tracker (1).xlsx``, and a
+    single-tab CSV export is ``WI Processing Tracker - Deployment Tracker.csv``;
+    all of them match.
+    """
+    candidates = [
+        path
+        for suffix in WI_TRACKER_SNAPSHOT_SUFFIXES
+        for path in Path(downloads_dir).expanduser().glob(f"{WI_TRACKER_SNAPSHOT_STEM}*{suffix}")
+        if path.is_file()
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
+
+def wi_tracker_snapshot_path(workbook_path: Path, tracker_source: Path | str) -> Path:
+    """Return where the tracker export used for ``workbook_path`` is archived."""
+    suffix = Path(tracker_source).suffix.lower()
+    return Path(workbook_path).with_name(WI_TRACKER_SNAPSHOT_STEM + suffix)
+
+
+def publish_data_collection_summary(
+    summary: DataCollectionSummary,
+    workbook_path: Path,
+    *,
+    generated_at: datetime | None = None,
+) -> tuple[Path, Path]:
+    """Stage all outputs before publication and roll back failed replacements.
+
+    When the summary used a WI tracker export, that file is archived beside
+    the workbook and the JSON sidecar records the archived copy, so each dated
+    report folder keeps the exact tracker snapshot behind its WI figures. A
+    stale snapshot from an earlier same-day run is removed.
+
+    Several filesystem paths cannot be replaced in one atomic operation. Caught
+    publication failures restore the previous files; if restoration also fails,
+    backups are retained and their location is included in the error.
+    """
+    if not summary.ok:
+        raise ValueError("Cannot publish a summary with validation errors")
+    output = Path(workbook_path).expanduser().resolve()
+    sidecar = json_sidecar_path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".summary-publish-", dir=output.parent))
+    cleanup = True
+    backups: dict[Path, Path | None] = {}
+    published: list[Path] = []
+    try:
+        timestamp = _generated_at(generated_at)
+        staged_workbook = staging / output.name
+        staged_json = staging / sidecar.name
+        # Each entry is (staged file, destination); a None stage removes the destination.
+        plan: list[tuple[Path | None, Path]] = [(staged_workbook, output), (staged_json, sidecar)]
+        snapshot = None
+        if summary.wi_tracker_source:
+            snapshot = wi_tracker_snapshot_path(output, summary.wi_tracker_source)
+            staged_snapshot = staging / ("tracker-" + snapshot.name)
+            shutil.copy2(summary.wi_tracker_source, staged_snapshot)
+            plan.append((staged_snapshot, snapshot))
+            summary = replace(summary, wi_tracker_source=str(snapshot))
+        for suffix in WI_TRACKER_SNAPSHOT_SUFFIXES:
+            stale = output.with_name(WI_TRACKER_SNAPSHOT_STEM + suffix)
+            if stale != snapshot and stale.exists():
+                plan.append((None, stale))
+        render_data_collection_summary_workbook(summary, staged_workbook, generated_at=timestamp)
+        render_data_collection_summary_json(summary, staged_json, generated_at=timestamp)
+        for _staged, path in plan:
+            backup = staging / ("previous-" + path.name)
+            if path.exists():
+                shutil.copy2(path, backup)
+                backups[path] = backup
+            else:
+                backups[path] = None
+        try:
+            for staged, path in plan:
+                if staged is None:
+                    path.unlink()
+                else:
+                    os.replace(staged, path)
+                published.append(path)
+        except BaseException as publication_error:
+            recovery_errors = []
+            for path in reversed(published):
+                try:
+                    backup = backups[path]
+                    if backup is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        os.replace(backup, path)
+                except OSError as recovery_error:
+                    recovery_errors.append(str(recovery_error))
+            if recovery_errors:
+                cleanup = False
+                raise RuntimeError(
+                    f"Report publication failed ({publication_error}); rollback also failed "
+                    f"({'; '.join(recovery_errors)}). Recovery files retained at {staging}"
+                ) from publication_error
+            raise
+    finally:
+        if cleanup:
+            shutil.rmtree(staging, ignore_errors=True)
+    return output, sidecar
 
 
 def dated_output_path(output_root: Path, year: int, generation_date: date) -> Path:

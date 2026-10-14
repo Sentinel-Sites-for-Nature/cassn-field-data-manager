@@ -108,32 +108,36 @@ or open raw images or recordings.
 
 The report contains:
 
-- `Summary` — sites, images, WI-classified images, bird minutes, SoundHub-
-  classified bird minutes, bat minutes, and total media volume;
+- `Summary` — sites, images, WI-classified images, human-validated images,
+  bird minutes, SoundHub-classified bird minutes, bat minutes, and total media
+  volume;
 - `By Site` — the same measures using the full `site_name`; and
 - `Data Quality` — excluded/unconfirmed rows and incomplete source metadata.
 
-Wildlife Insights upload is manual. For an accurate WI total, export
-`CASSN_WI_Validation_Tracker_v2` from Google Sheets as `.xlsx` (or export its
-`Deployment Tracker` tab as `.csv`) and pass it with `--wi-tracker`. Tracker
-statuses beginning `WI -` count as uploaded/classified; `Box` does not. The
-tracker is read-only and no Box metadata is changed.
+Wildlife Insights upload is manual, so WI totals come from the WI Processing
+Tracker Google Sheet. Before each run, download it from Google Sheets (File >
+Download > Microsoft Excel). The utility uses the newest
+`~/Downloads/WI Processing Tracker*.xlsx` (or `.csv`) automatically, prints which
+file and download time it picked, and warns if the download is more than six
+hours old. With `--apply` it moves that download into the dated report folder.
+Pass `--wi-tracker <path>` to use a different export (it is copied, not moved), or
+`--no-wi-tracker` to rely on Box metadata provenance alone. With neither, a
+missing download is an error. Tracker statuses beginning `WI -` count as
+uploaded/classified; `Box` does not. Only `WI - Validation Complete` counts as
+human validated (in-progress validation does not), so human-validated images
+are reported only when a tracker is used. The tracker is read-only and no Box
+metadata is changed.
 
 Preview the 2026 report without writing anything:
 
 ```bash
-.venv/bin/python utils/generate_data_collection_summary.py \
-  --year 2026 \
-  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx
+.venv/bin/python utils/generate_data_collection_summary.py --year 2026
 ```
 
 After reviewing the totals and data-quality messages, write the workbook:
 
 ```bash
-.venv/bin/python utils/generate_data_collection_summary.py \
-  --year 2026 \
-  --wi-tracker /path/to/CASSN_WI_Validation_Tracker_v2.xlsx \
-  --apply
+.venv/bin/python utils/generate_data_collection_summary.py --year 2026 --apply
 ```
 
 The normal output is:
@@ -141,8 +145,22 @@ The normal output is:
 ```text
 Box-Box/CASSN/data_collection_summary_stats/
 └── <date-of-generation>/
-    └── CA-SSN_data_collection_summary_<year>.xlsx
+    ├── CA-SSN_data_collection_summary_<year>.xlsx
+    ├── CA-SSN_data_collection_summary_<year>.json
+    └── WI Processing Tracker.xlsx   (or .csv; absent with --no-wi-tracker)
 ```
+
+The JSON `wi_tracker_source` points at that archived tracker, so the folder
+keeps the exact snapshot behind its WI figures. Rerunning the same day replaces
+the snapshot, or removes it under `--no-wi-tracker`.
+
+The JSON sidecar carries the same totals, per-site figures, and data-quality
+counts as the workbook, in plain numbers for dashboards to read.
+Both files are rendered before publication. If either replacement fails, the
+previous outputs are restored. If restoration also fails, the command reports
+where it retained the recovery files; it prints success only after both outputs
+have been published. Replacement of two separate files is not atomic across
+an abrupt process or system crash.
 
 That Box reports folder is ID `413722950229`. Use `--box-year-root` or
 `--output-root` to test with fixture/local folders. The default is always a dry
