@@ -4,7 +4,7 @@ import csv
 import io
 from pathlib import Path
 
-from cassn.reporting.data_collection_summary import WISubmissionTracker
+from cassn.core.wi_tracker import WISubmissionTracker
 from utils.backfill_wi_provenance import BoxCsv, plan_wi_csv
 
 

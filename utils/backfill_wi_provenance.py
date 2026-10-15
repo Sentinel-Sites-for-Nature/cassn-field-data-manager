@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cassn.box.auth import get_box_client, load_box_config  # noqa: E402
 from cassn.box.client import BoxStorage  # noqa: E402
-from cassn.reporting.data_collection_summary import (  # noqa: E402
+from cassn.core.wi_tracker import (  # noqa: E402
     WISubmissionTracker,
     load_wi_submission_tracker,
 )

@@ -720,7 +720,6 @@ cassn-field-data-manager/
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
 │   ├── clear_box_verified_staging.py # Box-verified local staging cleanup
-│   ├── generate_data_collection_summary.py # Box data summary report generator
 │   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
 ├── assets/                           # Logos / icon used by the UI
