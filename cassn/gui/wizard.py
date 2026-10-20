@@ -2915,6 +2915,47 @@ class FieldDataWizard(QMainWindow):
     # Box upload + post-upload verification
     # ------------------------------------------------------------------
 
+    def _set_box_controls_busy(self, busy: bool):
+        """Keep one deployment selected until its Box operation is complete."""
+        if busy:
+            self._box_operation_token = object()
+        self._box_operation_active = busy
+        for button in (self.open_btn, self.switch_deployment_btn, self.new_btn, self.exit_btn):
+            button.setEnabled(not busy)
+        self.upload_now_btn.setEnabled(not busy and self.box_authenticated)
+        self.box_verify_btn.setEnabled(not busy and self.box_authenticated)
+        self.fixity_btn.setEnabled(not busy)
+        self._update_copy_action()
+
+    def _start_owned_box_worker(self, worker):
+        """Bind ownership before start, including workers between upload phases."""
+        worker._box_owner_folder = self.current_deployment_folder
+        if not hasattr(self, '_box_operation_token'):
+            self._box_operation_token = object()
+        worker._box_operation_token = self._box_operation_token
+        try:
+            worker.start()
+        except Exception:
+            FieldDataWizard._set_box_controls_busy(self, False)
+            self.cancel_upload_btn.hide()
+            raise
+
+    def _box_callback_is_current(self, worker_attribute: str) -> bool:
+        """Reject queued signals from a replaced worker or another deployment.
+
+        Keep direct QObject-bound connections so Qt dispatches these callbacks
+        on the GUI thread. Internal/direct calls have no signal sender.
+        """
+        worker = self.sender()
+        if worker is None:
+            return True
+        return (
+            self._box_operation_active
+            and worker is getattr(self, worker_attribute)
+            and worker._box_operation_token is self._box_operation_token
+            and getattr(worker, '_box_owner_folder', None) == self.current_deployment_folder
+        )
+
     def upload_to_box(self):
         """Prepare new data for WI, then upload the deployment folder to Box."""
         if not self.box_authenticated:
@@ -2946,6 +2987,7 @@ class FieldDataWizard(QMainWindow):
             return
 
         # Hold through callbacks between preparation, upload, and verification.
+        self._box_operation_token = object()
         self._box_operation_active = True
         self._update_copy_action()
         self.upload_group.show()
@@ -2983,10 +3025,12 @@ class FieldDataWizard(QMainWindow):
         )
         self.wi_split_thread.progress.connect(self._on_wi_split_progress)
         self.wi_split_thread.completed.connect(self._on_wi_split_completed)
-        self.wi_split_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.wi_split_thread)
 
     def _on_wi_split_progress(self, current: int, total: int, path: str):
         """Report the internal preparation phase without a progress bar."""
+        if not self._box_callback_is_current('wi_split_thread'):
+            return
         if total <= 0:
             self.upload_status_label.setText(
                 path or "Preparing local files for Box upload…"
@@ -3005,6 +3049,8 @@ class FieldDataWizard(QMainWindow):
 
     def _on_wi_split_completed(self, success: bool, cancelled: bool, message: str):
         """Persist preparation state and gate the Box upload on its result."""
+        if not self._box_callback_is_current('wi_split_thread'):
+            return
         self.upload_progress_bar.setRange(0, 100)
         if not self.save_session():
             success = False
@@ -3085,7 +3131,7 @@ class FieldDataWizard(QMainWindow):
         )
         self.upload_thread.progress.connect(self.on_upload_progress)
         self.upload_thread.finished.connect(self.on_upload_finished)
-        self.upload_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.upload_thread)
 
     def cancel_upload(self):
         """Cooperatively cancel WI preparation or the running Box upload."""
@@ -3113,12 +3159,16 @@ class FieldDataWizard(QMainWindow):
 
     def on_upload_progress(self, current, total, filename):
         """Update upload progress"""
+        if not self._box_callback_is_current('upload_thread'):
+            return
         percent = int((current / total) * 100)
         self.upload_progress_bar.setValue(percent)
         self.upload_status_label.setText(f"Uploading: {filename} ({current}/{total})")
 
     def on_upload_finished(self, success, message):
         """Handle upload completion"""
+        if not self._box_callback_is_current('upload_thread'):
+            return
         # A successful upload still owns this deployment through provenance
         # and verification. Do not let their callbacks follow a new session.
         self.cancel_upload_btn.hide()
@@ -3182,7 +3232,7 @@ class FieldDataWizard(QMainWindow):
                 updated_paths, deploy_folder_id, box_config=self.box_config
             )
             self.provenance_thread.finished.connect(self._on_provenance_upload_finished)
-            self.provenance_thread.start()
+            FieldDataWizard._start_owned_box_worker(self, self.provenance_thread)
         elif updated_paths:
             self.log("Warning: deploy_folder_id not available — provenance CSVs updated locally only")
             self._start_post_upload_verification()
@@ -3191,6 +3241,8 @@ class FieldDataWizard(QMainWindow):
 
     def _on_provenance_upload_finished(self, success, message):
         """Handle completion of provenance CSV re-upload to Box."""
+        if not self._box_callback_is_current('provenance_thread'):
+            return
         if success:
             self.log(f"✓ {message}")
         else:
@@ -3242,10 +3294,12 @@ class FieldDataWizard(QMainWindow):
             valid_site_names=self._valid_site_names(),
         )
         self.box_verify_thread.finished.connect(self._on_auto_box_verify_finished)
-        self.box_verify_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.box_verify_thread)
 
     def _on_auto_box_verify_finished(self, ok: bool, summary: str, issues: list):
         """Continue automatic post-upload verification after Box file-list check."""
+        if not self._box_callback_is_current('box_verify_thread'):
+            return
         self._post_upload_box_summary = summary
         self._post_upload_box_issues = issues or []
         self.log(summary)
@@ -3271,9 +3325,11 @@ class FieldDataWizard(QMainWindow):
         )
         self.fixity_thread.progress.connect(self._on_auto_fixity_progress)
         self.fixity_thread.finished.connect(self._on_auto_fixity_finished)
-        self.fixity_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.fixity_thread)
 
     def _on_auto_fixity_progress(self, checked: int, total: int, filename: str):
+        if not self._box_callback_is_current('fixity_thread'):
+            return
         if total <= 0:
             if filename:
                 self.hash_status_label.setText(filename)
@@ -3296,6 +3352,8 @@ class FieldDataWizard(QMainWindow):
             self.log(f"  Hash verify: {checked}/{total} — {filename}")
 
     def _on_auto_fixity_finished(self, ok: bool, summary: str, issues: list):
+        if not self._box_callback_is_current('fixity_thread'):
+            return
         self.fixity_check_run = True
         self.log(summary)
         self.save_session()
@@ -3483,6 +3541,9 @@ class FieldDataWizard(QMainWindow):
         """Compare raw_data/ SHA-1 values against Box-reported SHA-1 values."""
         if self._box_operation_active:
             return
+        if self.card_ingest_threads:
+            QMessageBox.information(self, "Card Ingest Running", "Wait for card copies before verifying this deployment.")
+            return
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Session", "Load a session first.")
             return
@@ -3493,7 +3554,7 @@ class FieldDataWizard(QMainWindow):
             QMessageBox.information(self, "In Progress", "Fixity check is already running.")
             return
 
-        self.fixity_btn.setEnabled(False)
+        FieldDataWizard._set_box_controls_busy(self, True)
         self.fixity_btn.setText("Checking…")
         self.hash_group.setTitle("Box ↔ Local Hash Verification Progress")
         self.hash_group.show()
@@ -3511,9 +3572,11 @@ class FieldDataWizard(QMainWindow):
         )
         self.fixity_thread.progress.connect(self._on_fixity_progress)
         self.fixity_thread.finished.connect(self._on_fixity_finished)
-        self.fixity_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.fixity_thread)
 
     def _on_fixity_progress(self, checked: int, total: int, filename: str):
+        if not self._box_callback_is_current('fixity_thread'):
+            return
         if total <= 0:
             if filename:
                 self.hash_status_label.setText(filename)
@@ -3535,7 +3598,10 @@ class FieldDataWizard(QMainWindow):
             self.log(f"  Hash verify: {checked}/{total} — {filename}")
 
     def _on_fixity_finished(self, ok: bool, summary: str, issues: list):
-        self.fixity_btn.setEnabled(True)
+        if not self._box_callback_is_current('fixity_thread'):
+            return
+        deployment_folder = self.current_deployment_folder
+        FieldDataWizard._set_box_controls_busy(self, False)
         self.fixity_btn.setText("Verify Box ↔ Local Hashes")
         self.fixity_check_run = True
         self.log(summary)
@@ -3548,7 +3614,7 @@ class FieldDataWizard(QMainWindow):
 
         # Aggregate fixity_check entry covering the whole run
         severity = "pass" if ok else "error"
-        append_qc_report(self.current_deployment_folder, "file_hash_verification_run", "", severity, summary)
+        append_qc_report(deployment_folder, "file_hash_verification_run", "", severity, summary)
 
         if ok:
             QMessageBox.information(self, "File Hashes Verified", summary)
@@ -3584,7 +3650,7 @@ class FieldDataWizard(QMainWindow):
 
         for issue in issues:
             append_qc_report(
-                self.current_deployment_folder,
+                deployment_folder,
                 "file_hash_" + issue["type"],
                 "",
                 "error",
@@ -3595,6 +3661,9 @@ class FieldDataWizard(QMainWindow):
         """Compare Box deployment folder against local inventory."""
         if self._box_operation_active:
             return
+        if self.card_ingest_threads:
+            QMessageBox.information(self, "Card Ingest Running", "Wait for card copies before verifying this deployment.")
+            return
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Session", "Load a session first.")
             return
@@ -3604,7 +3673,7 @@ class FieldDataWizard(QMainWindow):
         if not self.box_authenticated:
             QMessageBox.information(self, "Not Authenticated", "Authenticate with Box first.")
             return
-        self.box_verify_btn.setEnabled(False)
+        FieldDataWizard._set_box_controls_busy(self, True)
         self.box_verify_btn.setText("Verifying…")
         self.log("Starting Box upload verification…")
         self.box_verify_thread = BoxVerifyThread(
@@ -3615,10 +3684,12 @@ class FieldDataWizard(QMainWindow):
             valid_site_names=self._valid_site_names(),
         )
         self.box_verify_thread.finished.connect(self._on_box_verify_finished)
-        self.box_verify_thread.start()
+        FieldDataWizard._start_owned_box_worker(self, self.box_verify_thread)
 
     def _on_box_verify_finished(self, ok: bool, summary: str, issues: list):
-        self.box_verify_btn.setEnabled(self.box_authenticated)
+        if not self._box_callback_is_current('box_verify_thread'):
+            return
+        FieldDataWizard._set_box_controls_busy(self, False)
         self.box_verify_btn.setText("Verify Box Upload")
         self.log(summary)
 

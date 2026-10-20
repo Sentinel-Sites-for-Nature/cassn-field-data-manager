@@ -340,6 +340,10 @@ older unsplit sessions without upload history.
 Box preparation and upload wait for all card jobs to finish. Card ingestion is
 disabled throughout the Box upload cycle, including provenance updates and
 post-upload verification, so the local inventory and folder layout stay stable.
+Manual Box and hash checks also wait for card jobs and prevent switching,
+resetting, or closing the deployment until their result is handled. Background
+callbacks are checked against their worker, operation, and deployment; stale
+callbacks cannot update a different deployment's results.
 
 ## Wildlife SoundHub Preparation
 
