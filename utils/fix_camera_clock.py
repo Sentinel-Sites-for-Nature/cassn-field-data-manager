@@ -70,8 +70,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cassn.config import LOCAL_DATA_DIR
 from cassn.core.hashing import sha256_sha1
-from cassn.core.image_metadata import extract_exif_data, parse_camera_recorded_datetime
+from cassn.core.image_metadata import camera_timestamp_fields, extract_exif_data
 from cassn.core.inventory import refresh_legacy_device_manifest
+from cassn.core.quality_control import append_qc_report, check_camera_timezones
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.lookups import LookupTables
 
@@ -132,9 +133,9 @@ def reinventory(entries: list, work_dir: Path) -> int:
         e["file_hash_sha1"] = sha1
         e["file_size_bytes"] = fp.stat().st_size
         exif, _ = extract_exif_data(fp)
-        dt = parse_camera_recorded_datetime(exif)
-        if dt:
-            e["recorded_datetime"] = dt
+        # Explicit reprocessing replaces the full resolution, including clearing
+        # stale UTC/local values if the source clock can no longer be resolved.
+        e.update(camera_timestamp_fields(exif))
         updated += 1
         if i % 5000 == 0:
             print(f"    …re-inventoried {i}/{len(entries)}")
@@ -249,6 +250,11 @@ def main() -> int:
 
     # 5. persist inventory + regenerate CSVs / event record / lookup snapshot
     session_path.write_text(json.dumps(session, indent=2))
+    for dev in args.devices:
+        entries = [e for e in inv if e.get("device_label") == dev and e.get("file_type") == "image"]
+        if entries:
+            severity, message = check_camera_timezones(entries)
+            append_qc_report(dep, "camera_timezone_consistency", dev, severity, message)
     print(f"\nSaved session.json ({total_updated} entries updated).")
     lookups = LookupTables.load(LOCAL_DATA_DIR)
     write_metadata_outputs(dep, session["metadata"], inv, session["devices"], lookups, log=print)

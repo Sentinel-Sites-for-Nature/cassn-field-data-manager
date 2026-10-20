@@ -789,8 +789,11 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
         assert all(
             panel["complete"] for panel in window.card_ingest_panels.values()
         )
+        # These synthetic images deliberately have no EXIF. Copying still
+        # completes, but the new camera timezone check must not call them valid.
         assert all(
-            "QC: All checks passed." in panel["messages"].toPlainText()
+            "QC error: Camera timezone QC" in panel["messages"].toPlainText()
+            and "QC: All checks passed." not in panel["messages"].toPlainText()
             for panel in window.card_ingest_panels.values()
         )
 

@@ -118,7 +118,6 @@ from cassn.core.image_metadata import (
     EXIF_AVAILABLE,
     extract_exif_data,
     extract_reconyx_sequence,
-    parse_camera_recorded_datetime,
 )
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
 from cassn.core.file_transfer import (
@@ -148,6 +147,7 @@ from cassn.core.quality_control import (
     append_qc_report,
     build_box_verification_record,
     check_camera_serial,
+    check_camera_timezones,
     check_file_size_floor,
     check_recording_stop_reasons,
     check_required_lookups,
@@ -1168,6 +1168,10 @@ class FieldDataWizard(QMainWindow):
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
             self.box_verify_btn,
             self.fixity_btn,
+            self._menu_action(
+                "Check Camera Timezones", self.run_camera_timezone_check,
+                "Compare original camera EXIF offsets with local Pacific time. Does not change images.",
+            ),
             None,
             self.soundhub_verify_btn,
         ]))
@@ -1872,8 +1876,14 @@ class FieldDataWizard(QMainWindow):
             return
 
         if panel:
-            panel["status"].setText("Complete — safe to eject card")
-            panel["status"].setStyleSheet("color: green; font-weight: bold;")
+            timezone_error = check_camera_timezones(device_entries)[0] == "error"
+            panel["status"].setText(
+                "Copy complete — timezone QC error; safe to eject card"
+                if timezone_error else "Complete — safe to eject card"
+            )
+            panel["status"].setStyleSheet(
+                f"color: {'#cc0000' if timezone_error else 'green'}; font-weight: bold;"
+            )
             panel["progress"].setRange(0, max(total_for_device, 1))
             panel["progress"].setValue(total_for_device)
             panel["detail"].setText(f"{total_for_device:,} files inventoried")
@@ -2332,10 +2342,9 @@ class FieldDataWizard(QMainWindow):
                     small_file_names.append(new_filename)
                     small_file_thresholds[floor_label] += 1
 
-                # Recorded datetime: authoritative time from device
-                if file_type == "image":
-                    recorded_datetime = parse_camera_recorded_datetime(exif_data)
-                elif file_type == "audio":
+                # Image time and its evidence are resolved together by the
+                # inventory builder. Audio retains its own timestamp sources.
+                if file_type == "audio":
                     recorded_datetime = parse_audiomoth_recorded_datetime(filename)
                 else:
                     recorded_datetime = ""
@@ -3354,8 +3363,42 @@ class FieldDataWizard(QMainWindow):
             else:
                 append_qc_report(self.current_deployment_folder, check_name, device_label, "pass", "OK")
 
+        if any(entry.get("file_type") == "image" for entry in device_entries):
+            severity, message = check_camera_timezones(device_entries)
+            append_qc_report(
+                self.current_deployment_folder, "camera_timezone_consistency",
+                device_label, severity, message,
+            )
+            if severity != "pass":
+                any_warnings = True
+                self._append_card_message(device_label, f"QC {severity}: {message}", alert=True)
+                self.log(f"  QC [{device_label}] {severity}: {message}")
+
         if not any_warnings:
             self._append_card_message(device_label, "QC: All checks passed.")
+
+    def run_camera_timezone_check(self):
+        """Recheck retained EXIF evidence without rewriting any image."""
+        if not self.current_deployment_folder or not self.file_inventory:
+            QMessageBox.information(self, "No Inventory", "Load a session with copied images first.")
+            return
+        if self.card_ingest_threads:
+            QMessageBox.information(self, "Copy In Progress", "Wait for card copying to finish before rerunning QC.")
+            return
+        summaries = []
+        for label in sorted({
+            entry["device_label"] for entry in self.file_inventory
+            if entry.get("file_type") == "image"
+        }):
+            entries = [entry for entry in self.file_inventory if entry.get("device_label") == label]
+            severity, message = check_camera_timezones(entries)
+            append_qc_report(
+                self.current_deployment_folder, "camera_timezone_consistency", label, severity, message,
+            )
+            self._append_card_message(label, f"QC {severity}: {message}", alert=severity != "pass")
+            self.log(f"QC [{label}] {severity}: {message}")
+            summaries.append(f"{label}: {severity}\n{message}")
+        QMessageBox.information(self, "Camera Timezone QC", "\n\n".join(summaries) or "No camera images in this session.")
 
     # -- verification (manual) ---------------------------------------------
 
@@ -3987,6 +4030,15 @@ class FieldDataWizard(QMainWindow):
             "label": "No QC errors recorded",
             "ok": qc_ok,
             "note": f"{qc_error_count} error(s) in qc_report.json" if not qc_ok else "",
+        })
+
+        # Re-evaluate retained evidence, including after session reload, rather
+        # than relying on a card-complete report having been written already.
+        timezone_severity, timezone_summary = check_camera_timezones(self.file_inventory)
+        items.append({
+            "label": "Camera timezone QC has no errors",
+            "ok": timezone_severity != "error",
+            "note": timezone_summary if timezone_severity != "pass" else "",
         })
 
         return items

@@ -105,6 +105,12 @@ QC_SIDECAR_FILES = (
 # Metadata CSV field lists (column order is significant — preserved verbatim)
 # ---------------------------------------------------------------------------
 
+IMAGE_TIMESTAMP_FIELDS = [
+    "recorded_datetime_utc", "camera_datetime_original", "camera_datetime_source",
+    "camera_offset_time_original", "camera_effective_offset",
+    "camera_timestamp_source", "camera_timestamp_status", "camera_timestamp_severity",
+]
+
 IMAGE_FIELDS = [
     "filename", "original_filename", "deployment_event_id", "deployment_id",
     "organization", "site_name", "site_short_name", "site_code",
@@ -125,6 +131,7 @@ IMAGE_FIELDS = [
     "is_uploaded_to_osdf", "osdf_uploader", "osdf_upload_datetime",
     "is_submitted_to_wi", "wi_submitter", "wi_submission_datetime",
     "notes",
+    *IMAGE_TIMESTAMP_FIELDS,
 ]
 
 AUDIO_FIELDS = [
@@ -242,6 +249,14 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "Recorded timestamps should fall within the deployment window. Flags files dated "
         "before deployment start, after the collection date, and clock-reset clusters "
         "(many files at the same second)."
+    ),
+    "camera_timezone_consistency": (
+        "Camera clocks are expected to show local Pacific civil time. Original EXIF "
+        "clock readings resolve in America/Los_Angeles for new processing. Reported "
+        "offset discrepancies are warnings after resolution. Invalid, nonexistent, "
+        "or ambiguous capture times remain unresolved errors. Historical offset "
+        "errors remain errors until separately corrected. Clock accuracy is not verified. "
+        "This check does not rewrite images or stored timestamps."
     ),
     "coordinate_validation": (
         "Coordinates and elevation (from plots.csv) should be non-null and fall within the "

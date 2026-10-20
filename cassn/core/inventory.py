@@ -37,6 +37,7 @@ from pathlib import Path, PurePosixPath
 
 from cassn.core.audio_metadata import hz_to_khz
 from cassn.core.classification import classify_file
+from cassn.core.image_metadata import camera_timestamp_fields
 from cassn.core.quality_control import append_qc_report, qc_path_for
 from cassn.config import PACIFIC_TZ
 from cassn.lookups import normalize_deployment_event_metadata
@@ -397,6 +398,8 @@ def build_inventory_record(
 
     Sequence fields are recorded only when the source had Reconyx sequence data
     (``seq_pos is not None``); otherwise they are blank, matching the original.
+    New images resolve their original EXIF wall clock here; the supplied
+    ``recorded_datetime`` is used only for audio/config records.
     """
     return {
         'original_filename': original_filename,
@@ -421,6 +424,8 @@ def build_inventory_record(
         'file_hash_sha256': file_hash_sha256,
         'file_hash_sha1': file_hash_sha1,
         'recorded_datetime': recorded_datetime,
+        # Resolve only newly built image rows, never loaded session inventories.
+        **(camera_timestamp_fields(exif_data) if file_type == 'image' else {}),
         'latitude': plot_metadata.get('plot_latitude') or '',
         'longitude': plot_metadata.get('plot_longitude') or '',
         'elevation_m': plot_metadata.get('elevation_m') or '',

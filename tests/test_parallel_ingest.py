@@ -1,9 +1,12 @@
 """Concurrency safety for background SD-card ingestion."""
 
+import hashlib
 import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from cassn.core.quality_control import append_qc_report
 from cassn.gui import card_ingest_thread
@@ -508,3 +511,48 @@ def test_concurrent_cards_deduplicate_identical_media_across_devices(
     assert sorted(result for result, _rows in outputs) == [(0, 1, 0), (1, 0, 0)]
     assert sum(len(rows) for _result, rows in outputs) == 1
     assert len(list((event / "raw_data").rglob("*.jpg"))) == 1
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_camera_time_resolution_preserves_image_bytes_and_resume(tmp_path, monkeypatch, legacy):
+    from cassn.gui import wizard
+    from cassn.config import IMAGE_TIMESTAMP_FIELDS
+
+    source = tmp_path / 'card'
+    source.mkdir()
+    original = source / 'RCNX0001.JPG'
+    contents = b'original image bytes with unchanged EXIF'
+    original.write_bytes(contents)
+    monkeypatch.setattr(wizard, 'EXIF_AVAILABLE', True)
+    monkeypatch.setattr(wizard, 'extract_exif_data', lambda _: (
+        {'DateTimeOriginal': '2026:07:15 12:00:00', 'OffsetTimeOriginal': '-08:00'}, {}))
+    context = _ProcessContext(tmp_path / 'event', IngestHashRegistry())
+
+    def ingest():
+        destination = context.current_deployment_folder / 'raw_data/p1_ML'
+        destination.mkdir(parents=True, exist_ok=True)
+        return FieldDataWizard.process_sd_card_files(
+            context, source, destination, 1, 'Plot 1', 'ML', 'p1_ML', _DummyReconyx())
+
+    assert ingest() == (1, 0, 0)
+    row = context.file_inventory[0]
+    assert row['recorded_datetime'] == '2026-07-15T12:00:00-07:00'
+    assert row['recorded_datetime_utc'] == '2026-07-15T19:00:00Z'
+    assert row['camera_timestamp_status'] == 'offset_mismatch_corrected'
+    assert row['file_hash_sha256'] == hashlib.sha256(contents).hexdigest()
+    staged = context.current_deployment_folder / row['storage_relpath']
+    assert original.read_bytes() == staged.read_bytes() == contents
+    if legacy:
+        for key in IMAGE_TIMESTAMP_FIELDS:
+            row.pop(key, None)
+        row['recorded_datetime'] = '2026-07-15T13:00:00-07:00'
+    # Simulate a saved/reloaded session, including pre-fix rows.
+    context.file_inventory = json.loads(json.dumps(context.file_inventory))
+    before = json.dumps(context.file_inventory, sort_keys=True)
+    assert ingest() == (0, 0, 0)
+    assert json.dumps(context.file_inventory, sort_keys=True) == before
+    # Restoring a missing copy also preserves its saved metadata.
+    staged.unlink()
+    ingest()
+    assert json.dumps(context.file_inventory, sort_keys=True) == before
+    assert original.read_bytes() == staged.read_bytes() == contents

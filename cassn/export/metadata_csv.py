@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, LOCAL_DATA_DIR, VERSION
+from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, IMAGE_TIMESTAMP_FIELDS, LOCAL_DATA_DIR, VERSION
 from cassn.core.audio_metadata import normalize_gain
 from cassn.core.aru_status import recording_aru_status
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
@@ -168,6 +168,8 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
         if file_type == 'image':
             cam = placement_row
             row = {**base,
+                # Project stored results; exporting never recalculates legacy rows.
+                **{field: entry.get(field, '') for field in IMAGE_TIMESTAMP_FIELDS},
                 'start_date':    f"{placement_start} 00:00:00",
                 'end_date':      f"{placement_end} 23:59:59",
                 'recorded_by':   observer,

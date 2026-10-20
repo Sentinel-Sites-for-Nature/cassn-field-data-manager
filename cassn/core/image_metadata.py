@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from cassn.config import PACIFIC_TZ
 
@@ -80,28 +82,116 @@ def extract_reconyx_sequence(raw_exif: dict):
     return None, None, None
 
 
-def parse_camera_recorded_datetime(exif_data: dict) -> str:
-    """Return ISO 8601 datetime with UTC offset from Reconyx EXIF.
+CAMERA_TIMESTAMP_SOURCE = "pacific_local_v1"
 
-    e.g. ``'2025-12-04T15:48:05-08:00'``. When the camera recorded no
-    ``OffsetTimeOriginal``, the timestamp is assumed to be local Pacific
-    time (all CA-SSN cameras run on Pacific) rather than dropped. Empty
-    string on failure.
+
+@dataclass(frozen=True)
+class CameraTimezoneCheck:
+    severity: str
+    reported_offset: str
+    expected_offsets: tuple[str, ...]
+    message: str
+
+
+@dataclass(frozen=True)
+class CameraTimestamp:
+    recorded_datetime: str
+    recorded_datetime_utc: str
+    effective_offset: str
+    status: str
+    check: CameraTimezoneCheck
+
+
+def resolve_camera_timestamp(
+    exif_data: dict, expected_timezone: str = PACIFIC_TZ.key,
+) -> CameraTimestamp:
+    """Resolve the original wall clock under the local-civil-time protocol.
+
+    The reported offset is QC evidence only, including during the repeated
+    autumn hour. Round trips reject nonexistent times; distinct UTC candidates
+    detect ambiguity. No converted timestamp is ever used as input.
     """
+    clock = exif_data.get("DateTimeOriginal") or exif_data.get("DateTime")
+    reported = str(exif_data.get("OffsetTimeOriginal") or "").strip()
+    expected = ()
+
+    def unresolved(status, message):
+        return CameraTimestamp("", "", "", status,
+                               CameraTimezoneCheck("error", reported, expected, message))
+
     try:
-        dt_str = exif_data.get("DateTimeOriginal") or exif_data.get("DateTime")
-        offset_str = exif_data.get("OffsetTimeOriginal", "")
-        if dt_str:
-            if offset_str:
-                dt = datetime.strptime(f"{dt_str}{offset_str}", "%Y:%m:%d %H:%M:%S%z")
-            else:
-                # Camera didn't stamp a zone — assume local Pacific time,
-                # mirroring the audio filename path in audio_metadata.py.
-                dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S").replace(tzinfo=PACIFIC_TZ)
-            return dt.astimezone(PACIFIC_TZ).isoformat()
-    except Exception:
-        pass
-    return ""
+        wall = datetime.strptime(str(clock), "%Y:%m:%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return unresolved("invalid_capture_time", "Missing or invalid camera capture time")
+    zone = ZoneInfo(expected_timezone)
+    candidates = {}
+    for fold in (0, 1):
+        local = wall.replace(tzinfo=zone, fold=fold)
+        try:
+            utc = local.astimezone(timezone.utc)
+            round_trip = utc.astimezone(zone).replace(tzinfo=None)
+        except (OverflowError, ValueError):
+            return unresolved("invalid_capture_time", "Camera capture time is outside the supported UTC range")
+        if round_trip == wall:
+            candidates[utc] = local
+    expected = tuple(sorted({local.isoformat()[19:] for local in candidates.values()}))
+    if not candidates:
+        return unresolved("nonexistent_capture_time",
+                          f"Camera capture time does not exist in {expected_timezone} during the daylight-saving transition")
+    if len(candidates) > 1:
+        return unresolved("ambiguous_capture_time",
+                          "Capture falls in the repeated daylight-saving hour; actual clock occurrence needs verification")
+
+    utc, local = next(iter(candidates.items()))
+    effective = expected[0]
+    severity, status = "pass", "offset_matches"
+    message = "Camera timezone offset matches local civil time (clock accuracy not verified)"
+    if not reported:
+        severity, status = "warning", "offset_missing"
+        message = "Camera timezone offset missing; resolved using local civil time"
+    elif not re.fullmatch(r"[+-](?:[01]\d|2[0-3]):[0-5]\d", reported):
+        severity, status = "warning", "offset_invalid"
+        message = "Invalid camera timezone offset; resolved using local civil time"
+    elif reported != effective and {reported, effective} != {"-00:00", "+00:00"}:
+        severity, status = "warning", "offset_mismatch_corrected"
+        message = f"Camera timezone offset mismatch: reported {reported}; expected {effective} for {expected_timezone}; resolved using local civil time"
+    if not exif_data.get("DateTimeOriginal"):
+        severity = "warning"
+        status += ";datetime_fallback"
+        message += "; DateTime fallback used because DateTimeOriginal is absent"
+    return CameraTimestamp(
+        local.isoformat(), utc.isoformat().replace("+00:00", "Z"), effective, status,
+        CameraTimezoneCheck(severity, reported, expected, message),
+    )
+
+
+def camera_timestamp_fields(exif_data: dict) -> dict:
+    """Evidence and resolution for a newly processed image inventory row."""
+    result = resolve_camera_timestamp(exif_data)
+    source = next((tag for tag in ("DateTimeOriginal", "DateTime") if exif_data.get(tag)), "")
+    return {
+        "recorded_datetime": result.recorded_datetime,
+        "recorded_datetime_utc": result.recorded_datetime_utc,
+        "camera_datetime_original": exif_data.get(source, ""),
+        "camera_datetime_source": source,
+        "camera_offset_time_original": exif_data.get("OffsetTimeOriginal") or "",
+        "camera_effective_offset": result.effective_offset,
+        "camera_timestamp_source": CAMERA_TIMESTAMP_SOURCE,
+        "camera_timestamp_status": result.status,
+        "camera_timestamp_severity": result.check.severity,
+    }
+
+
+def validate_camera_timezone(
+    exif_data: dict, expected_timezone: str = PACIFIC_TZ.key,
+) -> CameraTimezoneCheck:
+    """Use the same wall-clock resolution for validation and new ingestion."""
+    return resolve_camera_timestamp(exif_data, expected_timezone).check
+
+
+def parse_camera_recorded_datetime(exif_data: dict) -> str:
+    """Return resolved local ISO time, or empty when the instant is unresolved."""
+    return resolve_camera_timestamp(exif_data).recorded_datetime
 
 
 def _reconyx_sequence_from_exiftool_tags(tags: dict):

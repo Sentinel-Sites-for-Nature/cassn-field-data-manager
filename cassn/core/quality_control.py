@@ -39,10 +39,48 @@ from cassn.config import (
 )
 from cassn.core.classification import file_size_floor_for, format_size_floor
 from cassn.core.hashing import sha256
+from cassn.core.image_metadata import CAMERA_TIMESTAMP_SOURCE, resolve_camera_timestamp
 from cassn.lookups import BOX_MANAGED_FILENAMES
 
 
 _QC_REPORT_LOCK = threading.RLock()
+
+
+def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
+    """One device-level result, retaining errors even alongside warnings.
+
+    Historical inventories without original EXIF evidence are unverified, not
+    inferred from recorded_datetime. Audio rows are outside this camera check.
+    """
+    counts = Counter()
+    groups = {}
+    images = [entry for entry in entries if entry.get("file_type") == "image"]
+    for entry in images:
+        if "camera_datetime_original" not in entry:
+            severity, message = "warning", "Original camera EXIF not retained in this inventory; timezone cannot be verified"
+        else:
+            result = resolve_camera_timestamp({
+                entry.get("camera_datetime_source") or "DateTimeOriginal": entry.get("camera_datetime_original"),
+                "OffsetTimeOriginal": entry.get("camera_offset_time_original"),
+            })
+            severity, message = result.check.severity, result.check.message
+            if (entry.get("camera_timestamp_source") != CAMERA_TIMESTAMP_SOURCE
+                    and result.status.split(";")[0] in {"offset_mismatch_corrected", "offset_invalid"}):
+                # A QC rerun must not imply that legacy stored times were fixed.
+                severity = "error"
+                message = message.replace("; resolved using local civil time", "")
+                message += "; historical timestamp has not been recalculated"
+        counts[severity] += 1
+        if severity != "pass":
+            group = groups.setdefault((severity, message), {"count": 0, "examples": []})
+            group["count"] += 1
+            if len(group["examples"]) < 3:
+                group["examples"].append(entry.get("new_filename") or entry.get("original_filename") or "unnamed image")
+    severity = "error" if counts["error"] else "warning" if counts["warning"] else "pass"
+    summary = f"Camera timezone QC: {len(images)} image(s); {counts['pass']} passed, {counts['error']} errors, {counts['warning']} warnings."
+    for (_, message), group in groups.items():
+        summary += f"\n{group['count']} image(s): {message}. Examples: {', '.join(group['examples'])}"
+    return severity, summary
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +453,8 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
             try:
                 dt = datetime.fromisoformat(str(dt_str))
                 if dt.tzinfo is not None:
+                    # Burst intervals measure elapsed time across DST changes.
+                    dt = dt.astimezone(timezone.utc)
                     dt = dt.replace(tzinfo=None)
                 timed.append((pos, dt, e.get('new_filename', '')))
             except Exception:
