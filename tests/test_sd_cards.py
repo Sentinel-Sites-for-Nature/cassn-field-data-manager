@@ -6,9 +6,9 @@ from utils import sd_cards
 
 def test_discovery_excludes_fixed_and_virtual_disks_and_finds_all_volumes(monkeypatch):
     devices = {
-        'disk1': {'Whole': True, 'RemovableMedia': False, 'VirtualOrPhysical': 'Physical'},
-        'disk2': {'Whole': True, 'RemovableMedia': True, 'VirtualOrPhysical': 'Physical'},
-        'disk3': {'Whole': True, 'RemovableMedia': True, 'VirtualOrPhysical': 'Virtual'},
+        'disk1': {'WholeDisk': True, 'RemovableMedia': False, 'VirtualOrPhysical': 'Physical'},
+        'disk2': {'WholeDisk': True, 'RemovableMedia': True, 'VirtualOrPhysical': 'Physical'},
+        'disk3': {'WholeDisk': True, 'RemovableMedia': True, 'VirtualOrPhysical': 'Virtual'},
         'disk2s1': {'DeviceIdentifier': 'disk2s1', 'Content': 'EFI'},
         'disk2s2': {'DeviceIdentifier': 'disk2s2', 'FilesystemType': 'exfat'},
         'disk2s3': {'DeviceIdentifier': 'disk2s3', 'FilesystemType': 'msdos'},
@@ -34,7 +34,7 @@ def test_mount_uses_actual_partition_and_skips_mounted_volume(monkeypatch, tmp_p
         {'DeviceIdentifier': 'disk2s2', 'FilesystemType': 'msdos'},
         {'DeviceIdentifier': 'disk2s3', 'MountPoint': '/Volumes/Already'},
     ])]) == 0
-    assert calls == [[sd_cards.DISKUTIL, 'mount', '-mountPoint', str(tmp_path / 'Desktop/Card_disk2s2'), 'disk2s2']]
+    assert calls == [['/usr/bin/sudo', '/sbin/mount_msdos', '/dev/disk2s2', str(tmp_path / 'Desktop/Card_disk2s2')]]
 
 
 def test_mount_failure_returns_error_and_removes_only_new_mountpoint(monkeypatch, tmp_path):
@@ -64,3 +64,17 @@ def test_eject_single_failure_returns_error(monkeypatch):
     monkeypatch.setattr('builtins.input', lambda _: '1')
     monkeypatch.setattr(sd_cards.subprocess, 'run', lambda _: SimpleNamespace(returncode=1))
     assert sd_cards.eject_cards([('disk2', [])]) == 1
+
+
+def test_exfat_uses_original_privileged_mount_helper(monkeypatch, tmp_path):
+    monkeypatch.setattr(sd_cards.Path, 'home', lambda: tmp_path)
+    calls = []
+    def run(command):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(sd_cards.subprocess, 'run', run)
+    assert sd_cards.mount_cards([('disk5', [
+        {'DeviceIdentifier': 'disk5s1', 'FilesystemType': 'exfat'}
+    ])]) == 0
+    assert calls == [['/usr/bin/sudo', '/sbin/mount_exfat', '/dev/disk5s1',
+                      str(tmp_path / 'Desktop/Card_disk5s1')]]

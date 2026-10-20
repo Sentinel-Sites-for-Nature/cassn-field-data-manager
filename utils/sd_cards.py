@@ -19,7 +19,7 @@ def removable_cards():
     for disk in disk_info("list", "-plist", "physical").get("AllDisksAndPartitions", []):
         identifier = disk["DeviceIdentifier"]
         info = disk_info("info", "-plist", identifier)
-        if not (info.get("Whole") and info.get("RemovableMedia")
+        if not (info.get("WholeDisk") and info.get("RemovableMedia")
                 and info.get("VirtualOrPhysical") == "Physical"):
             continue
         # Unpartitioned cards can carry a filesystem on the whole device.
@@ -47,7 +47,15 @@ def mount_cards(cards):
             created = not mount_point.exists()
             try:
                 mount_point.mkdir(parents=True, exist_ok=True)
-                result = subprocess.run([DISKUTIL, "mount", "-mountPoint", str(mount_point), device])
+                filesystem = volume.get("FilesystemType")
+                if filesystem in {"exfat", "msdos"}:
+                    # Preserve the original direct mount path: Disk Arbitration
+                    # can refuse cards that the native filesystem helper mounts.
+                    command = ["/usr/bin/sudo", f"/sbin/mount_{filesystem}",
+                               f"/dev/{device}", str(mount_point)]
+                else:
+                    command = [DISKUTIL, "mount", "-mountPoint", str(mount_point), device]
+                result = subprocess.run(command)
                 if result.returncode:
                     failed = True
                     print(f"Failed to mount {device}", file=sys.stderr)
