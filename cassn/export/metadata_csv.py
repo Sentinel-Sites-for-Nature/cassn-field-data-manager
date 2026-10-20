@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -292,17 +295,6 @@ def build_deployment_event_record(
     }
 
 
-def _count_csv_rows(path: Path) -> int:
-    """Row count of an existing CSV, or ``-1`` if absent/unreadable (a sentinel)."""
-    if not path.exists():
-        return -1
-    try:
-        with open(path, newline='', encoding='utf-8') as f:
-            return sum(1 for _ in csv.DictReader(f))
-    except Exception:
-        return -1
-
-
 def _format_csv_write_message(name: str, prev_count: int, new_count: int) -> str:
     """Human-readable 'Generated/Updated' line describing a CSV write."""
     if prev_count < 0:
@@ -314,14 +306,96 @@ def _format_csv_write_message(name: str, prev_count: int, new_count: int) -> str
     return f"Updated: {name} ({sign}{delta} rows, {new_count} total)"
 
 
-def _write_rows(path: Path, fieldnames: list[str], rows: list[dict], *, log: Callable[[str], None]) -> None:
-    """Write one CSV and log an incremental row-count diff against the prior file."""
-    prev = _count_csv_rows(path)
-    with open(path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(rows)
-    log(_format_csv_write_message(path.name, prev, len(rows)))
+_HISTORY_FIELDS = (
+    'is_uploaded_to_box', 'box_uploader', 'box_upload_datetime',
+    'is_uploaded_to_osdf', 'osdf_uploader', 'osdf_upload_datetime',
+    'is_submitted_to_wi', 'wi_submitter', 'wi_submission_datetime',
+    'is_submitted_to_soundhub', 'soundhub_submitter', 'soundhub_submission_datetime',
+    'is_submitted_to_nabat', 'nabat_submitter', 'nabat_submission_datetime',
+    'notes',
+)
+
+
+def _index_metadata_rows(rows: list[dict], path: Path) -> dict[tuple[str, str], dict]:
+    indexed = {}
+    for row in rows:
+        key = (row.get('deployment_id'), row.get('filename'))
+        if not all(key):
+            raise ValueError(f"{path.name}: missing deployment_id or filename")
+        if key in indexed:
+            raise ValueError(f"{path.name}: Duplicate metadata identity {key}")
+        indexed[key] = row
+    return indexed
+
+
+def _preserve_metadata_history(path: Path, rows: list[dict]) -> int:
+    """Merge only history for the same identity and SHA-256; refuse unsafe loss.
+
+    Generated file facts and lookup values always retain their fresh values.
+    A removed/renamed or changed file with history requires explicit correction
+    handling, not an implicit reset during ordinary regeneration.
+    """
+    current = _index_metadata_rows(rows, path)
+    if not path.exists():
+        return -1
+    try:
+        with path.open(newline='', encoding='utf-8-sig') as handle:
+            reader = csv.DictReader(handle, strict=True)
+            fields = reader.fieldnames or []
+            if (not {'deployment_id', 'filename'}.issubset(fields)
+                    or len(fields) != len(set(fields))):
+                raise ValueError("missing or duplicate identity/header columns")
+            previous_rows = list(reader)
+            if any(None in row or None in row.values() for row in previous_rows):
+                raise ValueError("row length does not match CSV header")
+    except (csv.Error, UnicodeError, ValueError) as exc:
+        raise ValueError(f"{path.name}: cannot safely read existing metadata: {exc}") from exc
+    previous = _index_metadata_rows(previous_rows, path)
+    for key, old in previous.items():
+        history = {field: old[field] for field in _HISTORY_FIELDS if field in old}
+        has_history = any(
+            str(value).strip().lower() not in ('', 'false', '0', 'no')
+            if field.startswith('is_') else bool(str(value).strip())
+            for field, value in history.items()
+        )
+        new = current.get(key)
+        old_hash = str(old.get('file_hash_sha256', '')).strip().lower()
+        new_hash = str((new or {}).get('file_hash_sha256', '')).strip().lower()
+        same_file = (
+            new is not None
+            and re.fullmatch(r'[0-9a-f]{64}', old_hash)
+            and old_hash == new_hash
+        )
+        if same_file:
+            new.update(history)
+        elif has_history:
+            raise ValueError(
+                f"{path.name}: cannot preserve history for {key[0]}/{key[1]}: "
+                "identity or SHA-256 is missing or changed. "
+                "Resolve the file correction before regenerating metadata."
+            )
+    return len(previous_rows)
+
+
+def _stage_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> Path:
+    """Serialize a complete replacement beside its destination before publishing."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', newline='', encoding='utf-8', dir=path.parent,
+            prefix=f'.{path.name}.', suffix='.tmp', delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+    return temporary
 
 
 def write_metadata_outputs(
@@ -332,16 +406,34 @@ def write_metadata_outputs(
     lookups,
     *,
     log: Callable[[str], None] = lambda _m: None,
+    dry_run: bool = False,
 ) -> None:
     """Build and write both metadata CSVs, the event record, and the lookup snapshot.
 
-    Safe to call incrementally after each device completes. ``log`` receives the
-    same progress lines the original printed to its activity log.
+    Unchanged files retain CSV upload/submission history and notes. Conflicting
+    history stops regeneration before either CSV is replaced. Both replacements
+    are serialized first, then published atomically per file (not as a pair).
+    ``dry_run`` validates history compatibility without writing any artifacts.
     """
     image_rows, audio_rows = build_metadata_rows(metadata, file_inventory, lookups)
 
-    _write_rows(deployment_folder / "image_file_metadata.csv", IMAGE_FIELDS, image_rows, log=log)
-    _write_rows(deployment_folder / "audio_file_metadata.csv", AUDIO_FIELDS, audio_rows, log=log)
+    outputs = [
+        (deployment_folder / "image_file_metadata.csv", IMAGE_FIELDS, image_rows),
+        (deployment_folder / "audio_file_metadata.csv", AUDIO_FIELDS, audio_rows),
+    ]
+    previous_counts = [_preserve_metadata_history(path, rows) for path, _, rows in outputs]
+    if dry_run:
+        return
+    staged = []
+    try:
+        for path, fields, rows in outputs:
+            staged.append(_stage_rows(path, fields, rows))
+        for temporary, (path, _, rows), prev in zip(staged, outputs, previous_counts):
+            os.replace(temporary, path)
+            log(_format_csv_write_message(path.name, prev, len(rows)))
+    finally:
+        for temporary in staged:
+            temporary.unlink(missing_ok=True)
 
     # deployment_event_record.json
     deployment_ids_by_label = {

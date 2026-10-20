@@ -171,6 +171,20 @@ def main() -> int:
     session = json.loads(session_path.read_text())
     inv = session["file_inventory"]
     shift_arg = build_shift(args)
+    if not args.dry_run:
+        lookups = LookupTables.load(LOCAL_DATA_DIR)
+        # Reject provenance conflicts before changing any image bytes. A changed
+        # image must not inherit upload/submission history for its old checksum.
+        prospective = [
+            dict(entry, file_hash_sha256="")
+            if entry.get("device_label") in args.devices and entry.get("file_type") == "image"
+            else dict(entry)
+            for entry in inv
+        ]
+        write_metadata_outputs(
+            dep, session["metadata"], prospective, session["devices"], lookups,
+            dry_run=True,
+        )
     scratch_root = Path(args.scratch) if args.scratch else None
     if scratch_root and not args.dry_run:
         scratch_root.mkdir(parents=True, exist_ok=True)
@@ -256,7 +270,6 @@ def main() -> int:
             severity, message = check_camera_timezones(entries)
             append_qc_report(dep, "camera_timezone_consistency", dev, severity, message)
     print(f"\nSaved session.json ({total_updated} entries updated).")
-    lookups = LookupTables.load(LOCAL_DATA_DIR)
     write_metadata_outputs(dep, session["metadata"], inv, session["devices"], lookups, log=print)
     print("\nDone. Staged data, inventory, and CSVs are back in sync.")
     return 0
