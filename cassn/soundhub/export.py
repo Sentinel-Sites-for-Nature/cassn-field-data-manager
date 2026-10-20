@@ -7,13 +7,11 @@ the SoundHub protocol config, or the shared subproject convention. This makes
 older, already-ingested metadata safe to stage without treating its historical
 blank defaults as authoritative.
 
-Both CSVs live at the *project* root in S3, not per deployment, so they are
-cumulative across every deployment ever submitted. Each staging run writes its
-own rows to a fragment under ``.cassn_fragments/<deployment_id>/`` and then
-rebuilds the two project-level CSVs from every fragment present. That makes
-re-staging a deployment idempotent — the fragment is replaced, not appended —
-and lets a re-upload overwrite the project CSVs in place, which the IAM role
-permits even though it cannot delete.
+Both CSVs live at the *project* root in S3 and cover the current pending batch.
+Each staging run replaces its rows under ``.cassn_fragments/<deployment_id>/``
+and rebuilds the project CSVs from that batch's fragments, making re-staging
+idempotent. A completed submission closes the local batch; guarded cleanup
+removes its project mirror and fragments before the next batch begins.
 """
 
 from __future__ import annotations

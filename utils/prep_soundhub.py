@@ -2,10 +2,10 @@
 """
 Stage and upload previously-downloaded deployments to Wildlife SoundHub.
 
-The application does this automatically for deployments it ingests. This CLI
-covers the backlog: deployments already downloaded and pushed to Box before the
-SoundHub step existed. Both paths share the same code in ``cassn.soundhub``, so
-a deployment prepared here is byte-identical to one prepared by the app.
+Preparation and upload are separate operator-initiated actions in both the app
+and this CLI, sharing the code in ``cassn.soundhub``. The CLI also covers older
+Box deployments. Staging accumulates one pending submission batch; after a
+completed submission, clear that batch before preparing the next one.
 
 Bird (BD) audio only. Source WAVs are never modified.
 

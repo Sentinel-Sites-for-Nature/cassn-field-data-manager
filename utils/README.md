@@ -2,6 +2,21 @@
 
 Helper scripts for maintenance and data recovery tasks.
 
+First create the project's `.venv` and install its pinned dependencies using the
+[main setup instructions](../README.md#installation). Run examples from the
+repository root. Examples written as `python`, `python3`, or `pip` assume you
+have activated that environment in the current Terminal:
+
+```bash
+source .venv/bin/activate
+```
+
+Alternatively, use `.venv/bin/python` for Python commands and
+`.venv/bin/python -m pip` for pip commands. The installed `cassn-*` launchers
+select the project's environment themselves; their installation and Terminal
+`PATH` setup are described in the
+[macOS launcher instructions](../README.md#install-the-macos-dock-launcher).
+
 The active lookup contract uses `site_name,site_short_name,site_code` in
 `sites.csv`; `plots.csv` and curated `deployments.csv` join by
 `site_short_name`. In `deployments.csv`, `device_id` is the physical device
@@ -80,7 +95,9 @@ and no cleanup receipt or other persistent record is created.
 Uses structured `diskutil` data to select removable physical media, including
 the built-in SD slot and USB card readers. Mounts recognized filesystem volumes
 at `~/Desktop/Card_<device>` (for example `~/Desktop/Card_disk5s2`) using
-`diskutil`, without assuming a partition number or filesystem. Already mounted
+the native `sudo mount_exfat` or `sudo mount_msdos` helper for exFAT/FAT cards
+(and `diskutil` for other recognized filesystems), without assuming a partition
+number or filesystem. `sudo` may prompt for your Mac password. Already mounted
 volumes are skipped. Fixed external drives are excluded. Failures return a
 nonzero exit status. These helpers use the repository virtual environment.
 
@@ -252,9 +269,9 @@ Use this script the first time you connect the CA-SSN Field Data Manager to Box,
 or any time your saved Box tokens stop working and need to be refreshed.
 
 ### Requirements
-```bash
-pip install box-sdk-gen
-```
+
+The project's pinned dependencies include `box-sdk-gen`; install them with the
+[main setup instructions](../README.md#installation).
 
 You also need `~/.cassn_config/config.json` with your Box app
 `client_id` and `client_secret`.
@@ -262,7 +279,7 @@ You also need `~/.cassn_config/config.json` with your Box app
 To verify `box-sdk-gen` is installed:
 
 ```bash
-python3 -c "import box_sdk_gen; print('box-sdk-gen ok')"
+.venv/bin/python -c "import box_sdk_gen; print('box-sdk-gen ok')"
 ```
 
 ### Setup
@@ -280,7 +297,7 @@ python3 -c "import box_sdk_gen; print('box-sdk-gen ok')"
 
 ### Run
 ```bash
-python3 utils/box_auth_setup.py
+.venv/bin/python utils/box_auth_setup.py
 ```
 
 During the OAuth flow, `box_auth_setup.py` will:
@@ -331,8 +348,15 @@ Per device, it:
    the metadata CSVs. It never creates a new per-device manifest.
 
 The offset is fully general — any combination of
-years/months/days/hours/minutes/seconds, added or subtracted — so it handles a
-wrong year, a wrong month, or a few-hours timezone/DST slip.
+years/months/days/hours/minutes/seconds, added or subtracted — for a verified
+error in the camera's wall clock. A correct Pacific wall clock with a fixed,
+incorrect EXIF offset needs metadata correction; do not shift image dates for it.
+
+Before changing any images, the utility checks whether regenerated metadata
+could preserve existing history. It stops if the selected images have upload or
+submission history or notes that cannot safely follow changed image checksums.
+Those records need an explicit correction/versioning plan first. `--dry-run`
+still previews the image shift without writing files.
 
 ### When to use
 
@@ -435,38 +459,42 @@ The reusable logic lives in `cassn/core/wi_split.py`; this file is just the CLI.
 
 ### When to use
 
-The application now performs this preparation automatically before the first
-Box upload for new deployments. Use this CLI for a dry-run preview, a controlled
-retroactive split, recovery/undo, or a small-limit engine rehearsal. It does not
-update `session.json`; normal app-driven uploads should use the automatic GUI
+The application now performs this preparation silently at camera ingest
+completion, with a first-Box-upload fallback for older unsplit sessions. Use this
+CLI for a dry-run preview, a controlled retroactive split, recovery/undo, or a
+small-limit engine rehearsal. It does not
+update `session.json`; normal app-driven ingestion should use the automatic GUI
 workflow so nested inventory paths stay synchronized. Audio (`BD`/`BT`) is never
 touched. Point the WI uploader at each `<device>_N` subfolder in turn.
 
 For John's production maintenance workflow, a requested retroactive split is a
-**post-upload operation on the Box Drive deployment copy**. Resolve and target
-the deployment below
-`/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data`; do not target
-the G-DRIVE staging copy unless John explicitly requests that location. This
-operating convention is separate from the application's automatic pre-upload
-behavior for newly ingested deployments.
+**post-upload operation on the Box Drive deployment copy**. Confirm the exact
+deployment path under
+`/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/<year>/<reserve>/<deployment>`.
+Use G-DRIVE or another staging copy only when John explicitly requests that copy.
+This convention is separate from automatic preparation for new ingests.
 
 ### Run
 
+First use `image_file_metadata.csv` to identify oversized ML/SA devices. Set
+`wi_root` to the confirmed Box deployment path, or the temporary selector root
+described below for large deployments. Run these commands serially:
+
 ```bash
-# Preview one uploaded deployment in Box Drive — writes nothing (default):
-python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423"
+wi_root="/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/<year>/<reserve>/<deployment>"
 
-# Perform the verified split while preventing sleep:
-caffeinate python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
-  --apply --yes
+# Preview — review the selected devices and planned moves before applying:
+caffeinate .venv/bin/python utils/split_for_wi.py --root "$wi_root"
 
-# Put the Box Drive deployment back:
-python utils/split_for_wi.py \
-  --root "/Users/johnimperato/Library/CloudStorage/Box-Box/CASSN/data/2026/Jepson Prairie Reserve/UC_JepsonPrairie_20260423" \
-  --undo
+# Apply the reviewed plan (asks for confirmation):
+caffeinate .venv/bin/python utils/split_for_wi.py --root "$wi_root" --apply
+
+# Verify completion with another dry run:
+caffeinate .venv/bin/python utils/split_for_wi.py --root "$wi_root"
 ```
+
+Require the final preview to scan the expected devices and report
+`0 need work (0 images to move)`. Finding no device folders is not verification.
 
 ### Options
 
@@ -500,20 +528,19 @@ python utils/split_for_wi.py \
   keep it running and keep the Mac awake until the server catches up.
 - **Avoid unaffected large folders.** Use `image_file_metadata.csv` to identify
   oversized ML/SA devices first. For a large Box Drive deployment, expose only
-  those device folders through temporary symlinks under `/tmp`, run the dry-run
-  and apply against that selector root serially, then remove the symlinks. The
-  symlinks select targets; all moves still occur inside Box Drive.
+  those device folders through temporary symlinks under `/tmp`. Use that selector
+  root for the preview, apply, and final dry run; remove the symlinks after the
+  final check reports zero pending work. All moves still occur inside Box Drive.
 
 ---
 
 ## `prep_soundhub.py`
 
-Stages and uploads **bird (BD)** audio to Wildlife SoundHub. The application can
-add deployment events to the cumulative local batch as they are processed, then
-wait until the desired group is ready for one transfer. This CLI provides the
-same workflow for the backlog—deployments downloaded and pushed to Box before
-the SoundHub step existed. Both paths call the same submission code in
-`cassn/soundhub/`.
+Stages and uploads **bird (BD)** audio to Wildlife SoundHub. In both the GUI and
+CLI, preparation and upload are separate operator-initiated actions. Add events
+to one pending local batch, then upload that batch when ready. This CLI also
+covers deployments downloaded before the SoundHub step existed. Both paths call
+the same submission code in `cassn/soundhub/`.
 
 Replaces the retired `convert_to_flac.py` and `verify_flac_conversion.py`. Those
 rebuilt each `deployment_id` by parsing folder names, a derivation that dropped
@@ -533,8 +560,10 @@ Bat (BT) audio is never touched; it is destined for NABat.
 
 ### Requirements
 
+The project's pinned Python dependencies include `boto3`. The FLAC encoder is a
+separate command-line prerequisite:
+
 ```bash
-pip install boto3
 brew install flac      # macOS; see https://xiph.org/flac elsewhere
 ```
 
@@ -603,8 +632,8 @@ so the submission travels to Box alongside the raw data.
 - **Idempotent.** An existing FLAC is left alone, and re-staging a deployment
   replaces its rows in the project CSVs rather than duplicating them. An
   interrupted run is finished by running it again.
-- **The project CSVs are cumulative.** They live at the project root in S3, not
-  per deployment, and are rebuilt from every fragment in staging on each run.
+- **The project CSVs cover one pending batch.** They live at the project root
+  in S3 and are rebuilt from that batch's staging fragments on each run.
 - **Verify immediately after uploading.** SoundHub drains its `upload/` prefix
   once it ingests a submission, so a later listing shows nothing. That is normal
   and is not an upload failure — the durable record is the
