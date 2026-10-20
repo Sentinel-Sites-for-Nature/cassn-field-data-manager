@@ -4,8 +4,8 @@ Wildlife Insights accepts at most 15,000 images per upload. A single camera
 device folder (``pN_ML`` / ``pN_SA``) routinely holds more, so before those
 images can be pushed to WI they have to be divided into sub-batches, each at or
 under the limit. This module is the pure planning + execution logic;
-``utils/split_for_wi.py`` is the CLI over it, and the GUI can call the same
-functions when the feature is wired into the app.
+``utils/split_for_wi.py`` is the CLI over it. Ingest prepares each completed
+camera locally; the GUI also uses this engine as a first-Box-upload fallback.
 
 Design choices that keep the operation safe and reversible:
 
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cassn.config import IMAGE_EXTENSIONS
-from cassn.core.inventory import set_inventory_storage_relpath
+from cassn.core.inventory import inventory_storage_relpath, set_inventory_storage_relpath
 
 WI_UPLOAD_LIMIT = 15_000
 DEFAULT_DEVICE_SUFFIXES = ("_ML", "_SA")
@@ -583,6 +583,57 @@ def sync_inventory_storage_paths(deployment_folder, plan: DevicePlan, file_inven
             ) from exc
         set_inventory_storage_relpath(entries_by_name[filename], relative_path)
     return len(entries_by_name)
+
+
+def recover_device_storage_paths(deployment_folder, device_name, file_inventory) -> int:
+    """Recover inventory locations after an interrupted same-volume split.
+
+    Run before ingest's missing-file restoration. Missing images are left for
+    that existing verified-copy workflow. Loose uninventoried images are left
+    for ingest reconciliation; uninventoried images in parts are a hard error.
+    """
+    deployment_folder = Path(deployment_folder)
+    device_dir = deployment_folder / "raw_data" / device_name
+    if not device_dir.is_dir():
+        return 0
+    locations = collect_inventory(device_dir)
+    entries = {}
+    for entry in file_inventory:
+        if entry.get("device_label") != device_name or entry.get("file_type") != "image":
+            continue
+        filename = entry["new_filename"]
+        if filename in entries:
+            raise SplitError(f"Duplicate image inventory entry for {device_name}/{filename}")
+        entries[filename] = entry
+    updated = 0
+    for filename, path in locations.items():
+        entry = entries.get(filename)
+        if entry is None:
+            if path.parent != device_dir:
+                raise SplitError(f"Uninventoried image in WI part folder: {path}")
+            continue
+        relative = path.relative_to(deployment_folder).as_posix()
+        if inventory_storage_relpath(entry) != relative:
+            set_inventory_storage_relpath(entry, relative)
+            updated += 1
+    return updated
+
+
+def prepare_device_for_wi(
+    deployment_folder, device_name, file_inventory, *, limit=WI_UPLOAD_LIMIT,
+    is_cancelled=None,
+) -> dict:
+    """Silently prepare one fully copied camera; always synchronize moved paths."""
+    deployment_folder = Path(deployment_folder)
+    plan = plan_device(deployment_folder / "raw_data" / device_name, limit=limit)
+    if plan.warnings:
+        raise SplitError(f"{device_name}: {'; '.join(plan.warnings)}")
+    # Validate correspondence before any moves, so recovery is unambiguous.
+    sync_inventory_storage_paths(deployment_folder, plan, file_inventory)
+    try:
+        return apply_device_split(plan, dry_run=False, is_cancelled=is_cancelled)
+    finally:
+        sync_inventory_storage_paths(deployment_folder, plan, file_inventory)
 
 
 def prepare_deployment_for_wi(

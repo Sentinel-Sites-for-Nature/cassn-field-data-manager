@@ -265,7 +265,8 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "table that land outside the expected region."
     ),
     "wi_image_split": (
-        "Before the first Box upload, camera folders above the Wildlife Insights "
+        "At camera ingest completion (with a first-Box-upload fallback), folders above "
+        "the Wildlife Insights "
         "15,000-image limit are split into verified, burst-preserving numbered parts."
     ),
     "box_upload": (

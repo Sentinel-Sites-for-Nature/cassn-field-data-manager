@@ -14,9 +14,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from cassn.box.status import has_box_upload_history
 from cassn.core.image_metadata import ReconyxExtractor
-from cassn.core.inventory import count_expected_files, inventory_storage_relpath
+from cassn.core.inventory import count_expected_files
 from cassn.core.quality_control import append_qc_report
+from cassn.core.wi_split import prepare_device_for_wi, recover_device_storage_paths
 
 
 class IngestHashRegistry:
@@ -56,7 +58,7 @@ class _WorkerContext:
         self.lookups = lookups
         self.file_inventory = [dict(entry) for entry in inventory]
         self._emitted_rows = {
-            inventory_storage_relpath(row): dict(row)
+            (row["device_label"], row["new_filename"]): dict(row)
             for row in self.file_inventory
         }
         self._last_session_save = time.monotonic()
@@ -74,7 +76,7 @@ class _WorkerContext:
     def emit_checkpoint(self) -> None:
         rows: list[dict] = []
         for row in self.file_inventory:
-            key = inventory_storage_relpath(row)
+            key = (row["device_label"], row["new_filename"])
             if self._emitted_rows.get(key) == row:
                 continue
             copied = dict(row)
@@ -182,6 +184,7 @@ class CardIngestThread(QThread):
             registry=self.hash_registry,
         )
         reconyx = None
+        copy_finished = False
         result: dict
         try:
             self.log_line.emit(self.device_label, "Counting files on source card…")
@@ -196,6 +199,13 @@ class CardIngestThread(QThread):
                 self.deployment_folder / "raw_data" / self.device_label
             )
             destination.mkdir(parents=True, exist_ok=True)
+            camera = self.device_code in {"ML", "SA"}
+            if camera:
+                recover_device_storage_paths(
+                    self.deployment_folder, self.device_label, context.file_inventory
+                )
+                if not context.save_session():
+                    raise OSError("Could not persist recovered image paths")
             reconyx = ReconyxExtractor().start()
             copied, duplicates, hash_mismatches = self.processor(
                 context,
@@ -207,7 +217,26 @@ class CardIngestThread(QThread):
                 self.device_label,
                 reconyx,
             )
-            context.emit_checkpoint()
+            copy_finished = True
+            # rows_ready uses a blocking GUI connection: all inventory is durable
+            # before any moves, and updated paths are durable before completion.
+            if not context.save_session():
+                raise OSError("Could not persist copied files before WI preparation")
+            if camera and not has_box_upload_history(self.deployment_folder):
+                try:
+                    split = prepare_device_for_wi(
+                        self.deployment_folder, self.device_label,
+                        context.file_inventory, is_cancelled=self.is_cancelled,
+                    )
+                finally:
+                    if not context.save_session():
+                        raise OSError("Could not persist prepared image paths")
+                if split["cancelled"] or self.is_cancelled():
+                    raise InterruptedError("Card ingest cancelled")
+                context._append_ingest_qc(
+                    self.deployment_folder, "wi_image_split", self.device_label,
+                    "pass", "Local Wildlife Insights image-folder layout verified.",
+                )
             result = {
                 "ok": True,
                 "cancelled": False,
@@ -229,7 +258,7 @@ class CardIngestThread(QThread):
         except Exception as exc:
             context.emit_checkpoint()
             error = str(exc)
-            if not self.source_dir.exists():
+            if not copy_finished and not self.source_dir.exists():
                 error = (
                     f"Source card disconnected or unmounted while copying from "
                     f"{self.source_dir}. Reconnect it and retry; completed files "

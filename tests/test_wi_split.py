@@ -357,3 +357,82 @@ def test_sync_inventory_rejects_uninventoried_image(tmp_path):
 
     with pytest.raises(SplitError, match="1 uninventoried file"):
         sync_inventory_storage_paths(tmp_path, plan, inventory)
+
+
+def test_device_preparation_leaves_other_active_devices_alone(tmp_path):
+    from cassn.core.wi_split import prepare_device_for_wi
+
+    names = _burst_names(n_events=4, frames=3)
+    device, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+    other, other_inventory = _deployment_inventory(tmp_path, "p2_ML", names)
+    prepare_device_for_wi(tmp_path, "p1_ML", inventory + other_inventory, limit=6)
+    assert plan_device(device, limit=6).fully_split
+    assert list_device_images(other) == names
+    assert all("storage_relpath" not in entry for entry in other_inventory)
+
+
+def test_device_preparation_updates_partial_paths_on_error(tmp_path, monkeypatch):
+    from cassn.core import wi_split
+
+    names = _burst_names(n_events=4, frames=3)
+    device, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+    original_move = wi_split.shutil.move
+    moves = 0
+
+    def fail_after_one(source, destination):
+        nonlocal moves
+        if moves:
+            raise OSError("disk unavailable")
+        moves += 1
+        return original_move(source, destination)
+
+    monkeypatch.setattr(wi_split.shutil, "move", fail_after_one)
+    with pytest.raises(OSError, match="disk unavailable"):
+        wi_split.prepare_device_for_wi(tmp_path, "p1_ML", inventory, limit=6)
+    assert inventory[0]["storage_relpath"].startswith("raw_data/p1_ML/p1_ML_1/")
+    assert all((tmp_path / row["storage_relpath"]).is_file() for row in inventory)
+    monkeypatch.setattr(wi_split.shutil, "move", original_move)
+    wi_split.prepare_device_for_wi(tmp_path, "p1_ML", inventory, limit=6)
+    assert plan_device(device, limit=6).fully_split
+
+
+def test_recovery_finds_moved_images_without_requiring_missing_files(tmp_path):
+    from cassn.core.wi_split import recover_device_storage_paths
+
+    names = _burst_names(n_events=2, frames=3)
+    device, inventory = _deployment_inventory(tmp_path, "p1_ML", names)
+    part = device / "p1_ML_1"
+    part.mkdir()
+    (device / names[0]).rename(part / names[0])
+    (device / names[1]).unlink()  # Ingest must still restore genuinely missing files.
+    assert recover_device_storage_paths(tmp_path, "p1_ML", inventory) == 1
+    assert inventory[0]["storage_relpath"] == f"raw_data/p1_ML/p1_ML_1/{names[0]}"
+    assert "storage_relpath" not in inventory[1]
+    assert recover_device_storage_paths(tmp_path, "p1_ML", inventory) == 0
+
+
+def test_recovery_rejects_uninventoried_part_image(tmp_path):
+    from cassn.core.wi_split import recover_device_storage_paths
+
+    device, inventory = _deployment_inventory(tmp_path, "p1_ML", ["known.jpg"])
+    part = device / "p1_ML_1"
+    part.mkdir()
+    unknown = part / "unknown.jpg"
+    unknown.write_bytes(b"unknown")
+    with pytest.raises(SplitError, match="Uninventoried image"):
+        recover_device_storage_paths(tmp_path, "p1_ML", inventory)
+    assert unknown.exists()
+
+
+def test_new_images_are_batched_with_existing_parts(tmp_path):
+    from cassn.core.wi_split import prepare_device_for_wi
+
+    names = _burst_names(n_events=4, frames=3)
+    device, inventory = _deployment_inventory(tmp_path, "p1_SA", names[:9])
+    prepare_device_for_wi(tmp_path, "p1_SA", inventory, limit=6)
+    for name in names[9:]:
+        (device / name).write_bytes(name.encode())
+        inventory.append({"device_label": "p1_SA", "new_filename": name, "file_type": "image"})
+    prepare_device_for_wi(tmp_path, "p1_SA", inventory, limit=6)
+    assert plan_device(device, limit=6).fully_split
+    assert all((tmp_path / row["storage_relpath"]).is_file() for row in inventory)

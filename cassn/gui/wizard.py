@@ -212,6 +212,7 @@ class FieldDataWizard(QMainWindow):
         self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
         self.wi_split_thread = None
+        self._box_operation_active = False
         self.provenance_thread = None
         self.soundhub_stage_thread = None
         self.soundhub_upload_thread = None
@@ -1553,7 +1554,9 @@ class FieldDataWizard(QMainWindow):
         device_label = self.devices[index][3]
         running = device_label in self.card_ingest_threads
         at_limit = len(self.card_ingest_threads) >= self.card_concurrency_spin.value()
-        self.copy_btn.setEnabled(not running and not at_limit)
+        self.copy_btn.setEnabled(
+            not running and not at_limit and not self._box_operation_active
+        )
 
     def _on_card_concurrency_changed(self, value: int) -> None:
         self.card_concurrency_limit = int(value)
@@ -1650,6 +1653,12 @@ class FieldDataWizard(QMainWindow):
 
     def copy_sd_card_data(self):
         """Select and start one SD card without blocking other device jobs."""
+        if self._box_operation_active:
+            QMessageBox.information(
+                self, "Box Operation Running",
+                "Wait for Box preparation, upload, and verification to finish before ingesting a card.",
+            )
+            return
         selected = self.device_tree.currentItem()
         if not selected:
             QMessageBox.information(self, "No Selection", "Please select a device from the list.")
@@ -1682,6 +1691,9 @@ class FieldDataWizard(QMainWindow):
             self, f"Select SD Card for Plot {plot_num} - {DEVICE_TYPES[dev_code]}"
         )
         if not sd_path:
+            return
+        # A modal file chooser can run queued callbacks; recheck before starting.
+        if self._box_operation_active:
             return
         source_dir = Path(sd_path).resolve()
         if source_dir in self._active_card_sources:
@@ -1811,19 +1823,27 @@ class FieldDataWizard(QMainWindow):
     def _on_card_rows_ready(self, device_label: str, rows: list[dict]) -> None:
         if not rows:
             return
-        existing = index_inventory_by_storage_relpath(self.file_inventory)
+        # Physical paths change during WI preparation; logical identity does not.
+        existing = {
+            (entry["device_label"], entry["new_filename"]): entry
+            for entry in self.file_inventory
+        }
         for row in rows:
             relative = inventory_storage_relpath(row)
-            prior = existing.get(relative)
+            identity = (row["device_label"], row["new_filename"])
+            prior = existing.get(identity)
             if prior is not None:
                 if prior.get("file_hash_sha256") != row.get("file_hash_sha256"):
                     self.log(f"✗ [{device_label}] Inventory collision at {relative}")
+                    worker = self.card_ingest_threads.get(device_label)
+                    if worker:
+                        worker.mark_checkpoint_failed()
                     continue
                 prior.clear()
                 prior.update(row)
                 continue
             self.file_inventory.append(row)
-            existing[relative] = row
+            existing[identity] = row
             file_hash = row.get("file_hash_sha256", "")
             if file_hash and row.get("file_type") != "config":
                 self.seen_file_hashes.add(file_hash)
@@ -2005,7 +2025,9 @@ class FieldDataWizard(QMainWindow):
         exact deployment-ID convention via :func:`build_deployment_filename`, copies it,
         verifies the copy by re-hashing (source vs. dest must match), flags small
         files and duplicates, and appends one :func:`build_inventory_record` per
-        accepted file. Per-device QC aggregates are written to ``qc_report.json``.
+        accepted file. Resume restores saved burst event numbers so remaining
+        frames keep their original event. Per-device QC aggregates are written
+        to ``qc_report.json``.
         """
         files_copied = 0
         small_file_count = 0
@@ -2115,6 +2137,13 @@ class FieldDataWizard(QMainWindow):
                 source_relpath = str(source_path.relative_to(source_dir))
                 prior_entry = inventoried_sources.get(source_relpath)
                 if prior_entry is not None:
+                    # Replay the saved burst identity before either resume path
+                    # continues, so a new frame can finish the same event.
+                    if (
+                        file_type == "image"
+                        and prior_entry.get("sequence_event_num") not in (None, "")
+                    ):
+                        current_event_num = prior_entry["sequence_event_num"]
                     prior_dest = (
                         self.current_deployment_folder
                         / inventory_storage_relpath(prior_entry)
@@ -2894,11 +2923,31 @@ class FieldDataWizard(QMainWindow):
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Data", "No deployment data to upload.")
             return
+        if self.card_ingest_threads:
+            QMessageBox.information(
+                self, "Card Ingest Running",
+                "Wait for all card jobs to finish before starting Box preparation or upload.",
+            )
+            return
+        if self._box_operation_active:
+            return
+        if any(
+            worker and worker.isRunning()
+            for worker in (self.box_verify_thread, self.fixity_thread)
+        ):
+            QMessageBox.information(
+                self, "Box Check Running",
+                "Wait for the current Box verification check to finish before uploading.",
+            )
+            return
         if self.wi_split_thread and self.wi_split_thread.isRunning():
             return
         if self.upload_thread and self.upload_thread.isRunning():
             return
 
+        # Hold through callbacks between preparation, upload, and verification.
+        self._box_operation_active = True
+        self._update_copy_action()
         self.upload_group.show()
         self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
@@ -2908,6 +2957,8 @@ class FieldDataWizard(QMainWindow):
         self.open_btn.setEnabled(False)
         self.switch_deployment_btn.setEnabled(False)
         self.upload_now_btn.setEnabled(False)
+        self.box_verify_btn.setEnabled(False)
+        self.fixity_btn.setEnabled(False)
         self.new_btn.setEnabled(False)
         self.exit_btn.setEnabled(False)
         self.cancel_upload_btn.setEnabled(True)
@@ -2955,7 +3006,10 @@ class FieldDataWizard(QMainWindow):
     def _on_wi_split_completed(self, success: bool, cancelled: bool, message: str):
         """Persist preparation state and gate the Box upload on its result."""
         self.upload_progress_bar.setRange(0, 100)
-        self.save_session()
+        if not self.save_session():
+            success = False
+            cancelled = False
+            message = "Prepared file paths could not be saved. Retry preparation before uploading to Box."
         self.log(message)
 
         if success:
@@ -2982,6 +3036,10 @@ class FieldDataWizard(QMainWindow):
         self.new_btn.setEnabled(True)
         self.exit_btn.setEnabled(True)
         self.cancel_upload_btn.hide()
+        self._box_operation_active = False
+        self._update_copy_action()
+        self.box_verify_btn.setEnabled(self.box_authenticated)
+        self.fixity_btn.setEnabled(True)
         self.upload_status_label.setText(f"{'⚠' if cancelled else '✗'} {message}")
         self.upload_status_label.setStyleSheet(
             "color: orange; font-weight: bold;"
@@ -2995,6 +3053,8 @@ class FieldDataWizard(QMainWindow):
 
     def _start_box_upload_thread(self):
         """Launch the existing uploader after preparation has cleared its gate."""
+        self._box_operation_active = True
+        self._update_copy_action()
         self.upload_progress_bar.show()
         self.upload_progress_bar.setRange(0, 100)
         self.upload_progress_bar.setValue(0)
@@ -3059,10 +3119,8 @@ class FieldDataWizard(QMainWindow):
 
     def on_upload_finished(self, success, message):
         """Handle upload completion"""
-        # Re-enable buttons, hide the cancel button
-        self.open_btn.setEnabled(True)
-        self.switch_deployment_btn.setEnabled(True)
-        self.exit_btn.setEnabled(True)
+        # A successful upload still owns this deployment through provenance
+        # and verification. Do not let their callbacks follow a new session.
         self.cancel_upload_btn.hide()
 
         if success:
@@ -3073,8 +3131,15 @@ class FieldDataWizard(QMainWindow):
             # Update provenance in both metadata CSVs
             self._write_upload_provenance()
         else:
+            self.open_btn.setEnabled(True)
+            self.switch_deployment_btn.setEnabled(True)
+            self.exit_btn.setEnabled(True)
             self.upload_now_btn.setEnabled(True)
             self.new_btn.setEnabled(True)
+            self._box_operation_active = False
+            self._update_copy_action()
+            self.box_verify_btn.setEnabled(self.box_authenticated)
+            self.fixity_btn.setEnabled(True)
             self.upload_status_label.setText(f"✗ {message}")
             self.upload_status_label.setStyleSheet("color: red; font-weight: bold;")
             QMessageBox.warning(self, "Upload Failed", message)
@@ -3135,8 +3200,15 @@ class FieldDataWizard(QMainWindow):
     def _start_post_upload_verification(self):
         """Run Box file-list verification, then Box/local hash verification."""
         if not self.current_deployment_folder or not self.file_inventory:
+            self.open_btn.setEnabled(True)
+            self.switch_deployment_btn.setEnabled(True)
+            self.exit_btn.setEnabled(True)
             self.upload_now_btn.setEnabled(self.box_authenticated)
             self.new_btn.setEnabled(True)
+            self._box_operation_active = False
+            self._update_copy_action()
+            self.box_verify_btn.setEnabled(self.box_authenticated)
+            self.fixity_btn.setEnabled(True)
             return
         if self.box_verify_thread and self.box_verify_thread.isRunning():
             return
@@ -3263,11 +3335,16 @@ class FieldDataWizard(QMainWindow):
         except Exception:
             pass  # never block the UI on writing the audit artifact
 
+        self.open_btn.setEnabled(True)
+        self.switch_deployment_btn.setEnabled(True)
+        self.exit_btn.setEnabled(True)
         self.upload_now_btn.setEnabled(self.box_authenticated)
         self.box_verify_btn.setEnabled(self.box_authenticated)
         self.fixity_btn.setEnabled(True)
         self.new_btn.setEnabled(True)
 
+        self._box_operation_active = False
+        self._update_copy_action()
         self.hash_progress_bar.setValue(100 if hash_ok else self.hash_progress_bar.value())
         final_summary = (
             "Post-upload verification complete.\n"
@@ -3404,6 +3481,8 @@ class FieldDataWizard(QMainWindow):
 
     def run_fixity_check(self):
         """Compare raw_data/ SHA-1 values against Box-reported SHA-1 values."""
+        if self._box_operation_active:
+            return
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Session", "Load a session first.")
             return
@@ -3514,6 +3593,8 @@ class FieldDataWizard(QMainWindow):
 
     def run_box_verify(self):
         """Compare Box deployment folder against local inventory."""
+        if self._box_operation_active:
+            return
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Session", "Load a session first.")
             return
@@ -3576,6 +3657,9 @@ class FieldDataWizard(QMainWindow):
         """Pop the deployment selection dialog mid-session.
         If a session is active, run the pre-departure checklist first, then write
         a session summary, then load the new selection."""
+        if self._box_operation_active:
+            QMessageBox.information(self, "Box Operation Running", "Wait for Box upload and verification before switching deployments.")
+            return
         if self.current_deployment_folder:
             if not self.show_pre_departure_checklist():
                 return
@@ -4105,6 +4189,10 @@ class FieldDataWizard(QMainWindow):
 
     def closeEvent(self, event):
         """Override close to show pre-departure checklist and write summary when a session is active."""
+        if self._box_operation_active:
+            QMessageBox.information(self, "Box Operation Running", "Cancel the Box operation or wait for verification to finish before closing.")
+            event.ignore()
+            return
         if self.card_ingest_threads:
             QMessageBox.warning(
                 self,
@@ -4141,6 +4229,9 @@ class FieldDataWizard(QMainWindow):
 
     def start_new_deployment(self):
         """Reset for new deployment"""
+        if self._box_operation_active:
+            QMessageBox.information(self, "Box Operation Running", "Wait for Box upload and verification before starting a new deployment.")
+            return
         if self.card_ingest_threads:
             QMessageBox.information(
                 self,

@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from cassn.core.quality_control import append_qc_report
+from cassn.core.image_metadata import _parse_reconyx_tags
+from cassn.core.wi_split import event_key
 from cassn.gui import card_ingest_thread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.wizard import FieldDataWizard
@@ -84,6 +86,215 @@ class _ProcessContext:
         return None
 
 
+class _BurstReconyx(_DummyReconyx):
+    def parse(self, path):
+        position = (int(path.stem[-4:]) - 1) % 3 + 1
+        return _parse_reconyx_tags({
+            "MakerNotes:Sequence": f"{position} 3",
+            "MakerNotes:TriggerMode": "Motion Detection",
+        })
+
+
+def _burst_card(tmp_path, monkeypatch, metadata_path="exiftool"):
+    from cassn.gui import wizard
+
+    source = tmp_path / "card"
+    source.mkdir()
+    for number in range(1, 7):
+        (source / f"RCNX{number:04d}.JPG").write_bytes(
+            f"synthetic unique frame {number}".encode()
+        )
+
+    def exif(path):
+        position = (int(path.stem[-4:]) - 1) % 3 + 1
+        note = bytearray(43)
+        note[40:43] = bytes([ord("M"), position, 3])
+        return {}, {0x927C: bytes(note)}
+
+    monkeypatch.setattr(wizard, "EXIF_AVAILABLE", metadata_path == "makernote")
+    monkeypatch.setattr(wizard, "extract_exif_data", exif)
+    return source, _DummyReconyx() if metadata_path == "makernote" else _BurstReconyx()
+
+
+def _ingest_camera(context, source, reconyx):
+    destination = context.current_deployment_folder / "raw_data/p1_ML"
+    destination.mkdir(parents=True, exist_ok=True)
+    return FieldDataWizard.process_sd_card_files(
+        context, source, destination, 1, "Plot 1", "ML", "p1_ML", reconyx
+    )
+
+
+def _assert_camera_inventory_matches(rows, expected, deployment, source):
+    fields = (
+        "source_relpath", "new_filename", "storage_relpath",
+        "sequence_event_num", "sequence_position", "sequence_total",
+        "file_hash_sha256", "file_hash_sha1",
+    )
+    assert [tuple(row[key] for key in fields) for row in rows] == [
+        tuple(row[key] for key in fields) for row in expected
+    ]
+    assert len({event_key(row["new_filename"]) for row in rows}) == 2
+    for row in rows:
+        contents = (deployment / row["storage_relpath"]).read_bytes()
+        assert contents == (source / row["source_relpath"]).read_bytes()
+        assert hashlib.sha256(contents).hexdigest() == row["file_hash_sha256"]
+        assert hashlib.sha1(contents).hexdigest() == row["file_hash_sha1"]
+
+
+@pytest.mark.parametrize("metadata_path", ["exiftool", "makernote"])
+@pytest.mark.parametrize("saved_count", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("staged_state", ["healthy", "missing", "truncated", "orphan_tail"])
+def test_burst_resume_matches_uninterrupted_ingest(
+    tmp_path, monkeypatch, metadata_path, saved_count, staged_state
+):
+    source, reconyx = _burst_card(tmp_path, monkeypatch, metadata_path)
+    control = _ProcessContext(tmp_path / "control", IngestHashRegistry())
+    _ingest_camera(control, source, reconyx)
+    assert [row["sequence_event_num"] for row in control.file_inventory] == [1, 1, 1, 2, 2, 2]
+
+    deployment = tmp_path / "resumed"
+    context = _ProcessContext(deployment, IngestHashRegistry())
+    context._ingest_cancelled = lambda: len(context.file_inventory) >= saved_count
+    with pytest.raises(InterruptedError, match="cancelled"):
+        _ingest_camera(context, source, reconyx)
+    session = deployment / "session.json"
+    session.write_text(json.dumps(context.file_inventory))
+    saved_rows = json.loads(session.read_text())
+    last_staged = deployment / saved_rows[-1]["storage_relpath"]
+    if staged_state == "missing":
+        last_staged.unlink()
+    elif staged_state == "truncated":
+        last_staged.write_bytes(b"x")
+    elif staged_state == "orphan_tail":
+        # A crash after copying the next frame but before saving its inventory.
+        next_row = control.file_inventory[saved_count]
+        (deployment / next_row["storage_relpath"]).write_bytes(
+            (source / next_row["source_relpath"]).read_bytes()
+        )
+
+    context = _ProcessContext(deployment, IngestHashRegistry(
+        row["file_hash_sha256"] for row in saved_rows
+    ))
+    context.file_inventory = json.loads(session.read_text())
+    _ingest_camera(context, source, reconyx)
+    assert context.file_inventory[:saved_count] == saved_rows
+    _assert_camera_inventory_matches(
+        context.file_inventory, control.file_inventory, deployment, source
+    )
+    assert _ingest_camera(context, source, reconyx) == (0, 0, 0)
+    assert len(context.file_inventory) == 6
+    assert len(list((deployment / "raw_data/p1_ML").glob("*.jpg"))) == 6
+
+
+def test_cancelled_burst_worker_checkpoint_resumes_same_events(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _BurstReconyx)
+    control = _ProcessContext(tmp_path / "control", IngestHashRegistry())
+    _ingest_camera(control, source, reconyx)
+    deployment = tmp_path / "resumed"
+
+    def worker(inventory):
+        return CardIngestThread(
+            processor=FieldDataWizard.process_sd_card_files,
+            source_dir=source, deployment_folder=deployment,
+            plot_num=1, plot_label="Plot 1", device_code="ML", device_label="p1_ML",
+            metadata={"site_short_name": "Test"}, lookups=_FakeLookups(),
+            inventory=inventory,
+            hash_registry=IngestHashRegistry(row["file_hash_sha256"] for row in inventory),
+        )
+
+    first = worker([])
+    checkpoints, results = [], []
+    first.rows_ready.connect(lambda _label, rows: checkpoints.extend(rows))
+    first.completed.connect(lambda _label, result: results.append(result))
+    first.progress.connect(lambda _label, count, *_args: first.cancel() if count == 2 else None)
+    first.run()
+    assert results[0]["cancelled"]
+    assert len(checkpoints) == 2
+    session = deployment / "session.json"
+    session.write_text(json.dumps(checkpoints))
+    saved_rows = json.loads(session.read_text())
+
+    second = worker(saved_rows)
+    resumed_rows, results = list(saved_rows), []
+    second.rows_ready.connect(lambda _label, rows: resumed_rows.extend(rows))
+    second.completed.connect(lambda _label, result: results.append(result))
+    second.run()
+    assert results[0]["ok"]
+    _assert_camera_inventory_matches(resumed_rows, control.file_inventory, deployment, source)
+
+
+@pytest.mark.parametrize("missing_event", [None, ""])
+def test_resume_without_saved_burst_event_keeps_fallback(tmp_path, monkeypatch, missing_event):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    context._ingest_cancelled = lambda: len(context.file_inventory) >= 1
+    with pytest.raises(InterruptedError):
+        _ingest_camera(context, source, reconyx)
+    context.file_inventory[0]["sequence_event_num"] = missing_event
+    saved = dict(context.file_inventory[0])
+    context._ingest_cancelled = lambda: False
+    _ingest_camera(context, source, reconyx)
+    assert context.file_inventory[0] == saved
+    assert [row["sequence_event_num"] for row in context.file_inventory[1:]] == [1, 1, 2, 2, 2]
+
+
+def test_burst_resume_ignores_other_device_event_numbers(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    other_device = {
+        "device_label": "p2_ML", "source_relpath": "RCNX0001.JPG",
+        "new_filename": "UC_Test_plot2_ML_20260101_00099_1.jpg",
+        "sequence_event_num": 99,
+    }
+    context.file_inventory = [other_device]
+    context._ingest_cancelled = lambda: len(context.file_inventory) >= 2
+    with pytest.raises(InterruptedError):
+        _ingest_camera(context, source, reconyx)
+    context._ingest_cancelled = lambda: False
+    _ingest_camera(context, source, reconyx)
+    assert context.file_inventory[0] == other_device
+    assert [row["sequence_event_num"] for row in context.file_inventory[1:]] == [1, 1, 1, 2, 2, 2]
+
+
+@pytest.mark.parametrize("device_code,extension", [("ML", "JPG"), ("BD", "WAV")])
+def test_plain_media_resume_keeps_sequential_names(tmp_path, monkeypatch, device_code, extension):
+    from cassn.gui import wizard
+
+    monkeypatch.setattr(wizard, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir()
+    for number in range(3):
+        (source / f"20260101_00000{number}.{extension}").write_bytes(f"plain {number}".encode())
+    lookups = _AudioLookups() if device_code == "BD" else _FakeLookups()
+
+    def ingest(context):
+        destination = context.current_deployment_folder / "raw_data" / f"p1_{device_code}"
+        destination.mkdir(parents=True, exist_ok=True)
+        return FieldDataWizard.process_sd_card_files(
+            context, source, destination, 1, "Plot 1", device_code,
+            f"p1_{device_code}", _DummyReconyx(),
+        )
+
+    control = _ProcessContext(tmp_path / "control", IngestHashRegistry(), lookups)
+    ingest(control)
+    partial = _ProcessContext(tmp_path / "resumed", IngestHashRegistry(), lookups)
+    partial._ingest_cancelled = lambda: len(partial.file_inventory) >= 1
+    with pytest.raises(InterruptedError):
+        ingest(partial)
+    saved = json.loads(json.dumps(partial.file_inventory))
+    resumed = _ProcessContext(partial.current_deployment_folder, IngestHashRegistry(
+        row["file_hash_sha256"] for row in saved
+    ), lookups)
+    resumed.file_inventory = saved
+    assert ingest(resumed) == (2, 0, 0)
+    assert [row["new_filename"] for row in resumed.file_inventory] == [
+        row["new_filename"] for row in control.file_inventory
+    ]
+    assert all(row["sequence_event_num"] == "" for row in resumed.file_inventory)
+    assert ingest(resumed) == (0, 0, 0)
+
+
 def test_hash_registry_allows_only_one_concurrent_reservation():
     registry = IngestHashRegistry()
     barrier = threading.Barrier(12)
@@ -135,6 +346,8 @@ def test_card_worker_emits_checkpoint_and_success(tmp_path, monkeypatch):
     (source / "two.jpg").write_bytes(b"two")
 
     def processor(context, *_args):
+        destination = context.current_deployment_folder / "raw_data/p1_ML"
+        (destination / "one.jpg").write_bytes(b"one")
         context.file_inventory.append(
             {
                 "device_label": "p1_ML",
@@ -145,6 +358,7 @@ def test_card_worker_emits_checkpoint_and_success(tmp_path, monkeypatch):
             }
         )
         context.save_session()
+        (destination / "two.jpg").write_bytes(b"two")
         context.file_inventory.append(
             {
                 "device_label": "p1_ML",
@@ -511,6 +725,252 @@ def test_concurrent_cards_deduplicate_identical_media_across_devices(
     assert sorted(result for result, _rows in outputs) == [(0, 1, 0), (1, 0, 0)]
     assert sum(len(rows) for _result, rows in outputs) == 1
     assert len(list((event / "raw_data").rglob("*.jpg"))) == 1
+
+
+def _camera_worker(tmp_path, monkeypatch, *, inventory=(), processor=None):
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _DummyReconyx)
+    import cassn.gui.wizard as wizard_module
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir(exist_ok=True)
+    worker = CardIngestThread(
+        processor=processor or FieldDataWizard.process_sd_card_files,
+        source_dir=source, deployment_folder=tmp_path / "event",
+        plot_num=1, plot_label="Plot 1", device_code="ML", device_label="p1_ML",
+        metadata={"site_short_name": "Test"}, lookups=_FakeLookups(),
+        inventory=list(inventory), hash_registry=IngestHashRegistry(),
+    )
+    return worker
+
+
+def test_ingest_silently_splits_at_real_wi_limit(tmp_path, monkeypatch):
+    from cassn.core.wi_split import plan_device
+
+    def processor(context, _source, destination, *_args):
+        for number in range(15003):
+            name = f"UC_Test_plot1_ML_20260101_{number + 1:05d}.jpg"
+            (destination / name).write_bytes(b"image")
+            context.file_inventory.append({
+                "device_label": "p1_ML", "new_filename": name, "file_type": "image",
+                "file_hash_sha256": str(number),
+            })
+        return 15003, 0, 0
+
+    worker = _camera_worker(tmp_path, monkeypatch, processor=processor)
+    rows, results, logs, progress = [], [], [], []
+    worker.rows_ready.connect(lambda _label, batch: rows.extend(batch))
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.log_line.connect(lambda _label, message: logs.append(message))
+    worker.progress.connect(lambda *_args: progress.append(_args))
+    worker.run()
+    assert results[0]["ok"]
+    plan = plan_device(worker.deployment_folder / "raw_data/p1_ML")
+    assert plan.fully_split
+    assert [len(part.files) for part in plan.parts] == [15000, 3]
+    assert len(rows) == 30006  # Initial durable rows, then the same identities with moved paths.
+    assert all((worker.deployment_folder / row["storage_relpath"]).is_file() for row in rows[15003:])
+    assert logs == ["Counting files on source card…"]
+    assert len(progress) == 1  # Initial counting only; no split progress.
+
+
+def test_ingest_recovers_crash_paths_before_missing_file_restoration(tmp_path, monkeypatch):
+    from cassn.core.file_transfer import hash_file_with_retries
+
+    source = tmp_path / "card"
+    source.mkdir()
+    (source / "one.jpg").write_bytes(b"image")
+    name = "UC_Test_plot1_ML_20260101_00001.jpg"
+    moved = tmp_path / "event/raw_data/p1_ML/p1_ML_1" / name
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(b"image")
+    hashes = hash_file_with_retries(moved)
+    inventory = [{
+        "device_label": "p1_ML", "new_filename": name, "file_type": "image",
+        "source_relpath": "one.jpg", "file_size_bytes": 5,
+        "file_hash_sha256": hashes.sha256, "file_hash_sha1": hashes.sha1,
+        "storage_relpath": f"raw_data/p1_ML/{name}",
+    }]
+    # Existing Box history lets this tiny fixture retain its part layout.
+    qc = tmp_path / "event/qc"
+    qc.mkdir()
+    (qc / "box_upload_manifest.json").write_text("{}")
+    worker = _camera_worker(tmp_path, monkeypatch, inventory=inventory)
+    rows, results = [], []
+    worker.rows_ready.connect(lambda _label, batch: rows.extend(batch))
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert results[0]["ok"]
+    assert results[0]["files_copied"] == 0
+    assert len(rows) == 1
+    assert rows[0]["storage_relpath"] == f"raw_data/p1_ML/p1_ML_1/{name}"
+    assert not (moved.parent.parent / name).exists()
+
+
+def test_inventory_path_checkpoint_updates_existing_record(tmp_path):
+    from types import SimpleNamespace
+
+    row = {
+        "device_label": "p1_ML", "new_filename": "one.jpg",
+        "storage_relpath": "raw_data/p1_ML/one.jpg", "file_hash_sha256": "hash",
+    }
+    wizard = SimpleNamespace(
+        file_inventory=[dict(row)], seen_file_hashes={"hash"}, card_ingest_threads={},
+        save_session=lambda: True, log=lambda _message: None,
+    )
+    moved = dict(row, storage_relpath="raw_data/p1_ML/p1_ML_1/one.jpg")
+    FieldDataWizard._on_card_rows_ready(wizard, "p1_ML", [moved])
+    assert wizard.file_inventory == [moved]
+
+
+def test_failed_inventory_save_prevents_split(tmp_path, monkeypatch):
+    def processor(context, _source, destination, *_args):
+        (destination / "one.jpg").write_bytes(b"one")
+        context.file_inventory.append({
+            "device_label": "p1_ML", "new_filename": "one.jpg",
+            "file_type": "image", "file_hash_sha256": "hash",
+        })
+        return 1, 0, 0
+
+    worker = _camera_worker(tmp_path, monkeypatch, processor=processor)
+    worker.rows_ready.connect(lambda *_args: worker.mark_checkpoint_failed())
+    monkeypatch.setattr(card_ingest_thread, "prepare_device_for_wi", lambda *_args, **_kwargs: pytest.fail("Split ran after failed save"))
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert not results[0]["ok"]
+    assert "persist copied files" in results[0]["error"]
+
+
+@pytest.mark.parametrize("stop", ["cancel", "save_failure"])
+def test_interrupted_ingest_split_checkpoints_actual_paths(tmp_path, monkeypatch, stop):
+    from cassn.core import wi_split
+
+    def processor(context, _source, destination, *_args):
+        for number in range(3):
+            name = f"image_{number:05d}.jpg"
+            (destination / name).write_bytes(b"image")
+            context.file_inventory.append({
+                "device_label": "p1_ML", "new_filename": name,
+                "file_type": "image", "file_hash_sha256": str(number),
+            })
+        return 3, 0, 0
+
+    worker = _camera_worker(tmp_path, monkeypatch, processor=processor)
+    original_prepare = wi_split.prepare_device_for_wi
+    monkeypatch.setattr(
+        card_ingest_thread, "prepare_device_for_wi",
+        lambda *args, **kwargs: original_prepare(*args, limit=2, **kwargs),
+    )
+    original_move = wi_split.shutil.move
+
+    def move_and_cancel(*args):
+        result = original_move(*args)
+        worker.cancel()
+        return result
+
+    if stop == "cancel":
+        monkeypatch.setattr(wi_split.shutil, "move", move_and_cancel)
+    batches, results = [], []
+
+    def checkpoint(_label, rows):
+        batches.append(rows)
+        if stop == "save_failure" and any("p1_ML_" in row.get("storage_relpath", "") for row in rows):
+            worker.mark_checkpoint_failed()
+
+    worker.rows_ready.connect(checkpoint)
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert not results[0]["ok"]
+    assert results[0]["cancelled"] == (stop == "cancel")
+    current = {row["new_filename"]: row for batch in batches for row in batch}
+    assert len(current) == 3
+    assert any("p1_ML_" in row["storage_relpath"] for row in current.values())
+    assert all((worker.deployment_folder / row["storage_relpath"]).is_file() for row in current.values())
+
+
+def test_prior_box_upload_skips_ingest_reorganization(tmp_path, monkeypatch):
+    worker = _camera_worker(tmp_path, monkeypatch, processor=lambda *_args: (0, 0, 0))
+    qc = worker.deployment_folder / "qc"
+    qc.mkdir(parents=True)
+    (qc / "box_upload_manifest.json").write_text("{}")
+    monkeypatch.setattr(card_ingest_thread, "prepare_device_for_wi", lambda *_args, **_kwargs: pytest.fail("Uploaded deployment was reorganized"))
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert results[0]["ok"]
+
+
+def test_threaded_ingest_saves_inventory_before_and_after_moves(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QObject, Slot, Qt, QEventLoop, QTimer
+    from PySide6.QtWidgets import QApplication
+    from cassn.core import wi_split
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    original_prepare = wi_split.prepare_device_for_wi
+    monkeypatch.setattr(
+        card_ingest_thread, "prepare_device_for_wi",
+        lambda *args, **kwargs: original_prepare(*args, limit=2, **kwargs),
+    )
+
+    def processor(context, _source, destination, *_args):
+        for number in range(3):
+            name = f"image_{number:05d}.jpg"
+            (destination / name).write_bytes(b"image")
+            context.file_inventory.append({
+                "device_label": "p1_ML", "new_filename": name,
+                "file_type": "image", "file_hash_sha256": str(number),
+            })
+        return 3, 0, 0
+
+    worker = _camera_worker(tmp_path, monkeypatch, processor=processor)
+    snapshots = []
+    state = SimpleNamespace(
+        file_inventory=[], seen_file_hashes=set(),
+        card_ingest_threads={"p1_ML": worker}, log=lambda _message: None,
+    )
+    session = tmp_path / "saved-session.json"
+
+    def save_session():
+        session.write_text(json.dumps(state.file_inventory))
+        snapshots.append(json.loads(session.read_text()))
+        return True
+
+    state.save_session = save_session
+
+    class Writer(QObject):
+        @Slot(str, object)
+        def receive(self, label, rows):
+            FieldDataWizard._on_card_rows_ready(state, label, rows)
+
+    writer = Writer()
+    worker.rows_ready.connect(writer.receive, Qt.ConnectionType.BlockingQueuedConnection)
+    original_move = wi_split.shutil.move
+
+    def move_after_persisted_inventory(source, destination):
+        saved = json.loads(session.read_text())
+        assert len(saved) == 3
+        return original_move(source, destination)
+
+    monkeypatch.setattr(wi_split.shutil, "move", move_after_persisted_inventory)
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit)
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+    timeout.timeout.connect(worker.cancel)
+    timeout.start(5000)
+    worker.start()
+    loop.exec()
+    assert worker.wait(1000)
+    timeout.stop()
+    assert results[0]["ok"]
+    assert len(snapshots) == 2
+    assert len(state.file_inventory) == 3
+    assert all((worker.deployment_folder / row["storage_relpath"]).is_file() for row in json.loads(session.read_text()))
+    assert app is not None
 
 
 @pytest.mark.parametrize('legacy', [False, True])
