@@ -980,7 +980,6 @@ class FieldDataWizard(QMainWindow):
         self.copy_btn = QPushButton("Select card && copy")
         self.copy_btn.setProperty("role", "primary")
         self.copy_btn.clicked.connect(self.copy_sd_card_data)
-        heading.addWidget(self.copy_btn)
         layout.addLayout(heading)
 
         status_layout = QHBoxLayout()
@@ -1025,6 +1024,7 @@ class FieldDataWizard(QMainWindow):
 
         # Control buttons
         control_layout = QHBoxLayout()
+        control_layout.addWidget(self.copy_btn)
         skip_btn = QPushButton("Skip Selected Device")
         skip_btn.clicked.connect(self.skip_device)
         add_device_btn = QPushButton("Add Device…")
