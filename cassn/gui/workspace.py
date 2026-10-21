@@ -64,6 +64,8 @@ QTreeWidget::item:selected {{ background: {tint}; color: {text}; }}
 QHeaderView::section {{ background: {background}; color: {muted}; border: none; border-bottom: 1px solid {line}; padding: 10px 5px; font-weight: normal; }}
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+QProgressBar#boxUploadProgress {{ min-height: 24px; max-height: 16777215px; color: {text}; text-align: center; }}
+QProgressBar#boxUploadProgress::chunk {{ background: {tint}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: {background}; }}
 QScrollBar:vertical {{ background: {background}; width: 10px; margin: 0; }}

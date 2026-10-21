@@ -1139,6 +1139,9 @@ class FieldDataWizard(QMainWindow):
         upload_layout = QVBoxLayout()
 
         self.upload_progress_bar = QProgressBar()
+        self.upload_progress_bar.setObjectName("boxUploadProgress")
+        self.upload_progress_bar.setTextVisible(True)
+        self.upload_progress_bar.setFormat("%p%")
         self.upload_progress_bar.setMinimum(0)
         self.upload_progress_bar.setMaximum(100)
         upload_layout.addWidget(self.upload_progress_bar)
