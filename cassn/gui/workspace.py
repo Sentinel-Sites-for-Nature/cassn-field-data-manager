@@ -67,6 +67,7 @@ QProgressBar#boxUploadProgress {{ min-height: 24px; max-height: 16777215px; colo
 QProgressBar#boxUploadProgress::chunk {{ background: {tint}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: {background}; }}
+QWidget#cardJobsArea {{ background: {panel}; }}
 QScrollBar:vertical {{ background: {background}; width: 10px; margin: 0; }}
 QScrollBar:horizontal {{ background: {background}; height: 10px; margin: 0; }}
 QScrollBar::handle {{ background: {line}; border-radius: 4px; min-width: 24px; min-height: 24px; }}

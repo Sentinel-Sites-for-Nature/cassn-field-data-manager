@@ -93,6 +93,10 @@ def test_four_jobs_fit_small_window_and_restore_empty_state(workspace_window, tm
     window.resize(1380, 950)
     app.processEvents()
     assert window.collection_splitter.orientation() == Qt.Horizontal
+    devices = window.collection_splitter.widget(0)
+    jobs = window.card_jobs_container
+    assert devices.geometry().top() == jobs.geometry().top()
+    assert devices.contentsRect().top() == jobs.contentsRect().top()
     for label in list(window.card_ingest_panels):
         window._remove_card_panel(label)
     app.processEvents()
