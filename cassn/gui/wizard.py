@@ -831,7 +831,6 @@ class FieldDataWizard(QMainWindow):
         # dynamically in _rebuild_plot_grid() based on the chosen site.
         self.grid_layout = QGridLayout()
 
-        self.grid_layout.addWidget(QLabel("Plot"), 0, 0)
         col = 1
         for dev_code, dev_name in DEVICE_TYPES.items():
             label = device_heading(dev_code, dev_name)
