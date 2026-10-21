@@ -1,17 +1,11 @@
 """
-The CA-SSN Field Data Manager main window.
+The CA-SSN Field Data Manager workflow controller and workspace pages.
 
-This is a faithful port of the original monolith's ``FieldDataWizard`` with one
-structural change: every value the wizard used to reach through a module global
-is now injected. The constructor takes a :class:`~cassn.lookups.LookupTables`
-and a :class:`~cassn.box.auth.BoxConfig`; the inline file-processing,
-metadata-CSV, Wildlife-Insights, QC, and Box primitives that used to live in the
-same 5,000-line file are now imported from :mod:`cassn.core`,
+Lookup tables and Box configuration are injected. The field workspace shell
+provides sidebar navigation and persistent deployment context; its three pages
+retain the session/resume, ingest/QC, and Box upload/verification workflows.
+Processing, export, and storage primitives live in :mod:`cassn.core`,
 :mod:`cassn.export`, and :mod:`cassn.box`.
-
-Behavior is unchanged: the same three tabs, the same session/resume flow, the
-same per-file rename/hash/QC pipeline, and the same Box upload + verification
-threads. Only the duplication and the import-time side effects are gone.
 """
 
 from __future__ import annotations
@@ -23,34 +17,36 @@ import platform
 import subprocess
 import sys
 import time
+from html import escape
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QComboBox,
     QCompleter,
     QDateEdit,
-    QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QSpinBox,
     QMenu,
@@ -73,6 +69,11 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
+from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
+from cassn.gui.workspace import (
+    ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
+    UploadProgressBar, workspace_label,
+)
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
@@ -629,26 +630,94 @@ class FieldDataWizard(QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
-        # Central widget and main layout
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-
-        # Compact title; the former 140-pixel logo banner consumed workspace
-        # needed by concurrent card jobs.
-        title_label = QLabel("CA-SSN Field Data Manager")
-        title_font = QFont("Arial", 18, QFont.Bold)
-        title_label.setFont(title_font)
-        main_layout.addWidget(title_label)
-
-        # Tab widget
-        self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
+        self.workspace = FieldWorkspace(self)
+        self.setCentralWidget(self.workspace)
+        # Retain the page API used by session restoration and workflow handlers.
+        self.tabs = self.workspace.pages
 
         # Create tabs
         self.create_metadata_tab()
         self.create_collection_tab()
         self.create_review_tab()
+        self.workspace.page_requested.connect(self._navigate_workspace)
+        self.workspace.compact_changed.connect(self._set_workspace_compact)
+        self.tabs.currentChanged.connect(self._refresh_workspace_context)
+        self.site_name_combo.currentTextChanged.connect(self._refresh_workspace_context)
+        self.deploy_event_combo.currentIndexChanged.connect(self._refresh_workspace_context)
+        self.device_tree.itemChanged.connect(self._refresh_workspace_context)
+        self.resize(1380, 950)
+        self._refresh_workspace_context()
+        self._update_copy_action()
+
+    def _navigate_workspace(self, index: int) -> None:
+        """Sidebar navigation uses the same validation as the existing next actions."""
+        current = self.tabs.currentIndex()
+        if index == current:
+            return
+        if self._box_operation_active or (index == 0 and self.card_ingest_threads):
+            QMessageBox.information(
+                self, "Operation Running",
+                "Wait for the active card or Box operation to finish before changing the deployment.",
+            )
+        elif index > 0 and (current == 0 or not self.current_deployment_folder):
+            self.validate_and_next()
+            if index == 2 and self.tabs.currentIndex() == 1:
+                self.validate_and_next_collection()
+        elif index == 2:
+            self.validate_and_next_collection()
+        else:
+            self.tabs.setCurrentIndex(index)
+        # Validation may refuse the transition; restore selection to the actual page.
+        self.workspace._sync_page(self.tabs.currentIndex())
+
+    def _refresh_workspace_context(self, *_args) -> None:
+        if not hasattr(self, "workspace") or not hasattr(self, "device_tree"):
+            return
+        metadata = self.metadata
+        if self.current_deployment_folder:
+            site = metadata.get("site_name", "")
+            start = metadata.get("deployment_event_start_date", "")
+            end = metadata.get("deployment_event_end_date", "")
+            count = len(self.devices)
+        else:
+            site = self.site_name_combo.currentText()
+            event = self.deploy_event_combo.currentData() or {}
+            start = event.get("deployment_event_start_date", "")
+            end = event.get("deployment_event_end_date", "")
+            count = sum(
+                checkbox.isChecked()
+                for slots in self.device_checkboxes.values()
+                for placements in slots.values()
+                for _row, checkbox in placements
+            )
+        complete = sum(
+            self.device_tree.topLevelItem(i).text(2) == "Complete"
+            for i in range(self.device_tree.topLevelItemCount())
+        )
+        copying = len(self.card_ingest_threads)
+        self.workspace.set_context(
+            site=site, dates=f"{start} → {end}" if start and end else "",
+            devices=f"{count} devices" + (f" · {complete} complete" if self.current_deployment_folder else " selected"),
+            staging=str(self.current_deployment_folder or self.staging_root),
+            box_connected=self.box_authenticated, active_jobs=copying,
+        )
+        self.collection_status.setText(
+            f"{complete} complete · {copying} copying · {count} devices"
+        )
+        self.card_jobs_empty.setVisible(not self.card_ingest_panels)
+
+    def _set_workspace_compact(self, compact: bool) -> None:
+        """Give small displays a vertical workspace instead of squeezed columns."""
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.metadata_columns.setDirection(direction)
+        self.storage_columns.setDirection(direction)
+        self.collection_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.device_tree.setMinimumHeight(100 if compact else 190)
+        self.card_jobs_scroll.setMinimumHeight(140 if compact else 0)
+        self.collection_splitter.setSizes([190, 300] if compact else [400, 660])
+        self.review_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
+        self.review_splitter.setSizes([420, 480])
+        self._reflow_card_panels()
 
     def create_metadata_tab(self):
         """Create the deployment metadata entry tab"""
@@ -662,18 +731,36 @@ class FieldDataWizard(QMainWindow):
         layout = QVBoxLayout(scroll_widget)
 
         # Title
-        title = QLabel("Deployment Metadata")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
+        title = workspace_label("Deployments and devices", "pageTitle")
         layout.addWidget(title)
+        layout.addWidget(workspace_label(
+            "Choose the event and devices you’re collecting.", "subtitle", wrap=True,
+        ))
+        layout.setContentsMargins(26, 16, 26, 16)
+        layout.setSpacing(10)
 
         # Form layout for metadata fields
         form_group = QGroupBox("Deployment Information")
+        site_form = QFormLayout()
+        site_form.setContentsMargins(0, 0, 0, 0)
+        site_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form_layout = QFormLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        site_fields = QWidget()
+        site_fields.setLayout(site_form)
+        event_fields = QWidget()
+        event_fields.setLayout(form_layout)
+        self.metadata_columns = QBoxLayout(QBoxLayout.LeftToRight)
+        self.metadata_columns.setContentsMargins(0, 0, 0, 0)
+        self.metadata_columns.setSpacing(24)
+        self.metadata_columns.addWidget(site_fields, 1)
+        self.metadata_columns.addWidget(event_fields, 1)
 
         # Organization
         self.org_combo = QComboBox()
         self.org_combo.addItems(self.lookups.program_config.get("organizations") or ORGANIZATIONS)
-        form_layout.addRow("Organization:", self.org_combo)
+        site_form.addRow("Organization:", self.org_combo)
 
         # Formal site name (with autocomplete)
         self.site_name_combo = QComboBox()
@@ -686,39 +773,26 @@ class FieldDataWizard(QMainWindow):
         completer.setFilterMode(Qt.MatchContains)
         self.site_name_combo.setCompleter(completer)
         self.site_name_combo.currentTextChanged.connect(self.on_site_changed)
-        form_layout.addRow("Site Name:", self.site_name_combo)
+        site_form.addRow("Site Name:", self.site_name_combo)
 
         # Stable relational key and deployment-ID token
         self.site_short_name_edit = QLineEdit()
         self.site_short_name_edit.setReadOnly(True)
-        form_layout.addRow("Site Short Name:", self.site_short_name_edit)
+        site_form.addRow("Site Short Name:", self.site_short_name_edit)
 
         # Acronym
         self.site_code_edit = QLineEdit()
         self.site_code_edit.setReadOnly(True)
-        form_layout.addRow("Site Code:", self.site_code_edit)
+        site_form.addRow("Site Code:", self.site_code_edit)
 
         # Curated deployment-event picker. Device availability and placement
         # metadata are scoped to this selection.
         self.deploy_event_combo = QComboBox()
         self.deploy_event_combo.setToolTip(
-            "Pick the completed deployment event. The device grid and metadata "
-            "will use only placements assigned to that event."
+            "Choose a collection event to ingest data, or inspect deployments still in the field."
         )
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
         form_layout.addRow("Deployment Event:", self.deploy_event_combo)
-
-        # Open placements are useful field context, but they are not actionable
-        # downloads and must never supply an invented retrieval/end date.
-        self.current_deployment_status_label = QLabel("None recorded")
-        self.current_deployment_status_label.setWordWrap(True)
-        self.current_deployment_status_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
-        )
-        self.current_deployment_status_label.setToolTip(
-            "Read-only curated inventory for devices that remain in the field."
-        )
-        form_layout.addRow("Currently Deployed:", self.current_deployment_status_label)
 
         # Deployment dates
         self.deploy_start_date = QDateEdit()
@@ -730,6 +804,7 @@ class FieldDataWizard(QMainWindow):
         self.deploy_end_date = QDateEdit()
         self.deploy_end_date.setReadOnly(True)
         self.deploy_end_date.setCalendarPopup(False)
+        self.deploy_end_date.setSpecialValueText("Not collected")
         self.deploy_end_date.setDate(QDate.currentDate())
         form_layout.addRow("End Date:", self.deploy_end_date)
 
@@ -755,12 +830,13 @@ class FieldDataWizard(QMainWindow):
         self.observer_other_edit.hide()
         form_layout.addRow("", self.observer_other_edit)
 
-        form_group.setLayout(form_layout)
+        form_group.setLayout(self.metadata_columns)
         layout.addWidget(form_group)
 
         # Device selection
         device_group = QGroupBox("Select Devices for Each Plot")
         device_layout = QVBoxLayout()
+        device_layout.setContentsMargins(0, 0, 0, 0)
 
         instructions = QLabel("Check which devices you are downloading data from.")
         device_layout.addWidget(instructions)
@@ -768,12 +844,11 @@ class FieldDataWizard(QMainWindow):
         # Device grid — header row only here; plot rows are built/rebuilt
         # dynamically in _rebuild_plot_grid() based on the chosen site.
         self.grid_layout = QGridLayout()
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.grid_layout.addWidget(QLabel("Plot"), 0, 0)
         col = 1
         for dev_code, dev_name in DEVICE_TYPES.items():
-            label = QLabel(dev_name)
-            label.setWordWrap(True)
+            label = device_heading(dev_code, dev_name)
             self.grid_layout.addWidget(label, 0, col)
             col += 1
 
@@ -791,7 +866,9 @@ class FieldDataWizard(QMainWindow):
         else:
             self._rebuild_plot_grid(site_short_name=None)
 
-        device_layout.addLayout(self.grid_layout)
+        device_grid = QWidget()
+        device_grid.setLayout(self.grid_layout)
+        device_layout.addWidget(DeviceGridScroll(device_grid))
 
         # Quick select buttons
         button_layout = QHBoxLayout()
@@ -810,6 +887,7 @@ class FieldDataWizard(QMainWindow):
         # Staging location
         staging_group = QGroupBox("Local Staging Location")
         staging_layout = QHBoxLayout()
+        staging_layout.setContentsMargins(0, 0, 0, 0)
 
         self.staging_label = QLineEdit(str(self.staging_root))
         self.staging_label.setReadOnly(True)
@@ -823,17 +901,28 @@ class FieldDataWizard(QMainWindow):
         staging_layout.addWidget(self.set_default_cb)
 
         staging_group.setLayout(staging_layout)
-        layout.addWidget(staging_group)
+        self.storage_columns = QBoxLayout(QBoxLayout.LeftToRight)
+        self.storage_columns.setSpacing(16)
+        self.storage_columns.addWidget(staging_group, 1)
 
         # Box connection status
-        box_group = QGroupBox("Box Cloud Storage")
+        box_group = QGroupBox("Cloud storage connector")
         box_layout = QVBoxLayout()
+        box_layout.setContentsMargins(0, 0, 0, 0)
 
         # Box connection status indicator
         box_status_layout = QHBoxLayout()
+        box_logo = QLabel()
+        box_logo.setPixmap(QPixmap(str(ARTWORK / "box.webp")).scaled(
+            55, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+        ))
+        box_logo.setAccessibleName("Box logo")
+        box_logo.setContentsMargins(0, 0, 0, 6)
+        box_status_layout.addWidget(box_logo)
+        box_status_layout.addSpacing(6)
         box_status_label = QLabel()
         if self.box_authenticated:
-            box_status_label.setText("✓ Box Connected")
+            box_status_label.setText("✓ Connected")
             box_status_label.setStyleSheet("color: green; font-weight: bold;")
         else:
             box_status_label.setText("⚠ Box Not Connected")
@@ -843,8 +932,7 @@ class FieldDataWizard(QMainWindow):
         box_layout.addLayout(box_status_layout)
 
         upload_note = QLabel(
-            "Uploads are started by hand from the Review & Finalize tab — "
-            "nothing transfers on its own."
+            "You can upload staged files to Box in Review & upload."
         )
         upload_note.setWordWrap(True)
         box_layout.addWidget(upload_note)
@@ -855,12 +943,14 @@ class FieldDataWizard(QMainWindow):
             box_layout.addWidget(auth_note)
 
         box_group.setLayout(box_layout)
-        layout.addWidget(box_group)
+        self.storage_columns.addWidget(box_group, 1)
+        layout.addLayout(self.storage_columns)
 
         # Navigation button
         nav_layout = QHBoxLayout()
         nav_layout.addStretch()
-        next_btn = QPushButton("Next: Collect SD Card Data →")
+        next_btn = QPushButton("Continue to card ingest →")
+        next_btn.setProperty("role", "primary")
         next_btn.clicked.connect(self.validate_and_next)
         nav_layout.addWidget(next_btn)
         layout.addLayout(nav_layout)
@@ -870,6 +960,7 @@ class FieldDataWizard(QMainWindow):
         scroll.setWidget(scroll_widget)
 
         tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
 
     def create_collection_tab(self):
@@ -878,48 +969,22 @@ class FieldDataWizard(QMainWindow):
         self.tabs.addTab(tab, "2. Collect SD Card Data")
 
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(26, 22, 26, 22)
+        layout.setSpacing(14)
 
-        # Title
-        title = QLabel("SD Card Data Collection")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
-        layout.addWidget(title)
-
-        instructions = QLabel(
-            "Insert SD card for each device, select it below, and click 'Copy Files'.\n"
-            "Files will be automatically renamed and organized in the staging folder."
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
-        # Device tree
-        device_group = QGroupBox("Devices")
-        device_layout = QVBoxLayout()
-
-        self.device_tree = QTreeWidget()
-        self.device_tree.setHeaderLabels(["Plot", "Device Type", "Status", "Files Copied"])
-        self.device_tree.setColumnWidth(0, 150)
-        self.device_tree.setColumnWidth(1, 200)
-        self.device_tree.setColumnWidth(2, 100)
-        device_layout.addWidget(self.device_tree)
-        self.device_tree.currentItemChanged.connect(self._update_copy_action)
-
-        device_group.setLayout(device_layout)
-        layout.addWidget(device_group)
-
-        # Control buttons
-        control_layout = QHBoxLayout()
-        self.copy_btn = QPushButton("Select SD Card && Copy Files")
+        heading = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.addWidget(workspace_label("Card ingest", "pageTitle"))
+        titles.addWidget(workspace_label("Copy, rename and verify your field data.", "subtitle", wrap=True))
+        heading.addLayout(titles, 1)
+        self.copy_btn = QPushButton("Select card && copy")
+        self.copy_btn.setProperty("role", "primary")
         self.copy_btn.clicked.connect(self.copy_sd_card_data)
-        skip_btn = QPushButton("Skip Selected Device")
-        skip_btn.clicked.connect(self.skip_device)
-        add_device_btn = QPushButton("Add Device…")
-        add_device_btn.clicked.connect(self.add_device)
-        add_device_btn.setToolTip("Add a new device (plot + type) to this deployment, e.g. a 5th plot or a missed device.")
-        control_layout.addWidget(self.copy_btn)
-        control_layout.addWidget(skip_btn)
-        control_layout.addWidget(add_device_btn)
-        control_layout.addSpacing(18)
-        control_layout.addWidget(QLabel("Simultaneous cards:"))
+        layout.addLayout(heading)
+
+        status_layout = QHBoxLayout()
+        self.collection_status = workspace_label("Choose devices in Deployment to begin.", "muted")
+        status_layout.addWidget(self.collection_status, 1)
         self.card_concurrency_spin = QSpinBox()
         self.card_concurrency_spin.setRange(1, 4)
         self.card_concurrency_spin.setValue(self.card_concurrency_limit)
@@ -927,20 +992,87 @@ class FieldDataWizard(QMainWindow):
             "Maximum cards copied at once. Running copies are never interrupted "
             "when this limit is lowered."
         )
-        self.card_concurrency_spin.valueChanged.connect(
-            self._on_card_concurrency_changed
-        )
-        control_layout.addWidget(self.card_concurrency_spin)
-        control_layout.addStretch()
-        layout.addLayout(control_layout)
+        self.card_concurrency_spin.valueChanged.connect(self._on_card_concurrency_changed)
+        layout.addLayout(status_layout)
 
-        # One compact panel per active/recent card. Four jobs arrange as a 2×2
-        # grid so their progress remains visible without interleaving log lines.
-        self.card_jobs_group = QGroupBox("Card Ingest Jobs")
+        self.collection_splitter = QSplitter(Qt.Horizontal)
+        self.collection_splitter.setChildrenCollapsible(False)
+        self.collection_splitter.setHandleWidth(16)
+
+        # Device tree
+        device_group = QGroupBox("Devices")
+        device_layout = QVBoxLayout()
+
+        self.device_tree = QTreeWidget()
+        self.device_tree.setHeaderLabels(["Plot", "Device", "Status", "Files"])
+        self.device_tree.setRootIsDecorated(False)
+        self.device_tree.setUniformRowHeights(True)
+        self.device_tree.setMinimumHeight(190)
+        self.device_tree.setMinimumWidth(340)
+        self.device_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.device_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.device_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.device_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.device_tree.headerItem().setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)
+        self.device_tree.header().setStretchLastSection(False)
+        device_layout.addWidget(self.device_tree)
+        self.device_tree.currentItemChanged.connect(self._update_copy_action)
+
+        device_group.setLayout(device_layout)
+        self.collection_splitter.addWidget(device_group)
+
+        # Control buttons
+        control_layout = QGridLayout()
+        control_layout.addWidget(self.copy_btn, 0, 0, Qt.AlignLeft)
+        skip_btn = QPushButton("Skip Selected Device")
+        skip_btn.clicked.connect(self.skip_device)
+        add_device_btn = QPushButton("Add Device…")
+        add_device_btn.clicked.connect(self.add_device)
+        add_device_btn.setToolTip("Add a new device (plot + type) to this deployment, e.g. a 5th plot or a missed device.")
+        control_layout.addWidget(skip_btn, 0, 1, Qt.AlignLeft)
+        control_layout.addWidget(add_device_btn, 1, 0, Qt.AlignLeft)
+        concurrency_controls = QHBoxLayout()
+        concurrency_controls.addWidget(QLabel("Simultaneous cards:"))
+        concurrency_controls.addWidget(self.card_concurrency_spin)
+        concurrency_controls.addStretch()
+        control_layout.addLayout(concurrency_controls, 1, 1)
+        device_layout.addLayout(control_layout)
+
+        # Card panels have their own scrollable column so up to four jobs do
+        # not push controls out of a small laptop window.
+        self.card_jobs_scroll = CardJobsScroll()
+        self.card_jobs_scroll.setWidgetResizable(True)
+        self.card_jobs_scroll.setMinimumWidth(320)
+        card_area = QWidget()
+        card_area.setObjectName("cardJobsArea")
+        card_area_layout = QVBoxLayout(card_area)
+        card_area_layout.setContentsMargins(0, 0, 0, 0)
+        self.card_jobs_empty = workspace_label(
+            "No active card jobs\n\nSelect a device, then choose its SD card to start copying.\n"
+            "Finished jobs clear when you eject the card.",
+            "muted", wrap=True,
+        )
+        self.card_jobs_empty.setObjectName("workspaceEmptyCards")
+        self.card_jobs_empty.setAlignment(Qt.AlignCenter)
+        self.card_jobs_empty.setMinimumHeight(200)
+        card_area_layout.addWidget(self.card_jobs_empty)
+        self.card_jobs_group = QWidget()
         self.card_jobs_grid = QGridLayout()
+        self.card_jobs_grid.setContentsMargins(0, 0, 0, 0)
+        self.card_jobs_scroll.columns_changed.connect(self._reflow_card_panels)
         self.card_jobs_group.setLayout(self.card_jobs_grid)
         self.card_jobs_group.hide()
-        layout.addWidget(self.card_jobs_group)
+        card_area_layout.addWidget(self.card_jobs_group)
+        card_area_layout.addStretch()
+        self.card_jobs_scroll.setWidget(card_area)
+        self.card_jobs_container = QGroupBox("Card Ingest Jobs")
+        jobs_layout = QVBoxLayout(self.card_jobs_container)
+        jobs_layout.addWidget(self.card_jobs_scroll)
+        self.collection_splitter.addWidget(self.card_jobs_container)
+        self.collection_splitter.setSizes([400, 660])
+        self.collection_splitter.setStretchFactor(0, 1)
+        self.collection_splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.collection_splitter, 1)
 
         # Keep a diagnostic log available without permanently consuming the
         # collection workspace. Normal device/QC feedback lives in card panels
@@ -967,9 +1099,9 @@ class FieldDataWizard(QMainWindow):
 
         # Navigation
         nav_layout = QHBoxLayout()
-        back_btn = QPushButton("← Back")
-        back_btn.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
-        next_btn = QPushButton("Next: Review && Finalize →")
+        back_btn = QPushButton("← Deployment")
+        back_btn.clicked.connect(lambda: self._navigate_workspace(0))
+        next_btn = QPushButton("Review && upload →")
         next_btn.clicked.connect(self.validate_and_next_collection)
         nav_layout.addWidget(back_btn)
         nav_layout.addStretch()
@@ -992,11 +1124,15 @@ class FieldDataWizard(QMainWindow):
         self.tabs.addTab(tab, "3. Review & Finalize")
 
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(26, 22, 26, 22)
+        layout.setSpacing(16)
 
         # Title
-        title = QLabel("Ingestion Summary")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
+        title = workspace_label("Review & upload", "pageTitle")
         layout.addWidget(title)
+        layout.addWidget(workspace_label(
+            "Check staged data before sending it to Box.", "subtitle", wrap=True,
+        ))
 
         # Summary text
         summary_group = QGroupBox("Summary")
@@ -1020,7 +1156,8 @@ class FieldDataWizard(QMainWindow):
         tree_layout.addWidget(self.staged_event_tree)
         tree_group.setLayout(tree_layout)
 
-        review_splitter = QSplitter(Qt.Vertical)
+        self.review_splitter = review_splitter = QSplitter(Qt.Horizontal)
+        review_splitter.setChildrenCollapsible(False)
         review_splitter.addWidget(summary_group)
         review_splitter.addWidget(tree_group)
         review_splitter.setStretchFactor(0, 1)
@@ -1032,7 +1169,10 @@ class FieldDataWizard(QMainWindow):
         self.upload_group = QGroupBox("Box Upload Progress")
         upload_layout = QVBoxLayout()
 
-        self.upload_progress_bar = QProgressBar()
+        self.upload_progress_bar = UploadProgressBar()
+        self.upload_progress_bar.setObjectName("boxUploadProgress")
+        self.upload_progress_bar.setTextVisible(True)
+        self.upload_progress_bar.setFormat("%p%")
         self.upload_progress_bar.setMinimum(0)
         self.upload_progress_bar.setMaximum(100)
         upload_layout.addWidget(self.upload_progress_bar)
@@ -1071,7 +1211,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(self.hash_group)
 
         # SoundHub progress (hidden by default)
-        self.soundhub_group = QGroupBox("SoundHub Preparation & Upload Progress")
+        self.soundhub_group = QGroupBox("SoundHub staging progress")
         soundhub_layout = QVBoxLayout()
 
         self.soundhub_progress_bar = QProgressBar()
@@ -1236,44 +1376,22 @@ class FieldDataWizard(QMainWindow):
         self._populate_deploy_events("")
 
     def _populate_deploy_events(self, site_short_name):
-        """Show completed deployment events and one current field summary."""
+        """List collection events first, followed by inspectable open deployments."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
         combo.blockSignals(True)
         combo.clear()
-        events = self.lookups.returned_rounds(site_short_name)
+        events = (self.lookups.returned_rounds(site_short_name)
+                  + self.lookups.current_rounds(site_short_name))
         for ev in events:
-            start = ev["deployment_event_start_date"]
-            end = ev["deployment_event_end_date"]
+            name = ev["deployment_event_id"] or "Open deployments · In field"
             count = ev.get("deployment_count", ev.get("device_count", 0))
-            label = (
-                f"{ev['deployment_event_id']} — {start} → {end}  "
-                f"({count} deployment{'s' if count != 1 else ''})"
-            )
-            combo.addItem(label, ev)
+            combo.addItem(f"{name} ({count} deployment{'s' if count != 1 else ''})", ev)
         if not events:
-            combo.addItem("— No returned-card events —", None)
+            combo.addItem("No deployment events", None)
         combo.setCurrentIndex(0)
         combo.blockSignals(False)
-
-        current = self.lookups.current_rounds(site_short_name)
-        if current:
-            event = current[0]
-            earliest = event["deployment_event_start_date"]
-            latest = event.get("latest_open_deployment_start_date", earliest)
-            date_text = (
-                f"deployed {earliest}–{latest}"
-                if latest != earliest
-                else f"deployed {earliest}"
-            )
-            count = event["device_count"]
-            self.current_deployment_status_label.setText(
-                f"{count} device{'s' if count != 1 else ''} in the field "
-                f"({date_text})"
-            )
-        else:
-            self.current_deployment_status_label.setText("None recorded")
         self.on_deploy_event_changed(0)
 
     def on_deploy_event_changed(self, index):
@@ -1291,6 +1409,8 @@ class FieldDataWizard(QMainWindow):
             end = QDate.fromString(ev["deployment_event_end_date"], "yyyy-MM-dd")
             if end.isValid():
                 self.deploy_end_date.setDate(end)
+        else:
+            self.deploy_end_date.setDate(self.deploy_end_date.minimumDate())
         self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
 
     def on_observer_changed(self, text):
@@ -1349,6 +1469,7 @@ class FieldDataWizard(QMainWindow):
                         label = "" if len(rows) == 1 else f"seq{sequence:02d}"
                         cb = QCheckBox(label)
                         cb.setChecked(True)
+                        cb.toggled.connect(self._refresh_workspace_context)
                         identity_lines = []
                         if row.get("device_id"):
                             identity_label = (
@@ -1403,6 +1524,7 @@ class FieldDataWizard(QMainWindow):
             self.staging_root = Path(directory)
             self._remember_staging_root(self.staging_root)
             self.staging_label.setText(str(self.staging_root))
+            self._refresh_workspace_context()
 
     def validate_and_next(self):
         """Validate metadata and proceed to collection tab"""
@@ -1431,6 +1553,32 @@ class FieldDataWizard(QMainWindow):
                 "Missing Deployment Event",
                 "This site has no selectable curated deployment event.",
             )
+            return
+
+        if not selected_event.get("deployment_event_id") or not selected_event.get("deployment_event_end_date"):
+            QMessageBox.information(
+                self, "Deployment Still in Field",
+                "These devices have no recorded collection date. Select a completed collection event to ingest data.",
+            )
+            return
+
+        # Selecting an event through setup must reopen its saved inventory,
+        # just as selecting it in the session picker does. Never overwrite it
+        # with a new, empty session merely because this window is new.
+        folder = self.staging_root / selected_event["deployment_event_id"]
+        if self.current_deployment_folder is None and (folder / "session.json").exists():
+            try:
+                session = json.loads((folder / "session.json").read_text())
+                if not isinstance(session, dict) or session.get("schema_version") != SESSION_SCHEMA_VERSION:
+                    raise ValueError("Unsupported session format")
+                metadata = normalize_deployment_event_metadata(session.get("metadata", {}))
+                if metadata.get("deployment_event_id") != selected_event["deployment_event_id"]:
+                    raise ValueError("Saved session belongs to a different deployment event")
+                session["deployment_folder"] = str(folder)
+            except (OSError, ValueError, TypeError) as exc:
+                QMessageBox.critical(self, "Cannot Resume Deployment", f"Could not read {folder / 'session.json'}:\n{exc}")
+                return
+            self.restore_session(session)
             return
 
         # Store metadata
@@ -1482,6 +1630,8 @@ class FieldDataWizard(QMainWindow):
 
         # Populate collection list
         self.populate_collection_list()
+        if not self.save_session():
+            return
 
         # Go to collection tab
         self.tabs.setCurrentIndex(1)
@@ -1495,19 +1645,27 @@ class FieldDataWizard(QMainWindow):
 
         (self.current_deployment_folder / "raw_data").mkdir(exist_ok=True)
 
-        self.save_session()
-
     def populate_collection_list(self):
-        """Populate device tree with selected devices"""
+        """Rebuild rows by device identity without losing completed work."""
+        statuses = {
+            item.data(0, Qt.UserRole): item.text(2)
+            for item in (self.device_tree.topLevelItem(i) for i in range(self.device_tree.topLevelItemCount()))
+            if item.data(0, Qt.UserRole)
+        }
+        counts = Counter(entry.get("device_label") for entry in self.file_inventory)
         self.device_tree.clear()
 
         for plot_num, plot_label, dev_code, device_label in self.devices:
             item = QTreeWidgetItem([
-                f"Plot {plot_num} ({plot_label})",
-                DEVICE_TYPES[dev_code],
-                "Pending",
-                "0",
+                f"Plot {plot_num}",
+                {"ML": "Camera · ML", "SA": "Camera · SA", "BD": "Bird audio", "BT": "Bat audio"}.get(dev_code, DEVICE_TYPES[dev_code]),
+                statuses.get(device_label, "Incomplete" if counts[device_label] else "Pending"),
+                str(counts[device_label]),
             ])
+            item.setData(0, Qt.UserRole, device_label)
+            item.setToolTip(0, f"Plot {plot_num} ({plot_label})")
+            item.setToolTip(1, f"{DEVICE_TYPES[dev_code]} · {device_label}")
+            item.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)
             self.device_tree.addTopLevelItem(item)
 
     def log(self, message):
@@ -1523,10 +1681,10 @@ class FieldDataWizard(QMainWindow):
         if is_alert:
             self.log_text.setTextColor(QColor("#cc0000"))
         else:
-            self.log_text.setTextColor(QColor("#000000"))
+            self.log_text.setTextColor(self.log_text.palette().color(QPalette.Text))
         self.log_text.append(full)
         # Restore default color for any subsequent direct writes to the widget
-        self.log_text.setTextColor(QColor("#000000"))
+        self.log_text.setTextColor(self.log_text.palette().color(QPalette.Text))
         QApplication.processEvents()
 
     # ------------------------------------------------------------------
@@ -1543,6 +1701,8 @@ class FieldDataWizard(QMainWindow):
         """Enable starting a card whenever the selected device owns a free slot."""
         if not hasattr(self, "copy_btn"):
             return
+        if hasattr(self, "workspace"):
+            self._refresh_workspace_context()
         selected = self.device_tree.currentItem()
         if selected is None:
             self.copy_btn.setEnabled(False)
@@ -1599,21 +1759,40 @@ class FieldDataWizard(QMainWindow):
             existing["group"].deleteLater()
         self._remove_oldest_completed_card_panel()
 
-        group = QGroupBox(device_label)
+        title = next(
+            (f"Plot {plot} · {code}" for plot, _name, code, label in self.devices if label == device_label),
+            device_label,
+        )
+        group = QGroupBox(title)
+        group.setProperty("role", "cardJob")
         layout = QVBoxLayout(group)
-        source_label = QLabel(f"Source: {source_dir}")
+        layout.setContentsMargins(6, 0, 6, 6)
+        layout.setSpacing(4)
+        source_label = workspace_label(f"Source: {source_dir.name}", "muted", wrap=True)
+        source_label.setToolTip(str(source_dir))
         source_label.setWordWrap(True)
+        source_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         status = QLabel("Counting files…")
+        status.setWordWrap(True)
         progress = QProgressBar()
         progress.setRange(0, 0)
         detail = QLabel("0 files processed")
         detail.setWordWrap(True)
+        detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         findings = QLabel("Warnings: 0 · Errors: 0")
         messages = QTextEdit()
         messages.setReadOnly(True)
         messages.setMaximumHeight(90)
         messages.setPlaceholderText("Card and device QC messages appear here.")
-        cancel = QPushButton("Cancel This Card")
+        messages.hide()
+        details_toggle = QToolButton()
+        details_toggle.setText("Show details")
+        details_toggle.setCheckable(True)
+        details_toggle.toggled.connect(messages.setVisible)
+        details_toggle.toggled.connect(
+            lambda expanded: details_toggle.setText("Hide details" if expanded else "Show details")
+        )
+        cancel = QPushButton("Cancel card")
         cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
         for widget in (
             source_label,
@@ -1621,10 +1800,14 @@ class FieldDataWizard(QMainWindow):
             progress,
             detail,
             findings,
-            messages,
-            cancel,
         ):
             layout.addWidget(widget)
+        actions = QHBoxLayout()
+        actions.addWidget(details_toggle)
+        actions.addStretch()
+        actions.addWidget(cancel)
+        layout.addLayout(actions)
+        layout.addWidget(messages)
 
         self.card_ingest_panels[device_label] = {
             "group": group,
@@ -1647,9 +1830,11 @@ class FieldDataWizard(QMainWindow):
             item = self.card_jobs_grid.takeAt(0)
             if item.widget():
                 item.widget().setParent(self.card_jobs_group)
+        columns = 2 if self.card_jobs_scroll.viewport().width() >= 680 else 1
         for index, panel in enumerate(self.card_ingest_panels.values()):
-            self.card_jobs_grid.addWidget(panel["group"], index // 2, index % 2)
+            self.card_jobs_grid.addWidget(panel["group"], index // columns, index % columns)
         self.card_jobs_group.setVisible(bool(self.card_ingest_panels))
+        self.card_jobs_empty.setVisible(not self.card_ingest_panels)
 
     def copy_sd_card_data(self):
         """Select and start one SD card without blocking other device jobs."""
@@ -1704,6 +1889,9 @@ class FieldDataWizard(QMainWindow):
             )
             return
 
+        if not self._claim_card_source(source_dir, device_label):
+            return
+
         selected.setText(2, "Counting")
         selected.setText(3, "0")
         self._active_card_sources.add(source_dir)
@@ -1741,6 +1929,10 @@ class FieldDataWizard(QMainWindow):
         self.card_ingest_threads[device_label] = worker
         worker.start()
         self._update_copy_action()
+
+    def _claim_card_source(self, source_dir: Path, device_label: str) -> bool:
+        """Extension point for application-wide source ownership."""
+        return True
 
     def cancel_card_ingest(self, device_label: str) -> None:
         worker = self.card_ingest_threads.get(device_label)
@@ -1790,9 +1982,10 @@ class FieldDataWizard(QMainWindow):
         if panel is None:
             return
         messages = panel["messages"]
-        messages.setTextColor(QColor("#cc0000") if alert else QColor("#000000"))
+        default_color = messages.palette().color(QPalette.Text)
+        messages.setTextColor(QColor("#cc0000") if alert else default_color)
         messages.append(message)
-        messages.setTextColor(QColor("#000000"))
+        messages.setTextColor(default_color)
 
     def _on_card_progress(
         self, device_label: str, copied: int, expected: int, filename: str
@@ -2729,82 +2922,46 @@ class FieldDataWizard(QMainWindow):
             self.log(f"Warning: could not generate SoundHub CSVs: {e}")
 
     def update_review_tab(self):
-        """Update review summary"""
-        summary = []
-        summary.append("=" * 60)
-        summary.append("INGESTION SUMMARY")
-        summary.append("=" * 60)
-        summary.append("")
-
-        summary.append("DEPLOYMENT EVENT INFORMATION")
-        summary.append("-" * 60)
-        summary.append(f"Organization: {self.metadata['organization']}")
-        summary.append(f"Site Name: {self.metadata['site_name']}")
-        summary.append(f"Site Short Name: {self.metadata['site_short_name']}")
-        summary.append(f"Site Code: {self.metadata['site_code']}")
-        summary.append(
-            "Deployment Event Period: "
-            f"{self.metadata['deployment_event_start_date']} to "
-            f"{self.metadata['deployment_event_end_date']}"
+        """Present the inventory as a readable summary without enumerating media."""
+        metadata = self.metadata
+        counts = Counter(row.get("device_label", "") for row in self.file_inventory)
+        types = Counter(row.get("file_type", "") for row in self.file_inventory)
+        total_size = sum(row.get("file_size_bytes", 0) for row in self.file_inventory)
+        complete = sum(
+            self.device_tree.topLevelItem(i).text(2) == "Complete"
+            for i in range(self.device_tree.topLevelItemCount())
         )
-        summary.append(f"Observer: {self.metadata['observer']}")
-        summary.append("")
-
-        summary.append("SENSOR DEPLOYMENTS")
-        summary.append("-" * 60)
-        for plot_num, plot_label, dev_code, device_label in self.devices:
-            device_files = [f for f in self.file_inventory if f["device_label"] == device_label]
-            summary.append(f"  Plot {plot_num} ({plot_label}) - {DEVICE_TYPES[dev_code]}: {len(device_files)} files")
-        summary.append("")
-
-        summary.append("FILES PROCESSED")
-        summary.append("-" * 60)
-        total_files = len(self.file_inventory)
-        total_size = sum(f["file_size_bytes"] for f in self.file_inventory)
-        total_size_mb = total_size / (1024 * 1024)
-
-        summary.append(f"Total Files: {total_files}")
-        summary.append(f"Total Size: {total_size_mb:.2f} MB")
-        summary.append("")
-
-        file_types = {}
-        for f in self.file_inventory:
-            ftype = f["file_type"]
-            file_types[ftype] = file_types.get(ftype, 0) + 1
-
-        summary.append("File Types:")
-        for ftype, count in file_types.items():
-            summary.append(f"  {ftype}: {count}")
-        summary.append("")
-
-        summary.append("LOCAL STAGING")
-        summary.append("-" * 60)
-        summary.append(str(self.current_deployment_folder))
-        summary.append("See the expandable staged deployment tree below.")
-        summary.append("")
-
-        summary.append("=" * 60)
-        summary.append("NEXT STEPS")
-        summary.append("=" * 60)
-        summary.append("1. Review the staged event tree and resolve any QC findings.")
-        summary.append(
-            "2. If bird audio was ingested, choose Uploads → Add Bird Audio to "
-            "SoundHub Staging. This adds it to the pending batch; it does not upload to S3."
+        rows = [
+            ("Files inventoried", f"{len(self.file_inventory):,}"),
+            ("Total size", f"{total_size / (1024 ** 3):,.2f} GB"),
+            ("Devices complete", f"{complete} of {len(self.devices)}"),
+            ("Organization", metadata.get("organization", "")),
+            ("Reserve", metadata.get("site_name", "")),
+            ("Site identifier", f"{metadata.get('site_short_name', '')} · {metadata.get('site_code', '')}"),
+            ("Event", metadata.get("deployment_event_id", "")),
+            ("Period", f"{metadata.get('deployment_event_start_date', '')} → {metadata.get('deployment_event_end_date', '')}"),
+            ("Downloaded by", metadata.get("observer", "")),
+        ]
+        table = "".join(
+            f"<tr><td>{escape(label)}</td><td><b>{escape(str(value))}</b></td></tr>"
+            for label, value in rows
         )
-        summary.append(
-            "3. Choose Uploads → Upload to Box Now and let the automatic file-list "
-            "and hash verification finish."
+        devices = "".join(
+            f"<tr><td>Plot {plot_num} · {escape(dev_code)}</td>"
+            f"<td align='right'>{counts[device_label]:,} files</td></tr>"
+            for plot_num, _plot_label, dev_code, device_label in self.devices
         )
-        summary.append(
-            "4. Keep the original SD cards until Box verification passes and all QC "
-            "issues are resolved."
+        file_types = " · ".join(f"{escape(name)}: {count:,}" for name, count in sorted(types.items()))
+        self.summary_text.setHtml(
+            f"<h3>Collection summary</h3><table cellspacing='8'>{table}</table>"
+            f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
+            "<h3>Before you finish</h3>"
+            "<p>Review the staged event tree and resolve any QC findings. "
+            "Use <b>Uploads → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
+            "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
+            "<p>For bird audio, <b>Uploads → Add Bird Audio to SoundHub Staging</b> adds this event to the "
+            "pending batch. Submit the cumulative SoundHub batch when ready.</p>"
         )
-        summary.append(
-            "5. Submit the cumulative SoundHub batch later, when enough deployments "
-            "have been staged."
-        )
-
-        self.summary_text.setText("\n".join(summary))
         self._populate_staged_event_tree()
 
     def _populate_staged_event_tree(self) -> None:
@@ -2921,7 +3078,7 @@ class FieldDataWizard(QMainWindow):
             self._box_operation_token = object()
         self._box_operation_active = busy
         for button in (self.open_btn, self.switch_deployment_btn, self.new_btn, self.exit_btn):
-            button.setEnabled(not busy)
+            button.setEnabled(not busy and not self._soundhub_busy())
         self.upload_now_btn.setEnabled(not busy and self.box_authenticated)
         self.box_verify_btn.setEnabled(not busy and self.box_authenticated)
         self.fixity_btn.setEnabled(not busy)
@@ -3791,11 +3948,10 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_stage_btn,
             self.soundhub_upload_btn,
             self.soundhub_verify_btn,
-            self.new_btn,
-            self.switch_deployment_btn,
         ):
             action.setEnabled(enabled)
-        self.exit_btn.setEnabled(enabled)
+        for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
+            action.setEnabled(enabled and not self._box_operation_active)
 
     def stage_for_soundhub(self):
         """Add or refresh this event in the cumulative local SoundHub batch."""
@@ -3905,6 +4061,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group.show()
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_group.setTitle("SoundHub staging progress")
         self.soundhub_status_label.setText("Converting bird audio to FLAC…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
@@ -3981,6 +4138,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group.show()
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_group.setTitle("SoundHub upload progress")
         self.soundhub_status_label.setText("Uploading to SoundHub…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)

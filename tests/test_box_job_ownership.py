@@ -31,6 +31,7 @@ class Worker(QObject):
 
 
 class Harness(QObject):
+    _soundhub_busy = w.FieldDataWizard._soundhub_busy
     # QObject-bound slots preserve the same dispatch and sender semantics as the GUI.
     for name in (
         '_box_callback_is_current', '_on_wi_split_progress', '_on_wi_split_completed',
@@ -59,7 +60,8 @@ class Harness(QObject):
         self._post_upload_box_summary = ''
         self._post_upload_box_issues = []
         for name in ('wi_split_thread', 'upload_thread', 'provenance_thread',
-                     'box_verify_thread', 'fixity_thread'):
+                     'box_verify_thread', 'fixity_thread',
+                     'soundhub_stage_thread', 'soundhub_upload_thread'):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',

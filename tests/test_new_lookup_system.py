@@ -583,7 +583,7 @@ def test_metadata_uses_each_device_placement_interval(tmp_path):
     assert audio[0]["elevation_m"] == "128"
 
 
-def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, monkeypatch):
+def test_gui_lists_completed_and_open_events_without_inventing_collection_dates(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
     from cassn.box.auth import BoxConfig
@@ -628,13 +628,10 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         assert window.site_code_edit.text() == "TST"
         form = window.deploy_event_combo.parentWidget().layout()
         assert form.labelForField(window.deploy_event_combo).text() == "Deployment Event:"
-        assert (
-            form.labelForField(window.current_deployment_status_label).text()
-            == "Currently Deployed:"
-        )
+        assert not hasattr(window, "current_deployment_status_label")
         assert form.labelForField(window.deploy_start_date).text() == "Start Date:"
         assert form.labelForField(window.deploy_end_date).text() == "End Date:"
-        assert window.deploy_event_combo.count() == 1
+        assert window.deploy_event_combo.count() == 2
         assert (
             window.deploy_event_combo.currentData()["deployment_event_end_date"]
             == "2026-04-24"
@@ -645,8 +642,19 @@ def test_gui_lists_only_returned_rounds_and_shows_current_read_only(tmp_path, mo
         assert [checkbox.text() for _row, checkbox in checks] == ["seq00", "seq01"]
         assert all(checkbox.isChecked() for _row, checkbox in checks)
         assert window.observer_combo.currentText() == "Imperato, John"
-        assert "1 device in the field" in window.current_deployment_status_label.text()
-        assert "deployed 2026-04-24" in window.current_deployment_status_label.text()
+        assert window.deploy_event_combo.currentText() == "UC_TestSite_20260424 (2 deployments)"
+        assert not hasattr(window, "deploy_event_detail_label")
+        window.deploy_event_combo.setCurrentIndex(1)
+        assert "In field" in window.deploy_event_combo.currentText()
+        assert "(1 deployment)" in window.deploy_event_combo.currentText()
+        assert window.deploy_end_date.text() == "Not collected"
+        message = []
+        monkeypatch.setattr("cassn.gui.wizard.QMessageBox.information", lambda *args: message.append(args))
+        window.validate_and_next()
+        assert message and "Still in Field" in message[0][1]
+        assert window.current_deployment_folder is None
+        window.deploy_event_combo.setCurrentIndex(0)
+        assert window.deploy_end_date.date().toString("yyyy-MM-dd") == "2026-04-24"
     finally:
         window.close()
         app.processEvents()
