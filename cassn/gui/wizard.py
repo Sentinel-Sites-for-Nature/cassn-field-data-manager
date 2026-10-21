@@ -1211,7 +1211,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(self.hash_group)
 
         # SoundHub progress (hidden by default)
-        self.soundhub_group = QGroupBox("SoundHub Preparation & Upload Progress")
+        self.soundhub_group = QGroupBox("SoundHub staging progress")
         soundhub_layout = QVBoxLayout()
 
         self.soundhub_progress_bar = QProgressBar()
@@ -3078,7 +3078,7 @@ class FieldDataWizard(QMainWindow):
             self._box_operation_token = object()
         self._box_operation_active = busy
         for button in (self.open_btn, self.switch_deployment_btn, self.new_btn, self.exit_btn):
-            button.setEnabled(not busy)
+            button.setEnabled(not busy and not self._soundhub_busy())
         self.upload_now_btn.setEnabled(not busy and self.box_authenticated)
         self.box_verify_btn.setEnabled(not busy and self.box_authenticated)
         self.fixity_btn.setEnabled(not busy)
@@ -3948,11 +3948,10 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_stage_btn,
             self.soundhub_upload_btn,
             self.soundhub_verify_btn,
-            self.new_btn,
-            self.switch_deployment_btn,
         ):
             action.setEnabled(enabled)
-        self.exit_btn.setEnabled(enabled)
+        for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
+            action.setEnabled(enabled and not self._box_operation_active)
 
     def stage_for_soundhub(self):
         """Add or refresh this event in the cumulative local SoundHub batch."""
@@ -4062,6 +4061,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group.show()
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_group.setTitle("SoundHub staging progress")
         self.soundhub_status_label.setText("Converting bird audio to FLAC…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
@@ -4138,6 +4138,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group.show()
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
+        self.soundhub_group.setTitle("SoundHub upload progress")
         self.soundhub_status_label.setText("Uploading to SoundHub…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)

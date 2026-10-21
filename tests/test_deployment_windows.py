@@ -28,6 +28,7 @@ def manager(tmp_path, monkeypatch):
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
     for name in ("information", "warning", "critical"):
         monkeypatch.setattr(WindowMessageBox, name, MagicMock())
+    monkeypatch.setattr(FieldDataWizard, "_soundhub_staging_root", lambda self: tmp_path / "soundhub")
     windows = DeploymentWindows(lookups=sample_lookups(), box_config=BoxConfig(), lock_directory=tmp_path / "locks")
     windows.box_authenticated = False
     yield windows
@@ -36,6 +37,7 @@ def manager(tmp_path, monkeypatch):
         window._retiring_card_threads.clear()
         window._box_operation_active = False
         window._soundhub_pending = False
+        window._staging_pending = False
         window._starting_cloud = False
         for attr in ("upload_thread", "wi_split_thread", "provenance_thread", "box_verify_thread", "fixity_thread", "soundhub_stage_thread", "soundhub_upload_thread"):
             setattr(window, attr, None)
@@ -269,3 +271,138 @@ def test_open_event_does_not_claim_staging_or_create_session(manager, tmp_path, 
     claim.assert_not_called()
     assert window.current_deployment_folder is None
     assert not window.staging_root.exists()
+
+
+@pytest.mark.parametrize("box_first", [True, False])
+@pytest.mark.parametrize("same_window", [True, False])
+def test_box_and_local_soundhub_staging_run_together(manager, monkeypatch, box_first, same_window):
+    box = manager.new_window()
+    stage = box if same_window else manager.new_window()
+    worker = MagicMock()
+    worker.isRunning.return_value = True
+    stage_start = MagicMock(side_effect=lambda self: setattr(self, "soundhub_stage_thread", worker))
+    box_start = MagicMock(side_effect=lambda self: setattr(self, "_box_operation_active", True))
+    monkeypatch.setattr(FieldDataWizard, "stage_for_soundhub", lambda self: stage_start(self))
+    monkeypatch.setattr(FieldDataWizard, "upload_to_box", lambda self: box_start(self))
+    operations = [box.upload_to_box, stage.stage_for_soundhub]
+    for operation in operations if box_first else reversed(operations):
+        operation()
+    stage_start.assert_called_once()
+    box_start.assert_called_once()
+    assert box._cloud_lease is not None
+    assert stage._staging_lease is not None
+    assert stage._staging_pending
+
+    box._box_operation_active = False
+    box._release_idle_cloud()
+    assert box._cloud_lease is None
+    assert stage._staging_lease is not None
+    assert stage._work_running()
+
+
+def test_staging_keeps_batch_owned_until_completion_and_blocks_submission(manager, monkeypatch):
+    stage, other = manager.new_window(), manager.new_window()
+    worker = MagicMock()
+    worker.isRunning.return_value = False  # Worker ended; completion is still queued.
+    stage._run_staging_operation(lambda: setattr(stage, "soundhub_stage_thread", worker))
+    stage._release_idle_cloud()
+    assert stage._staging_lease is not None
+    attempted = MagicMock()
+    other._run_staging_operation(attempted)
+    monkeypatch.setattr(FieldDataWizard, "upload_to_soundhub", attempted)
+    monkeypatch.setattr(FieldDataWizard, "verify_soundhub", attempted)
+    other.upload_to_soundhub()
+    other.verify_soundhub()
+    attempted.assert_not_called()
+    assert other._cloud_lease is None
+
+    # A Box job can start in the same window despite the queued staging callback.
+    stage._run_cloud_operation(lambda: setattr(stage, "_box_operation_active", True))
+    stage.on_soundhub_stage_complete(True, False, "Staged", {})
+    assert stage._staging_lease is None
+    assert stage._cloud_lease is not None
+    assert not stage.exit_btn.isEnabled()
+    assert not stage.new_btn.isEnabled()
+    FieldDataWizard._set_box_controls_busy(stage, False)
+    stage._release_idle_cloud()
+    assert stage._cloud_lease is None
+    assert stage.exit_btn.isEnabled()
+    other._run_staging_operation(attempted)
+    attempted.assert_called_once()
+
+
+def test_declined_or_failed_staging_does_not_release_box_ownership(manager):
+    window = manager.new_window()
+    window._run_cloud_operation(lambda: setattr(window, "_box_operation_active", True))
+    window._run_staging_operation(lambda: None)
+    assert window._staging_lease is None
+    assert window._cloud_lease is not None
+
+    def fail():
+        window._set_soundhub_actions_enabled(False)
+        raise RuntimeError("synthetic encoder start failure")
+
+    window._run_staging_operation(fail)
+    assert not window._staging_pending
+    assert window._staging_lease is None
+    assert window._cloud_lease is not None
+    assert not window.exit_btn.isEnabled()
+    assert window.soundhub_stage_btn.isEnabled()
+
+
+def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manager, monkeypatch, tmp_path):
+    import cassn.gui.wizard as wizard_module
+    window = manager.new_window()
+    window.current_deployment_folder = tmp_path / "deployment"
+    window._box_operation_active = True
+    worker = MagicMock()
+    worker.isRunning.return_value = False
+    worker.start.side_effect = lambda: setattr(worker.isRunning, "return_value", True)
+    monkeypatch.setattr(wizard_module, "flac_available", lambda: True)
+    monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args: worker)
+    monkeypatch.setattr(WindowMessageBox, "question", lambda *args: WindowMessageBox.Yes)
+    window.soundhub_group.setTitle("SoundHub upload progress")
+    window.stage_for_soundhub()
+    assert window.soundhub_group.title() == "SoundHub staging progress"
+    assert window._staging_pending
+    FieldDataWizard._set_box_controls_busy(window, False)
+    assert not window.exit_btn.isEnabled()
+    assert not window.new_btn.isEnabled()
+    assert window.cancel_soundhub_btn.isEnabled()
+
+
+def test_failed_box_start_keeps_soundhub_staging_and_its_controls(manager):
+    window = manager.new_window()
+    worker = MagicMock()
+    worker.isRunning.return_value = True
+
+    def stage():
+        window.soundhub_stage_thread = worker
+        window._set_soundhub_actions_enabled(False)
+        window.cancel_soundhub_btn.show()
+
+    window._run_staging_operation(stage)
+
+    def fail():
+        window._box_operation_active = True
+        raise RuntimeError("synthetic Box start failure")
+
+    window._run_cloud_operation(fail)
+    assert window._cloud_lease is None
+    assert window._staging_lease is not None
+    assert window._staging_pending
+    assert not window.soundhub_stage_btn.isEnabled()
+    assert not window.cancel_soundhub_btn.isHidden()
+    assert not window.exit_btn.isEnabled()
+
+
+def test_soundhub_submission_reserves_batch_against_staging(manager):
+    upload, stage = manager.new_window(), manager.new_window()
+    worker = MagicMock()
+    worker.isRunning.return_value = True
+    upload._run_cloud_operation(lambda: setattr(upload, "soundhub_upload_thread", worker), soundhub=True)
+    assert upload._soundhub_pending
+    attempted = MagicMock()
+    stage._run_staging_operation(attempted)
+    attempted.assert_not_called()
+    assert stage._staging_lease is None

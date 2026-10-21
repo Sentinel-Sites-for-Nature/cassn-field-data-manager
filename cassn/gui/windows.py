@@ -116,7 +116,7 @@ class DeploymentWindows:
 
 
 class DeploymentWindow(FieldDataWizard):
-    """One editable deployment per window; cloud jobs share an exclusive lane."""
+    """Independent deployment, cloud connection, and local SoundHub batch ownership."""
 
     closed = Signal(object)
 
@@ -127,6 +127,8 @@ class DeploymentWindow(FieldDataWizard):
         self._cloud_lease = None
         self._starting_cloud = False
         self._soundhub_pending = False
+        self._staging_pending = False
+        self._staging_lease = None
         self._closed = False
         self._callback_depth = 0
         self._initializing = True
@@ -185,7 +187,7 @@ class DeploymentWindow(FieldDataWizard):
         super()._navigate_workspace(index)
 
     def validate_and_next_collection(self):
-        if self._cloud_lease or self._starting_cloud or self._soundhub_pending:
+        if self._cloud_lease or self._staging_lease or self._starting_cloud or self._soundhub_pending:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s cloud operation to finish before regenerating deployment files.")
             return
         super().validate_and_next_collection()
@@ -268,7 +270,7 @@ class DeploymentWindow(FieldDataWizard):
         return True
 
     def copy_sd_card_data(self):
-        if self._cloud_lease:
+        if self._cloud_lease or self._staging_lease:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s cloud operation to finish before copying cards.")
             return
         try:
@@ -286,20 +288,21 @@ class DeploymentWindow(FieldDataWizard):
             claim[1].release()
         super()._release_finished_card_thread(worker)
 
+    def _cloud_workers_running(self):
+        return any(worker is not None and worker.isRunning() for worker in (
+            self.wi_split_thread, self.upload_thread, self.provenance_thread,
+            self.box_verify_thread, self.fixity_thread, self.soundhub_upload_thread,
+        ))
+
     def _workers_running(self):
-        return any(
-            worker is not None and worker.isRunning()
-            for worker in (
-                self.wi_split_thread, self.upload_thread, self.provenance_thread,
-                self.box_verify_thread, self.fixity_thread,
-                self.soundhub_stage_thread, self.soundhub_upload_thread,
-            )
-        )
+        stage = self.soundhub_stage_thread
+        return self._cloud_workers_running() or bool(stage and stage.isRunning())
 
     def _work_running(self):
         return bool(
             self.card_ingest_threads or self._retiring_card_threads
             or self._box_operation_active or self._soundhub_pending or self._starting_cloud
+            or self._staging_pending
             or self._workers_running() or self._callback_depth
         )
 
@@ -313,20 +316,39 @@ class DeploymentWindow(FieldDataWizard):
     _on_fixity_finished = _guard_callback(FieldDataWizard._on_fixity_finished)
 
     def _release_idle_cloud(self):
-        if self._cloud_lease and not self._work_running():
+        if self._cloud_lease and not self._cloud_work_running():
             self._cloud_lease.release()
             self._cloud_lease = None
+        stage = self.soundhub_stage_thread
+        if self._staging_lease and not self._staging_pending and not (stage and stage.isRunning()):
+            self._staging_lease.release()
+            self._staging_lease = None
 
-    def _run_cloud_operation(self, handler, *, soundhub=False):
-        if self._work_running() or self._cloud_lease:
+    def _cloud_work_running(self):
+        """Local SoundHub conversion does not occupy the cloud connection."""
+        return bool(
+            self.card_ingest_threads or self._retiring_card_threads
+            or self._box_operation_active or self._soundhub_pending or self._starting_cloud
+            or self._callback_depth
+            or self._cloud_workers_running()
+        )
+
+    def _soundhub_batch_key(self):
+        return f"soundhub-batch:{self._soundhub_staging_root().resolve()}"
+
+    def _run_cloud_operation(self, handler, *, soundhub=False, soundhub_batch=False):
+        if self._cloud_work_running() or self._cloud_lease:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s active jobs to finish before starting another cloud operation.")
             return
         try:
-            self._cloud_lease = ResourceLease(self.manager.lock_directory, ["cloud-operations"])
+            keys = ["cloud-operations"]
+            if soundhub or soundhub_batch:
+                keys.append(self._soundhub_batch_key())
+            self._cloud_lease = ResourceLease(self.manager.lock_directory, keys)
         except ResourceBusy:
             QMessageBox.information(
-                self, "Cloud Operation Running in Another Window",
-                "Another window is using Box or SoundHub. You can keep ingesting cards here; start this cloud operation when the other one finishes.",
+                self, "Cloud Connection or SoundHub Batch in Use",
+                "A Box or SoundHub operation is using the connection or this staging batch. Wait for it to finish before starting this operation.",
             )
             return
         except OSError as exc:
@@ -338,12 +360,14 @@ class DeploymentWindow(FieldDataWizard):
         try:
             handler()
         except Exception as exc:
-            if not self._workers_running():
+            if not self._cloud_workers_running():
                 self._soundhub_pending = False
                 FieldDataWizard._set_box_controls_busy(self, False)
-                self._set_soundhub_actions_enabled(True)
+                if not self._staging_pending:
+                    self._set_soundhub_actions_enabled(True)
                 self.cancel_upload_btn.hide()
-                self.cancel_soundhub_btn.hide()
+                if not self._staging_pending:
+                    self.cancel_soundhub_btn.hide()
             QMessageBox.critical(self, "Operation Could Not Start", str(exc))
         finally:
             self._starting_cloud = False
@@ -361,19 +385,46 @@ class DeploymentWindow(FieldDataWizard):
         self._run_cloud_operation(super().run_fixity_check)
 
     def stage_for_soundhub(self):
-        self._run_cloud_operation(super().stage_for_soundhub, soundhub=True)
+        self._run_staging_operation(super().stage_for_soundhub)
+
+    def _run_staging_operation(self, handler):
+        if self._staging_pending or self._soundhub_pending or self._soundhub_busy() or self.card_ingest_threads or self._retiring_card_threads:
+            QMessageBox.information(self, "Operation Running", "Wait for card ingest or the current SoundHub operation to finish before staging.")
+            return
+        try:
+            self._staging_lease = ResourceLease(self.manager.lock_directory, [self._soundhub_batch_key()])
+        except ResourceBusy:
+            QMessageBox.information(self, "SoundHub Batch in Use", "Another operation is staging or submitting this SoundHub batch. Wait for it to finish.")
+            return
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot Reserve SoundHub Staging", str(exc))
+            return
+        prior = self.soundhub_stage_thread
+        self._staging_pending = True
+        try:
+            handler()
+        except Exception as exc:
+            if self.soundhub_stage_thread is None or not self.soundhub_stage_thread.isRunning():
+                self._staging_pending = False
+                self._set_soundhub_actions_enabled(True)
+                self.cancel_soundhub_btn.hide()
+            QMessageBox.critical(self, "SoundHub Staging Could Not Start", str(exc))
+        finally:
+            if prior is self.soundhub_stage_thread:
+                self._staging_pending = False
+            self._release_idle_cloud()
 
     def upload_to_soundhub(self):
         self._run_cloud_operation(super().upload_to_soundhub, soundhub=True)
 
     def verify_soundhub(self):
-        self._run_cloud_operation(super().verify_soundhub)
+        self._run_cloud_operation(super().verify_soundhub, soundhub_batch=True)
 
     def on_soundhub_stage_complete(self, *args):
         try:
             super().on_soundhub_stage_complete(*args)
         finally:
-            self._soundhub_pending = False
+            self._staging_pending = False
             self._release_idle_cloud()
 
     def on_soundhub_upload_complete(self, *args):
