@@ -1562,6 +1562,25 @@ class FieldDataWizard(QMainWindow):
             )
             return
 
+        # Selecting an event through setup must reopen its saved inventory,
+        # just as selecting it in the session picker does. Never overwrite it
+        # with a new, empty session merely because this window is new.
+        folder = self.staging_root / selected_event["deployment_event_id"]
+        if self.current_deployment_folder is None and (folder / "session.json").exists():
+            try:
+                session = json.loads((folder / "session.json").read_text())
+                if not isinstance(session, dict) or session.get("schema_version") != SESSION_SCHEMA_VERSION:
+                    raise ValueError("Unsupported session format")
+                metadata = normalize_deployment_event_metadata(session.get("metadata", {}))
+                if metadata.get("deployment_event_id") != selected_event["deployment_event_id"]:
+                    raise ValueError("Saved session belongs to a different deployment event")
+                session["deployment_folder"] = str(folder)
+            except (OSError, ValueError, TypeError) as exc:
+                QMessageBox.critical(self, "Cannot Resume Deployment", f"Could not read {folder / 'session.json'}:\n{exc}")
+                return
+            self.restore_session(session)
+            return
+
         # Store metadata
         site_name = self.site_name_combo.currentText()
         site_short_name = self.site_short_name_edit.text()
@@ -1611,6 +1630,8 @@ class FieldDataWizard(QMainWindow):
 
         # Populate collection list
         self.populate_collection_list()
+        if not self.save_session():
+            return
 
         # Go to collection tab
         self.tabs.setCurrentIndex(1)
@@ -1624,19 +1645,24 @@ class FieldDataWizard(QMainWindow):
 
         (self.current_deployment_folder / "raw_data").mkdir(exist_ok=True)
 
-        self.save_session()
-
     def populate_collection_list(self):
-        """Populate device tree with selected devices"""
+        """Rebuild rows by device identity without losing completed work."""
+        statuses = {
+            item.data(0, Qt.UserRole): item.text(2)
+            for item in (self.device_tree.topLevelItem(i) for i in range(self.device_tree.topLevelItemCount()))
+            if item.data(0, Qt.UserRole)
+        }
+        counts = Counter(entry.get("device_label") for entry in self.file_inventory)
         self.device_tree.clear()
 
         for plot_num, plot_label, dev_code, device_label in self.devices:
             item = QTreeWidgetItem([
                 f"Plot {plot_num}",
                 {"ML": "Camera · ML", "SA": "Camera · SA", "BD": "Bird audio", "BT": "Bat audio"}.get(dev_code, DEVICE_TYPES[dev_code]),
-                "Pending",
-                "0",
+                statuses.get(device_label, "Incomplete" if counts[device_label] else "Pending"),
+                str(counts[device_label]),
             ])
+            item.setData(0, Qt.UserRole, device_label)
             item.setToolTip(0, f"Plot {plot_num} ({plot_label})")
             item.setToolTip(1, f"{DEVICE_TYPES[dev_code]} · {device_label}")
             item.setTextAlignment(3, Qt.AlignRight | Qt.AlignVCenter)
