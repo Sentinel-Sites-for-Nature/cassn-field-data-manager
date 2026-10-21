@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -69,7 +69,10 @@ from cassn.box.threads import (
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
-from cassn.gui.workspace import CardJobsScroll, FieldWorkspace, workspace_label
+from cassn.gui.workspace import (
+    ARTWORK, CardJobsScroll, DeviceGridScroll, EventDelegate, FieldWorkspace, device_heading,
+    event_description, workspace_label,
+)
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
@@ -724,7 +727,7 @@ class FieldDataWizard(QMainWindow):
         layout = QVBoxLayout(scroll_widget)
 
         # Title
-        title = workspace_label("Deployment", "pageTitle")
+        title = workspace_label("Deployments and devices", "pageTitle")
         layout.addWidget(title)
         layout.addWidget(workspace_label(
             "Choose the event and devices you’re collecting.", "subtitle", wrap=True,
@@ -735,6 +738,7 @@ class FieldDataWizard(QMainWindow):
         # Form layout for metadata fields
         form_group = QGroupBox("Deployment Information")
         form_layout = QFormLayout()
+        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
 
         # Organization
         self.org_combo = QComboBox()
@@ -768,23 +772,14 @@ class FieldDataWizard(QMainWindow):
         # metadata are scoped to this selection.
         self.deploy_event_combo = QComboBox()
         self.deploy_event_combo.setToolTip(
-            "Pick the completed deployment event. The device grid and metadata "
-            "will use only placements assigned to that event."
+            "Choose a collection event to ingest data, or inspect deployments still in the field."
         )
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
         form_layout.addRow("Deployment Event:", self.deploy_event_combo)
 
-        # Open placements are useful field context, but they are not actionable
-        # downloads and must never supply an invented retrieval/end date.
-        self.current_deployment_status_label = QLabel("None recorded")
-        self.current_deployment_status_label.setWordWrap(True)
-        self.current_deployment_status_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
-        )
-        self.current_deployment_status_label.setToolTip(
-            "Read-only curated inventory for devices that remain in the field."
-        )
-        form_layout.addRow("Currently Deployed:", self.current_deployment_status_label)
+        self.deploy_event_combo.setItemDelegate(EventDelegate(self.deploy_event_combo))
+        self.deploy_event_detail_label = workspace_label("", "muted", wrap=True)
+        form_layout.addRow("", self.deploy_event_detail_label)
 
         # Deployment dates
         self.deploy_start_date = QDateEdit()
@@ -796,6 +791,7 @@ class FieldDataWizard(QMainWindow):
         self.deploy_end_date = QDateEdit()
         self.deploy_end_date.setReadOnly(True)
         self.deploy_end_date.setCalendarPopup(False)
+        self.deploy_end_date.setSpecialValueText("Not collected")
         self.deploy_end_date.setDate(QDate.currentDate())
         form_layout.addRow("End Date:", self.deploy_end_date)
 
@@ -838,8 +834,7 @@ class FieldDataWizard(QMainWindow):
         self.grid_layout.addWidget(QLabel("Plot"), 0, 0)
         col = 1
         for dev_code, dev_name in DEVICE_TYPES.items():
-            label = QLabel(dev_name)
-            label.setWordWrap(True)
+            label = device_heading(dev_code, dev_name)
             self.grid_layout.addWidget(label, 0, col)
             col += 1
 
@@ -857,7 +852,9 @@ class FieldDataWizard(QMainWindow):
         else:
             self._rebuild_plot_grid(site_short_name=None)
 
-        device_layout.addLayout(self.grid_layout)
+        device_grid = QWidget()
+        device_grid.setLayout(self.grid_layout)
+        device_layout.addWidget(DeviceGridScroll(device_grid))
 
         # Quick select buttons
         button_layout = QHBoxLayout()
@@ -897,6 +894,12 @@ class FieldDataWizard(QMainWindow):
 
         # Box connection status indicator
         box_status_layout = QHBoxLayout()
+        box_logo = QLabel()
+        box_logo.setPixmap(QPixmap(str(ARTWORK / "box.webp")).scaled(
+            55, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation,
+        ))
+        box_logo.setAccessibleName("Box logo")
+        box_status_layout.addWidget(box_logo)
         box_status_label = QLabel()
         if self.box_authenticated:
             box_status_label.setText("✓ Box Connected")
@@ -1339,49 +1342,26 @@ class FieldDataWizard(QMainWindow):
         self._populate_deploy_events("")
 
     def _populate_deploy_events(self, site_short_name):
-        """Show completed deployment events and one current field summary."""
+        """List collection events first, followed by inspectable open deployments."""
         if not hasattr(self, "deploy_event_combo"):
             return
         combo = self.deploy_event_combo
         combo.blockSignals(True)
         combo.clear()
-        events = self.lookups.returned_rounds(site_short_name)
+        events = (self.lookups.returned_rounds(site_short_name)
+                  + self.lookups.current_rounds(site_short_name))
         for ev in events:
-            start = ev["deployment_event_start_date"]
-            end = ev["deployment_event_end_date"]
-            count = ev.get("deployment_count", ev.get("device_count", 0))
-            label = (
-                f"{ev['deployment_event_id']} — {start} → {end}  "
-                f"({count} deployment{'s' if count != 1 else ''})"
-            )
-            combo.addItem(label, ev)
+            combo.addItem(ev["deployment_event_id"] or "Open deployments · In field", ev)
         if not events:
-            combo.addItem("— No returned-card events —", None)
+            combo.addItem("No deployment events", None)
         combo.setCurrentIndex(0)
         combo.blockSignals(False)
-
-        current = self.lookups.current_rounds(site_short_name)
-        if current:
-            event = current[0]
-            earliest = event["deployment_event_start_date"]
-            latest = event.get("latest_open_deployment_start_date", earliest)
-            date_text = (
-                f"deployed {earliest}–{latest}"
-                if latest != earliest
-                else f"deployed {earliest}"
-            )
-            count = event["device_count"]
-            self.current_deployment_status_label.setText(
-                f"{count} device{'s' if count != 1 else ''} in the field "
-                f"({date_text})"
-            )
-        else:
-            self.current_deployment_status_label.setText("None recorded")
         self.on_deploy_event_changed(0)
 
     def on_deploy_event_changed(self, index):
         """Auto-fill the deployment start/end date pickers from the chosen event."""
         ev = self.deploy_event_combo.itemData(index)
+        self.deploy_event_detail_label.setText(event_description(ev) if ev else "")
         if not ev:
             self.lookups.clear_active_deployment_round()
             self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
@@ -1394,6 +1374,8 @@ class FieldDataWizard(QMainWindow):
             end = QDate.fromString(ev["deployment_event_end_date"], "yyyy-MM-dd")
             if end.isValid():
                 self.deploy_end_date.setDate(end)
+        else:
+            self.deploy_end_date.setDate(self.deploy_end_date.minimumDate())
         self._rebuild_plot_grid(self.site_short_name_edit.text() or None)
 
     def on_observer_changed(self, text):
@@ -1535,6 +1517,13 @@ class FieldDataWizard(QMainWindow):
                 self,
                 "Missing Deployment Event",
                 "This site has no selectable curated deployment event.",
+            )
+            return
+
+        if not selected_event.get("deployment_event_id") or not selected_event.get("deployment_event_end_date"):
+            QMessageBox.information(
+                self, "Deployment Still in Field",
+                "These devices have no recorded collection date. Select a completed collection event to ingest data.",
             )
             return
 

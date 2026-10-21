@@ -136,6 +136,7 @@ class DeploymentWindow(FieldDataWizard):
         self._session_picker_timer.setSingleShot(True)
         self._session_picker_timer.timeout.connect(self._open_saved_sessions)
         file_menu = self.menuBar().addMenu("File")
+        self.menuBar().insertMenu(self.menuBar().actions()[0], file_menu)
         self.new_window_action = QAction("New Window", self)
         self.new_window_action.setShortcut(QKeySequence.New)
         self.new_window_action.triggered.connect(lambda: manager.new_window())
@@ -217,7 +218,7 @@ class DeploymentWindow(FieldDataWizard):
             return
         event = self.deploy_event_combo.currentData()
         claimed = False
-        if event:
+        if event and event.get("deployment_event_id") and event.get("deployment_event_end_date"):
             folder = self.staging_root / event["deployment_event_id"]
             if not self._claim_deployment(folder, event["deployment_event_id"]):
                 return

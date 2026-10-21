@@ -1,19 +1,22 @@
 """Presentation shell for the field workspace; workflow decisions stay in the wizard."""
 
-from pathlib import Path
+import re
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QAction, QKeySequence, QPalette, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QStyledItemDelegate, QStyle,
 )
 
+from cassn.config import BUNDLE_DIR
 
-PAGE_NAMES = ("Deployment", "Card ingest", "Review & upload")
+
+PAGE_NAMES = ("Deployments and devices", "Card ingest", "Review & upload")
+ARTWORK = BUNDLE_DIR / "assets" / "workspace"
 
 
-def workspace_stylesheet(palette: QPalette) -> str:
+def workspace_stylesheet(palette: QPalette, zoom: int = 100) -> str:
     """Use the OS appearance with restrained forest accents and readable surfaces."""
     dark = palette.color(QPalette.Window).lightness() < 128
     if dark:
@@ -22,7 +25,7 @@ def workspace_stylesheet(palette: QPalette) -> str:
     else:
         background, panel, text, muted = "#f4f6f7", "#ffffff", "#24333d", "#5c6d79"
         line, soft, accent, tint, on_accent = "#dce3e7", "#edf1f3", "#216e62", "#e6f1ed", "#ffffff"
-    return f"""
+    stylesheet = f"""
 QWidget#fieldWorkspace {{ background: {background}; color: {text}; }}
 QWidget {{ color: {text}; font-family: '.AppleSystemUIFont', 'Segoe UI', sans-serif; font-size: 13px; }}
 QFrame#workspaceSidebar, QFrame#workspaceHeader {{ background: {panel}; }}
@@ -76,8 +79,65 @@ QMenu::item {{ padding: 9px 18px; }}
 QMenu::item:selected {{ background: {tint}; }}
 QMenu::item:disabled {{ color: {muted}; }}
 QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox {{ padding-right: 30px; }}
+QComboBox::down-arrow {{ image: url({(ARTWORK / 'chevron.svg').as_posix()}); width: 16px; height: 16px; }}
 QToolTip {{ background: {panel}; color: {text}; border: 1px solid {line}; padding: 5px; }}
 """
+    return re.sub(r"font-size: (\d+)px", lambda m: f"font-size: {round(int(m[1]) * zoom / 100)}px", stylesheet)
+
+
+def event_description(event):
+    start = event["deployment_event_start_date"]
+    end = event["deployment_event_end_date"]
+    count = event.get("deployment_count", event.get("device_count", 0))
+    dates = f"{start} to {end}" if end else f"Deployed {start} · In field"
+    return f"{dates} · {count} deployment{'s' if count != 1 else ''}"
+
+
+class EventDelegate(QStyledItemDelegate):
+    """Keep event names prominent and date/count descriptors secondary in the picker."""
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(option.fontMetrics.height() * 2 + 20)
+        return size
+
+    def paint(self, painter, option, index):
+        event = index.data(Qt.UserRole)
+        if not event:
+            return super().paint(painter, option, index)
+        self.initStyleOption(option, index)
+        option.text = ""
+        style = option.widget.style() if option.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, option, painter, option.widget)
+        painter.save()
+        rect = option.rect.adjusted(10, 4, -10, -4)
+        font = option.font
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(option.palette.color(QPalette.Text))
+        painter.drawText(rect, Qt.AlignTop | Qt.AlignLeft, option.fontMetrics.elidedText(index.data(), Qt.ElideRight, rect.width()))
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(option.palette.color(QPalette.PlaceholderText))
+        painter.drawText(rect, Qt.AlignBottom | Qt.AlignLeft, option.fontMetrics.elidedText(event_description(event), Qt.ElideRight, rect.width()))
+        painter.restore()
+
+
+def device_heading(code, name):
+    heading = QWidget()
+    layout = QHBoxLayout(heading)
+    layout.setContentsMargins(0, 0, 0, 4)
+    image = QLabel()
+    pixmap = QPixmap(str(ARTWORK / ("reconyx.png" if code in {"ML", "SA"} else "audiomoth.jpeg")))
+    if code == "SA":
+        pixmap = pixmap.transformed(QTransform().rotate(90), Qt.SmoothTransformation)
+    image.setPixmap(pixmap.scaled(46, 46, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    image.setAccessibleName(f"{code} device")
+    layout.addWidget(image)
+    text = workspace_label(f"{'🐦 ' if code == 'BD' else '🦇 ' if code == 'BT' else ''}{name}", "sectionTitle", wrap=True)
+    layout.addWidget(text, 1)
+    return heading
 
 
 def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
@@ -89,7 +149,7 @@ def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
 
 
 class FieldWorkspace(QWidget):
-    """Sidebar and persistent deployment context around the existing workflow pages."""
+    """Ordered ingest navigation around the workflow pages."""
 
     page_requested = Signal(int)
     compact_changed = Signal(bool)
@@ -98,28 +158,29 @@ class FieldWorkspace(QWidget):
         super().__init__(parent)
         self.setObjectName("fieldWorkspace")
         self.setStyleSheet(workspace_stylesheet(QApplication.palette()))
+        self.zoom = 100
         self._compact = None
+        self._site = "Choose a reserve"
         shell = QHBoxLayout(self)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
 
         sidebar = QFrame()
         sidebar.setObjectName("workspaceSidebar")
-        sidebar.setFixedWidth(200)
+        self.sidebar = sidebar
+        sidebar.setFixedWidth(252)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(18, 28, 18, 22)
         side.setSpacing(8)
-        mark = workspace_label("CA", "brandMark")
-        mark.setFixedSize(44, 44)
-        mark.setAlignment(Qt.AlignCenter)
-        side.addWidget(mark)
-        side.addSpacing(8)
         side.addWidget(workspace_label("CA-SSN", "brand"))
         side.addWidget(workspace_label("Field Data Manager", "muted"))
         side.addSpacing(24)
+        side.addWidget(workspace_label("Ingest data", "sectionTitle"))
+        side.addWidget(workspace_label("Complete steps 1 to 3", "muted"))
         self.navigation = []
         for index, name in enumerate(PAGE_NAMES):
-            button = QPushButton(name.replace("&", "&&"))
+            button = QPushButton(f"{index + 1}  " + name.replace("&", "&&"))
+            button.setToolTip(f"Step {index + 1} of 3: {name}")
             button.setProperty("role", "navigation")
             button.setCheckable(True)
             button.setAutoExclusive(True)
@@ -127,22 +188,9 @@ class FieldWorkspace(QWidget):
             button.clicked.connect(lambda _checked=False, i=index: self.page_requested.emit(i))
             side.addWidget(button)
             self.navigation.append(button)
-        side.addSpacing(24)
-        side.addWidget(workspace_label("CURRENT DEPLOYMENT", "muted"))
-        self.context_site = workspace_label("Choose a reserve", "contextTitle", wrap=True)
-        self.context_dates = workspace_label("", "muted", wrap=True)
-        self.context_devices = workspace_label("", "muted", wrap=True)
-        side.addWidget(self.context_site)
-        side.addWidget(self.context_dates)
-        side.addWidget(self.context_devices)
         side.addStretch()
         self.box_status = workspace_label("", "muted", wrap=True)
-        self.staging_status = workspace_label("", "muted", wrap=True)
-        self.staging_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         side.addWidget(self.box_status)
-        side.addSpacing(8)
-        side.addWidget(workspace_label("LOCAL STAGING", "muted"))
-        side.addWidget(self.staging_status)
         shell.addWidget(sidebar)
 
         content = QWidget()
@@ -165,6 +213,26 @@ class FieldWorkspace(QWidget):
         self.pages.currentChanged.connect(self._sync_page)
         body.addWidget(self.pages, 1)
         shell.addWidget(content, 1)
+        view_menu = parent.menuBar().addMenu("View")
+        self.zoom_in_action = QAction("Zoom In", parent)
+        self.zoom_in_action.setShortcuts([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
+        self.zoom_out_action = QAction("Zoom Out", parent)
+        self.zoom_out_action.setShortcut(QKeySequence("Ctrl+-"))
+        self.zoom_reset_action = QAction("Actual Size", parent)
+        self.zoom_reset_action.setShortcut(QKeySequence("Ctrl+0"))
+        for action in (self.zoom_in_action, self.zoom_out_action, self.zoom_reset_action):
+            view_menu.addAction(action)
+        self.zoom_in_action.triggered.connect(lambda: self.set_zoom(self.zoom + 10))
+        self.zoom_out_action.triggered.connect(lambda: self.set_zoom(self.zoom - 10))
+        self.zoom_reset_action.triggered.connect(lambda: self.set_zoom(100))
+
+    def set_zoom(self, percent):
+        self.zoom = max(80, min(200, percent))
+        self.setStyleSheet(workspace_stylesheet(QApplication.palette(), self.zoom))
+        self.sidebar.setFixedWidth(round(252 * self.zoom / 100))
+        self.zoom_in_action.setEnabled(self.zoom < 200)
+        self.zoom_out_action.setEnabled(self.zoom > 80)
+        self.zoom_reset_action.setText(f"Actual Size (zoom {self.zoom}%)")
 
     def _sync_page(self, index):
         for i, button in enumerate(self.navigation):
@@ -173,21 +241,12 @@ class FieldWorkspace(QWidget):
 
     def set_page_context(self, index):
         if 0 <= index < len(PAGE_NAMES):
-            site = self.context_site.text()
+            site = self._site
             self.breadcrumb.setText(f"{site}  /  {PAGE_NAMES[index]}")
             self.breadcrumb.setToolTip(self.breadcrumb.text())
 
     def set_context(self, *, site, dates, devices, staging, box_connected, active_jobs):
-        self.context_site.setText(site or "Choose a reserve")
-        self.context_dates.setText(dates)
-        self.context_devices.setText(devices)
-        self.staging_status.setText(
-            self.staging_status.fontMetrics().elidedText(
-                Path(staging).name or staging, Qt.ElideMiddle, 164,
-            )
-        )
-        self.staging_status.setToolTip(staging)
-        self.staging_status.setAccessibleName(f"Local staging: {staging}")
+        self._site = site or "Choose a reserve"
         self.box_status.setText("● Box connected" if box_connected else "○ Box not connected")
         role = "connected" if box_connected else "muted"
         if self.box_status.property("role") != role:
@@ -210,7 +269,7 @@ class FieldWorkspace(QWidget):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.ApplicationPaletteChange:
-            self.setStyleSheet(workspace_stylesheet(QApplication.palette()))
+            self.setStyleSheet(workspace_stylesheet(QApplication.palette(), self.zoom))
 
 
 class CardJobsScroll(QScrollArea):
@@ -228,3 +287,22 @@ class CardJobsScroll(QScrollArea):
         if columns != self._columns:
             self._columns = columns
             self.columns_changed.emit()
+
+
+class DeviceGridScroll(QScrollArea):
+    """Scroll a wide device table without stretching the surrounding form."""
+
+    def __init__(self, content):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setWidget(content)
+        content.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self.widget() and event.type() == QEvent.LayoutRequest:
+            height = self.widget().sizeHint().height() + self.horizontalScrollBar().sizeHint().height() + 4
+            if self.height() != height:
+                self.setFixedHeight(height)
+        return super().eventFilter(watched, event)

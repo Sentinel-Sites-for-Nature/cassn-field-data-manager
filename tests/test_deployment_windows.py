@@ -58,6 +58,9 @@ def test_new_window_action_creates_independent_lookup_state(manager):
     assert second.lookups.active_deployment_rows
     assert second.metadata == {}
     assert second.file_inventory == []
+    first.workspace.zoom_in_action.trigger()
+    assert first.workspace.zoom == 110
+    assert second.workspace.zoom == 100
 
 
 def test_duplicate_deployment_blocked_before_create_or_restore(manager, tmp_path, monkeypatch):
@@ -251,3 +254,18 @@ sys.stdin.readline()
         child.communicate(timeout=10)
     recovered = ResourceLease(tmp_path, ["deployment"])
     recovered.release()
+
+
+def test_open_event_does_not_claim_staging_or_create_session(manager, tmp_path, monkeypatch):
+    window = manager.new_window()
+    event = dict(window.deploy_event_combo.currentData())
+    event.update(deployment_event_id="", deployment_event_end_date="")
+    window.deploy_event_combo.addItem("Open deployments · In field", event)
+    window.deploy_event_combo.setCurrentIndex(window.deploy_event_combo.count() - 1)
+    window.staging_root = tmp_path / "staging"
+    claim = MagicMock()
+    monkeypatch.setattr(window, "_claim_deployment", claim)
+    window.validate_and_next()
+    claim.assert_not_called()
+    assert window.current_deployment_folder is None
+    assert not window.staging_root.exists()

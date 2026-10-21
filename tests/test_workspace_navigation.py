@@ -114,3 +114,36 @@ def test_review_summary_escapes_metadata_and_counts_each_device(workspace_window
     assert "A & B" in text
     assert "1 files" in text
     assert "0 of 1" in text
+
+
+def test_zoom_actions_resize_text_and_preserve_page_and_selection(workspace_window):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QStyle, QStyleOptionComboBox
+
+    app, window = workspace_window
+    window.resize(1000, 740)
+    window.show()
+    app.processEvents()
+    combo = window.site_name_combo
+    initial_size = combo.font().pixelSize()
+    initial_text = combo.currentText()
+    window.workspace.zoom_in_action.trigger()
+    app.processEvents()
+    assert window.workspace.zoom == 110
+    assert combo.font().pixelSize() > initial_size
+    assert combo.currentText() == initial_text
+    assert window.tabs.currentIndex() == 0
+    window.workspace.changeEvent(QEvent(QEvent.ApplicationPaletteChange))
+    assert "font-size: 14px" in window.workspace.styleSheet()
+    window.workspace.set_zoom(200)
+    app.processEvents()
+    assert not window.workspace.zoom_in_action.isEnabled()
+    assert combo.font().pixelSize() == 26
+    window.workspace.zoom_reset_action.trigger()
+    app.processEvents()
+    assert combo.font().pixelSize() == initial_size
+    assert window.workspace.zoom == 100
+    option = QStyleOptionComboBox()
+    combo.initStyleOption(option)
+    arrow = combo.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, combo)
+    assert arrow.width() >= 16
