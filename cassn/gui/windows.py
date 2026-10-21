@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QLockFile, QSaveFile, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import QDialog
 
 from cassn.config import CONFIG_JSON
 from cassn.gui.wizard import FieldDataWizard
@@ -92,6 +93,21 @@ class DeploymentWindows:
 
     def _forget_window(self, window):
         self.windows.remove(window)
+
+    def activate_window(self):
+        """Raise an existing window without changing its deployment or active jobs."""
+        if not self.windows:
+            self.new_window()
+            return
+        window = next((item for item in self.windows if item.isActiveWindow()), self.windows[-1])
+        window.setWindowState(window.windowState() & ~Qt.WindowMinimized)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        dialogs = [dialog for dialog in window.findChildren(QDialog) if dialog.isVisible() and dialog.isModal()]
+        if dialogs:
+            dialogs[-1].raise_()
+            dialogs[-1].activateWindow()
 
     def close_all(self):
         for window in list(self.windows):

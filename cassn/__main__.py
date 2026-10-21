@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cassn.box.auth import BOX_AVAILABLE, load_box_config
 from cassn.config import CONFIG_JSON, LOCAL_DATA_DIR
 from cassn.core.image_metadata import EXIF_AVAILABLE
 from cassn.gui.windows import DeploymentWindows, ResourceBusy, ResourceLease
+from cassn.gui.activation import ActivationServer, activate_running_instance, activation_name
 from cassn.lookup_sync import (
     LookupBootstrapError,
     LookupBootstrapResult,
@@ -55,12 +57,19 @@ def main() -> None:
     app.setStyle("Fusion")
 
     lock_directory = CONFIG_JSON.parent / "window-locks"
+    server_name = activation_name(lock_directory)
     try:
         application_lease = ResourceLease(lock_directory, ["application"])
     except ResourceBusy:
+        print("CA-SSN is already running; requesting its existing window.", flush=True)
+        if activate_running_instance(server_name):
+            print("Existing CA-SSN window activated.", flush=True)
+            return
+        print("Could not contact window activation. The existing instance remains running; no new instance started.", flush=True)
         QMessageBox.information(
             None, "CA-SSN Is Already Running",
-            "Use File → New Window in the running app to open another deployment window.",
+            "CA-SSN is still running. Return to its Python window using the Dock or Mission Control.\n\n"
+            "Use File → New Window there for another deployment. Wait for any active jobs before closing that app.",
         )
         return
     except OSError as exc:
@@ -87,9 +96,18 @@ def main() -> None:
 
     windows = DeploymentWindows(lookups=lookups, box_config=box_config, lock_directory=lock_directory)
     windows.new_window(open_sessions=True)
+    # The application lease proves no other supported instance owns this name.
+    QLocalServer.removeServer(server_name)
+    activation_server = None
+    try:
+        activation_server = ActivationServer(server_name, windows.activate_window, app)
+    except OSError as exc:
+        print(f"Window reactivation unavailable: {exc}", flush=True)
     try:
         exit_code = app.exec()
     finally:
+        if activation_server:
+            activation_server.close()
         application_lease.release()
     sys.exit(exit_code)
 

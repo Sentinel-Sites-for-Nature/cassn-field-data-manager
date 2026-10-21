@@ -253,7 +253,9 @@ Card ingest can continue in one window while another uploads. Box and SoundHub
 operations run one at a time across windows, through verification and provenance
 updates. Closing an idle window leaves other windows and their jobs running;
 an active window must finish or cancel its jobs before it can close. Relaunching
-the app while it is running directs you to **File → New Window**.
+the app brings its existing window forward; use **File → New Window** to add
+another deployment. An older running version without window reactivation must
+be brought forward through the Python icon in the Dock or Mission Control.
 
 #### Step 1: Deployment Metadata
 - Select your organization (driven by the synced `program_config.json`)
