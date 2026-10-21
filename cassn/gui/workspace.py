@@ -28,11 +28,10 @@ def workspace_stylesheet(palette: QPalette, zoom: int = 100) -> str:
     stylesheet = f"""
 QWidget#fieldWorkspace {{ background: {background}; color: {text}; }}
 QWidget {{ color: {text}; font-family: '.AppleSystemUIFont', 'Segoe UI', sans-serif; font-size: 13px; }}
-QFrame#workspaceSidebar, QFrame#workspaceHeader {{ background: {panel}; }}
+QFrame#workspaceSidebar {{ background: {panel}; }}
 QFrame#workspaceSidebar {{ border-right: 1px solid {line}; }}
-QFrame#workspaceHeader {{ border-bottom: 1px solid {line}; }}
 QLabel {{ background: transparent; }}
-QLabel[role="brand"] {{ font-size: 22px; font-weight: 600; }}
+QLabel[role="brand"] {{ font-size: 15px; font-weight: 600; }}
 QLabel[role="brandMark"] {{ background: {accent}; color: {on_accent}; border-radius: 9px; padding: 10px; font-weight: 600; }}
 QLabel[role="muted"], QLabel[role="subtitle"] {{ color: {muted}; }}
 QLabel[role="subtitle"] {{ margin-bottom: 10px; }}
@@ -162,7 +161,6 @@ class FieldWorkspace(QWidget):
         self.setStyleSheet(workspace_stylesheet(QApplication.palette()))
         self.zoom = 100
         self._compact = None
-        self._site = "Choose a reserve"
         shell = QHBoxLayout(self)
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
@@ -183,7 +181,6 @@ class FieldWorkspace(QWidget):
         side.addWidget(workspace_label("Field Data Manager", "muted"))
         side.addSpacing(24)
         side.addWidget(workspace_label("Ingest data", "sectionTitle"))
-        side.addWidget(workspace_label("Complete steps 1 to 3", "muted"))
         self.navigation = []
         for index, name in enumerate(PAGE_NAMES):
             button = QPushButton(f"{index + 1}  " + name.replace("&", "&&"))
@@ -196,6 +193,8 @@ class FieldWorkspace(QWidget):
             side.addWidget(button)
             self.navigation.append(button)
         side.addStretch()
+        self.header_status = workspace_label("", "muted", wrap=True)
+        side.addWidget(self.header_status)
         self.box_status = workspace_label("", "muted", wrap=True)
         side.addWidget(self.box_status)
         shell.addWidget(sidebar)
@@ -205,16 +204,6 @@ class FieldWorkspace(QWidget):
         body = QVBoxLayout(content)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        header = QFrame()
-        header.setObjectName("workspaceHeader")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(26, 18, 26, 18)
-        self.breadcrumb = workspace_label("Deployment", "muted")
-        self.breadcrumb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.header_status = workspace_label("", "muted")
-        header_layout.addWidget(self.breadcrumb, 1)
-        header_layout.addWidget(self.header_status)
-        body.addWidget(header)
         self.pages = QTabWidget()
         self.pages.tabBar().hide()
         self.pages.currentChanged.connect(self._sync_page)
@@ -244,7 +233,7 @@ class FieldWorkspace(QWidget):
 
     def _refresh_branding(self):
         dark = QApplication.palette().color(QPalette.Window).lightness() < 128
-        variant = "white" if dark else "ucblue"
+        variant = "white" if dark else "black"
         logo = QPixmap(str(ARTWORK / f"uc-nature-lockup-hori-{variant}.png"))
         width = round(196 * self.zoom / 100)
         self.nature_logo.setPixmap(logo.scaledToWidth(width, Qt.SmoothTransformation))
@@ -252,16 +241,8 @@ class FieldWorkspace(QWidget):
     def _sync_page(self, index):
         for i, button in enumerate(self.navigation):
             button.setChecked(i == index)
-        self.set_page_context(index)
-
-    def set_page_context(self, index):
-        if 0 <= index < len(PAGE_NAMES):
-            site = self._site
-            self.breadcrumb.setText(f"{site}  /  {PAGE_NAMES[index]}")
-            self.breadcrumb.setToolTip(self.breadcrumb.text())
 
     def set_context(self, *, site, dates, devices, staging, box_connected, active_jobs):
-        self._site = site or "Choose a reserve"
         self.box_status.setText("● Box connected" if box_connected else "○ Box not connected")
         role = "connected" if box_connected else "muted"
         if self.box_status.property("role") != role:
@@ -272,7 +253,6 @@ class FieldWorkspace(QWidget):
             f"{active_jobs} card{'s' if active_jobs != 1 else ''} copying"
             if active_jobs else ""
         )
-        self.set_page_context(self.pages.currentIndex())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
