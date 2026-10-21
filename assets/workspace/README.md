@@ -10,3 +10,11 @@ on 2026-10-20:
 
 The GUI rotates the camera for SA and pairs AudioMoth with bird/bat symbols.
 These product images and logos retain their respective owners' rights.
+
+## UC Nature branding
+
+`uc-nature-lockup-hori-ucblue.png` and `uc-nature-lockup-hori-white.png`
+are unchanged primary horizontal logos from the official
+[UC Nature Public Outreach Toolkit](https://ucnature.org/public-outreach-toolkit/),
+[standard logo package](https://ucnature.org/toolkit-downloads/UC-Nature-logos.zip),
+downloaded 2026-10-20. The blue/white variants are used for light/dark appearance.

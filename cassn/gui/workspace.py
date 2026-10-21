@@ -174,6 +174,11 @@ class FieldWorkspace(QWidget):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(18, 28, 18, 22)
         side.setSpacing(8)
+        self.nature_logo = QLabel()
+        self.nature_logo.setAccessibleName("University of California Nature")
+        self._refresh_branding()
+        side.addWidget(self.nature_logo)
+        side.addSpacing(12)
         side.addWidget(workspace_label("CA-SSN", "brand"))
         side.addWidget(workspace_label("Field Data Manager", "muted"))
         side.addSpacing(24)
@@ -232,9 +237,17 @@ class FieldWorkspace(QWidget):
         self.zoom = max(80, min(200, percent))
         self.setStyleSheet(workspace_stylesheet(QApplication.palette(), self.zoom))
         self.sidebar.setFixedWidth(round(252 * self.zoom / 100))
+        self._refresh_branding()
         self.zoom_in_action.setEnabled(self.zoom < 200)
         self.zoom_out_action.setEnabled(self.zoom > 80)
         self.zoom_reset_action.setText(f"Actual Size (zoom {self.zoom}%)")
+
+    def _refresh_branding(self):
+        dark = QApplication.palette().color(QPalette.Window).lightness() < 128
+        variant = "white" if dark else "ucblue"
+        logo = QPixmap(str(ARTWORK / f"uc-nature-lockup-hori-{variant}.png"))
+        width = round(196 * self.zoom / 100)
+        self.nature_logo.setPixmap(logo.scaledToWidth(width, Qt.SmoothTransformation))
 
     def _sync_page(self, index):
         for i, button in enumerate(self.navigation):
@@ -272,6 +285,7 @@ class FieldWorkspace(QWidget):
         super().changeEvent(event)
         if event.type() == QEvent.ApplicationPaletteChange:
             self.setStyleSheet(workspace_stylesheet(QApplication.palette(), self.zoom))
+            self._refresh_branding()
 
 
 class CardJobsScroll(QScrollArea):
