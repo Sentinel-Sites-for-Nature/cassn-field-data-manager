@@ -2,8 +2,8 @@
 Application entry point — ``python -m cassn``.
 
 This is the one place the layers are wired together. It loads the Box
-credentials and the lookup tables once, then injects them into the single
-:class:`~cassn.gui.wizard.FieldDataWizard` window and starts the Qt event
+credentials and the lookup tables once, then creates independent deployment
+windows through :class:`~cassn.gui.windows.DeploymentWindows` and starts the Qt event
 loop. The data, export, and Box-storage layers stay free of module globals and
 import-time side effects; this module supplies their inputs explicitly.
 
@@ -19,9 +19,9 @@ import sys
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from cassn.box.auth import BOX_AVAILABLE, load_box_config
-from cassn.config import LOCAL_DATA_DIR
+from cassn.config import CONFIG_JSON, LOCAL_DATA_DIR
 from cassn.core.image_metadata import EXIF_AVAILABLE
-from cassn.gui import FieldDataWizard
+from cassn.gui.windows import DeploymentWindows, ResourceBusy, ResourceLease
 from cassn.lookup_sync import (
     LookupBootstrapError,
     LookupBootstrapResult,
@@ -54,6 +54,19 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
+    lock_directory = CONFIG_JSON.parent / "window-locks"
+    try:
+        application_lease = ResourceLease(lock_directory, ["application"])
+    except ResourceBusy:
+        QMessageBox.information(
+            None, "CA-SSN Is Already Running",
+            "Use File → New Window in the running app to open another deployment window.",
+        )
+        return
+    except OSError as exc:
+        QMessageBox.critical(None, "Cannot Start Application", str(exc))
+        return
+
     # Box is the canonical distribution point. Synchronize the complete
     # configuration before strict loading; a validated local snapshot is the
     # only permitted offline fallback.
@@ -72,10 +85,13 @@ def main() -> None:
     if bootstrap.warning:
         QMessageBox.warning(None, "Using Offline Lookup Cache", bootstrap.warning)
 
-    window = FieldDataWizard(lookups=lookups, box_config=box_config)
-    window.show()
-
-    sys.exit(app.exec())
+    windows = DeploymentWindows(lookups=lookups, box_config=box_config, lock_directory=lock_directory)
+    windows.new_window(open_sessions=True)
+    try:
+        exit_code = app.exec()
+    finally:
+        application_lease.release()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

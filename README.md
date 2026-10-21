@@ -241,6 +241,20 @@ manual operation.
 
 ### 3. Workflow
 
+#### Parallel deployment windows
+
+Use **File → New Window** (**⌘N** on macOS, **Ctrl+N** on Windows) to work on a
+separate deployment. Each window has its own deployment selection, inventory,
+card jobs and progress. **Deployment → Open Deployment in New Window…** opens
+the saved-session picker in another window. A deployment event and source card
+can each be used by only one window at a time.
+
+Card ingest can continue in one window while another uploads. Box and SoundHub
+operations run one at a time across windows, through verification and provenance
+updates. Closing an idle window leaves other windows and their jobs running;
+an active window must finish or cancel its jobs before it can close. Relaunching
+the app while it is running directs you to **File → New Window**.
+
 #### Step 1: Deployment Metadata
 - Select your organization (driven by the synced `program_config.json`)
 - Choose the formal site name from the dropdown; the stable short name and acronym fill automatically

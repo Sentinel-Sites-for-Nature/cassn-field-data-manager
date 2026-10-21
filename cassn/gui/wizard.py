@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
     QDateEdit,
-    QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
@@ -43,7 +42,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -70,6 +68,7 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
+from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
 from cassn.gui.workspace import CardJobsScroll, FieldWorkspace, workspace_label
 from cassn.soundhub.export import (
     enrich_audio_rows,
@@ -1834,6 +1833,9 @@ class FieldDataWizard(QMainWindow):
             )
             return
 
+        if not self._claim_card_source(source_dir, device_label):
+            return
+
         selected.setText(2, "Counting")
         selected.setText(3, "0")
         self._active_card_sources.add(source_dir)
@@ -1871,6 +1873,10 @@ class FieldDataWizard(QMainWindow):
         self.card_ingest_threads[device_label] = worker
         worker.start()
         self._update_copy_action()
+
+    def _claim_card_source(self, source_dir: Path, device_label: str) -> bool:
+        """Extension point for application-wide source ownership."""
+        return True
 
     def cancel_card_ingest(self, device_label: str) -> None:
         worker = self.card_ingest_threads.get(device_label)
