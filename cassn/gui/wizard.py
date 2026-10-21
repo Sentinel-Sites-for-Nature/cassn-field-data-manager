@@ -898,7 +898,9 @@ class FieldDataWizard(QMainWindow):
             55, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation,
         ))
         box_logo.setAccessibleName("Box logo")
+        box_logo.setContentsMargins(0, 0, 0, 6)
         box_status_layout.addWidget(box_logo)
+        box_status_layout.addSpacing(6)
         box_status_label = QLabel()
         if self.box_authenticated:
             box_status_label.setText("✓ Connected")
