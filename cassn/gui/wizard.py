@@ -985,7 +985,6 @@ class FieldDataWizard(QMainWindow):
         status_layout = QHBoxLayout()
         self.collection_status = workspace_label("Choose devices in Deployment to begin.", "muted")
         status_layout.addWidget(self.collection_status, 1)
-        status_layout.addWidget(QLabel("Simultaneous cards:"))
         self.card_concurrency_spin = QSpinBox()
         self.card_concurrency_spin.setRange(1, 4)
         self.card_concurrency_spin.setValue(self.card_concurrency_limit)
@@ -994,7 +993,6 @@ class FieldDataWizard(QMainWindow):
             "when this limit is lowered."
         )
         self.card_concurrency_spin.valueChanged.connect(self._on_card_concurrency_changed)
-        status_layout.addWidget(self.card_concurrency_spin)
         layout.addLayout(status_layout)
 
         self.collection_splitter = QSplitter(Qt.Horizontal)
@@ -1032,6 +1030,8 @@ class FieldDataWizard(QMainWindow):
         add_device_btn.setToolTip("Add a new device (plot + type) to this deployment, e.g. a 5th plot or a missed device.")
         control_layout.addWidget(skip_btn)
         control_layout.addWidget(add_device_btn)
+        control_layout.addWidget(QLabel("Simultaneous cards:"))
+        control_layout.addWidget(self.card_concurrency_spin)
         control_layout.addStretch()
         device_layout.addLayout(control_layout)
 
