@@ -888,7 +888,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(staging_group)
 
         # Box connection status
-        box_group = QGroupBox("Box Cloud Storage")
+        box_group = QGroupBox("Cloud storage connector")
         box_layout = QVBoxLayout()
 
         # Box connection status indicator
@@ -901,7 +901,7 @@ class FieldDataWizard(QMainWindow):
         box_status_layout.addWidget(box_logo)
         box_status_label = QLabel()
         if self.box_authenticated:
-            box_status_label.setText("✓ Box Connected")
+            box_status_label.setText("✓ Connected")
             box_status_label.setStyleSheet("color: green; font-weight: bold;")
         else:
             box_status_label.setText("⚠ Box Not Connected")
