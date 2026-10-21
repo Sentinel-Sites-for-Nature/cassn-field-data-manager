@@ -257,7 +257,7 @@ the app brings its existing window forward; use **File → New Window** to add
 another deployment. An older running version without window reactivation must
 be brought forward through the Python icon in the Dock or Mission Control.
 
-#### Step 1: Deployment Metadata
+#### Step 1: Deployments and devices
 - Select your organization (driven by the synced `program_config.json`)
 - Choose the formal site name from the dropdown; the stable short name and acronym fill automatically
 - Choose a completed deployment event; its read-only dates and deployed devices load automatically
@@ -266,13 +266,13 @@ be brought forward through the Python icon in the Dock or Mission Control.
 - Check which devices (ML, SA, BD, BT) for each plot
 - Configure local staging location (default: `~/Desktop/CASSN_field_data_staging`)
 
-#### Step 2: Collect SD Card Data
+#### Step 2: Card ingest
 - Insert SD card for each device
 - Select the device from the list
-- Click "Select SD Card & Copy Files" to copy, rename, and hash all files to local staging
+- Click "Select card & copy" to copy, rename, and hash all files to local staging
 - Repeat for all devices
 
-#### Step 3: Review & Finalize
+#### Step 3: Review & upload
 - Review deployment summary
 - View file counts and sizes by device
 - At ingest completion, oversized camera folders are already prepared in Wildlife Insights batches of at most 15,000 images
@@ -285,20 +285,20 @@ be brought forward through the Python icon in the Dock or Mission Control.
 
 ### Screenshots
 
-#### Deployment Metadata Entry
-Enter deployment information, select devices, and configure storage location.
+#### Deployments and devices
+Choose a site and curated deployment event to populate deployment metadata, select devices, and configure the staging location.
 
-![Deployment Metadata Entry](screenshots/01-metadata-entry.png)
+![Deployments and devices with event metadata populated from lookup tables](screenshots/01-metadata-entry.png)
 
-#### SD Card Data Collection
-Copy files from SD cards with automatic renaming and metadata extraction.
+#### Card ingest
+Monitor device status and individual card jobs while files are copied, renamed, and verified; adjust simultaneous cards and expand activity details as needed.
 
-![SD Card Data Collection](screenshots/02-data-collection.png)
+![Card ingest showing completed and active card jobs, concurrency controls, and activity details](screenshots/02-data-collection.png)
 
-#### Review & Upload to Box
-View deployment summary and upload to Box cloud storage.
+#### Review & upload
+Review the collection summary and staged-file tree, start transfers and verification from the grouped menus, and monitor Box upload progress.
 
-![Review & Upload](screenshots/03-review-upload.png)
+![Review and upload showing the collection summary, staged deployment tree, action menus, and Box upload progress](screenshots/03-review-upload.png)
 
 ## Output Structure
 
