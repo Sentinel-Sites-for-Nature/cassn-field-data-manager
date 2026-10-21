@@ -1764,7 +1764,10 @@ class FieldDataWizard(QMainWindow):
             device_label,
         )
         group = QGroupBox(title)
+        group.setProperty("role", "cardJob")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
         source_label = workspace_label(f"Source: {source_dir.name}", "muted", wrap=True)
         source_label.setToolTip(str(source_dir))
         source_label.setWordWrap(True)
@@ -1797,11 +1800,14 @@ class FieldDataWizard(QMainWindow):
             progress,
             detail,
             findings,
-            details_toggle,
-            messages,
-            cancel,
         ):
             layout.addWidget(widget)
+        actions = QHBoxLayout()
+        actions.addWidget(details_toggle)
+        actions.addStretch()
+        actions.addWidget(cancel)
+        layout.addLayout(actions)
+        layout.addWidget(messages)
 
         self.card_ingest_panels[device_label] = {
             "group": group,

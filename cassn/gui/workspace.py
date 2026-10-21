@@ -52,6 +52,8 @@ QPushButton[role="navigation"]:checked {{ background: {tint}; color: {accent}; f
 QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus {{ border: 1px solid {accent}; }}
 QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px; margin-top: 18px; padding: 18px 12px 12px; font-weight: 600; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
+QGroupBox[role="cardJob"] {{ padding: 10px 8px 8px; }}
+QGroupBox[role="cardJob"] QPushButton, QGroupBox[role="cardJob"] QToolButton {{ padding: 5px 9px; }}
 QLineEdit, QComboBox, QDateEdit, QSpinBox {{ background: {panel}; color: {text}; border: 1px solid {line}; border-radius: 5px; padding: 7px; selection-background-color: {accent}; selection-color: {on_accent}; }}
 QLineEdit:read-only, QDateEdit:read-only {{ background: {background}; }}
 QComboBox QAbstractItemView {{ background: {panel}; color: {text}; selection-background-color: {tint}; selection-color: {text}; }}
