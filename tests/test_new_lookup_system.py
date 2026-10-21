@@ -642,11 +642,11 @@ def test_gui_lists_completed_and_open_events_without_inventing_collection_dates(
         assert [checkbox.text() for _row, checkbox in checks] == ["seq00", "seq01"]
         assert all(checkbox.isChecked() for _row, checkbox in checks)
         assert window.observer_combo.currentText() == "Imperato, John"
-        assert window.deploy_event_combo.currentText() == "UC_TestSite_20260424"
-        assert "2026-04-24" in window.deploy_event_detail_label.text()
+        assert window.deploy_event_combo.currentText() == "UC_TestSite_20260424 (2 deployments)"
+        assert not hasattr(window, "deploy_event_detail_label")
         window.deploy_event_combo.setCurrentIndex(1)
         assert "In field" in window.deploy_event_combo.currentText()
-        assert "1 deployment" in window.deploy_event_detail_label.text()
+        assert "(1 deployment)" in window.deploy_event_combo.currentText()
         assert window.deploy_end_date.text() == "Not collected"
         message = []
         monkeypatch.setattr("cassn.gui.wizard.QMessageBox.information", lambda *args: message.append(args))

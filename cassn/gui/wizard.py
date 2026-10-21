@@ -71,8 +71,8 @@ from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
 from cassn.gui.workspace import (
-    ARTWORK, CardJobsScroll, DeviceGridScroll, EventDelegate, FieldWorkspace, device_heading,
-    event_description, workspace_label,
+    ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
+    workspace_label,
 )
 from cassn.soundhub.export import (
     enrich_audio_rows,
@@ -794,10 +794,6 @@ class FieldDataWizard(QMainWindow):
         self.deploy_event_combo.currentIndexChanged.connect(self.on_deploy_event_changed)
         form_layout.addRow("Deployment Event:", self.deploy_event_combo)
 
-        self.deploy_event_combo.setItemDelegate(EventDelegate(self.deploy_event_combo))
-        self.deploy_event_detail_label = workspace_label("", "muted", wrap=True)
-        form_layout.addRow("", self.deploy_event_detail_label)
-
         # Deployment dates
         self.deploy_start_date = QDateEdit()
         self.deploy_start_date.setReadOnly(True)
@@ -1379,7 +1375,9 @@ class FieldDataWizard(QMainWindow):
         events = (self.lookups.returned_rounds(site_short_name)
                   + self.lookups.current_rounds(site_short_name))
         for ev in events:
-            combo.addItem(ev["deployment_event_id"] or "Open deployments · In field", ev)
+            name = ev["deployment_event_id"] or "Open deployments · In field"
+            count = ev.get("deployment_count", ev.get("device_count", 0))
+            combo.addItem(f"{name} ({count} deployment{'s' if count != 1 else ''})", ev)
         if not events:
             combo.addItem("No deployment events", None)
         combo.setCurrentIndex(0)
@@ -1389,7 +1387,6 @@ class FieldDataWizard(QMainWindow):
     def on_deploy_event_changed(self, index):
         """Auto-fill the deployment start/end date pickers from the chosen event."""
         ev = self.deploy_event_combo.itemData(index)
-        self.deploy_event_detail_label.setText(event_description(ev) if ev else "")
         if not ev:
             self.lookups.clear_active_deployment_round()
             self._rebuild_plot_grid(self.site_short_name_edit.text() or None)

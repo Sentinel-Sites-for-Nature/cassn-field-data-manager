@@ -6,7 +6,7 @@ from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence, QPalette, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
-    QVBoxLayout, QWidget, QStyledItemDelegate, QStyle,
+    QVBoxLayout, QWidget,
 )
 
 from cassn.config import BUNDLE_DIR
@@ -85,44 +85,6 @@ QComboBox::down-arrow {{ image: url({(ARTWORK / 'chevron.svg').as_posix()}); wid
 QToolTip {{ background: {panel}; color: {text}; border: 1px solid {line}; padding: 5px; }}
 """
     return re.sub(r"font-size: (\d+)px", lambda m: f"font-size: {round(int(m[1]) * zoom / 100)}px", stylesheet)
-
-
-def event_description(event):
-    start = event["deployment_event_start_date"]
-    end = event["deployment_event_end_date"]
-    count = event.get("deployment_count", event.get("device_count", 0))
-    dates = f"{start} to {end}" if end else f"Deployed {start} · In field"
-    return f"{dates} · {count} deployment{'s' if count != 1 else ''}"
-
-
-class EventDelegate(QStyledItemDelegate):
-    """Keep event names prominent and date/count descriptors secondary in the picker."""
-
-    def sizeHint(self, option, index):
-        size = super().sizeHint(option, index)
-        size.setHeight(option.fontMetrics.height() * 2 + 20)
-        return size
-
-    def paint(self, painter, option, index):
-        event = index.data(Qt.UserRole)
-        if not event:
-            return super().paint(painter, option, index)
-        self.initStyleOption(option, index)
-        option.text = ""
-        style = option.widget.style() if option.widget else QApplication.style()
-        style.drawControl(QStyle.CE_ItemViewItem, option, painter, option.widget)
-        painter.save()
-        rect = option.rect.adjusted(10, 4, -10, -4)
-        font = option.font
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(option.palette.color(QPalette.Text))
-        painter.drawText(rect, Qt.AlignTop | Qt.AlignLeft, option.fontMetrics.elidedText(index.data(), Qt.ElideRight, rect.width()))
-        font.setBold(False)
-        painter.setFont(font)
-        painter.setPen(option.palette.color(QPalette.PlaceholderText))
-        painter.drawText(rect, Qt.AlignBottom | Qt.AlignLeft, option.fontMetrics.elidedText(event_description(event), Qt.ElideRight, rect.width()))
-        painter.restore()
 
 
 def device_heading(code, name):
