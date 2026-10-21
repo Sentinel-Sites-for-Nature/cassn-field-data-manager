@@ -95,6 +95,7 @@ def test_four_jobs_fit_small_window_and_restore_empty_state(workspace_window, tm
     assert window.collection_splitter.orientation() == Qt.Horizontal
     devices = window.collection_splitter.widget(0)
     jobs = window.card_jobs_container
+    assert jobs.width() > devices.width()
     assert devices.geometry().top() == jobs.geometry().top()
     assert devices.contentsRect().top() == jobs.contentsRect().top()
     for label in list(window.card_ingest_panels):
