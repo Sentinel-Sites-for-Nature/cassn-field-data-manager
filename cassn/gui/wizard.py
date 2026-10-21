@@ -1766,7 +1766,7 @@ class FieldDataWizard(QMainWindow):
         group = QGroupBox(title)
         group.setProperty("role", "cardJob")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(6, 0, 6, 6)
         layout.setSpacing(4)
         source_label = workspace_label(f"Source: {source_dir.name}", "muted", wrap=True)
         source_label.setToolTip(str(source_dir))
