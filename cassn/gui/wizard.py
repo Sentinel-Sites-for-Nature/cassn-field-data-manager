@@ -72,7 +72,7 @@ from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
 from cassn.gui.workspace import (
     ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
-    workspace_label,
+    UploadProgressBar, workspace_label,
 )
 from cassn.soundhub.export import (
     enrich_audio_rows,
@@ -1169,7 +1169,7 @@ class FieldDataWizard(QMainWindow):
         self.upload_group = QGroupBox("Box Upload Progress")
         upload_layout = QVBoxLayout()
 
-        self.upload_progress_bar = QProgressBar()
+        self.upload_progress_bar = UploadProgressBar()
         self.upload_progress_bar.setObjectName("boxUploadProgress")
         self.upload_progress_bar.setTextVisible(True)
         self.upload_progress_bar.setFormat("%p%")

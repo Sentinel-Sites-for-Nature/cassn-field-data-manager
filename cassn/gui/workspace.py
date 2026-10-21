@@ -3,10 +3,10 @@
 import re
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence, QPalette, QPixmap, QTransform
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QProgressBar, QStyle, QStyleOptionProgressBar, QStylePainter,
 )
 
 from cassn.config import BUNDLE_DIR
@@ -14,6 +14,30 @@ from cassn.config import BUNDLE_DIR
 
 PAGE_NAMES = ("Deployments and devices", "Card ingest", "Review & upload")
 ARTWORK = BUNDLE_DIR / "assets" / "workspace"
+
+
+class UploadProgressBar(QProgressBar):
+    """Keep the percentage legible over both the green fill and empty track."""
+
+    def paintEvent(self, event):
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        option.textVisible = False
+        painter = QStylePainter(self)
+        painter.drawControl(QStyle.CE_ProgressBar, option)
+        if not self.isTextVisible() or self.maximum() <= self.minimum():
+            return
+        painter.setPen(self.palette().color(QPalette.Text))
+        painter.drawText(option.rect, Qt.AlignCenter, self.text())
+        filled = self.style().subElementRect(QStyle.SE_ProgressBarContents, option, self)
+        fraction = max(0, self.value() - self.minimum()) / (self.maximum() - self.minimum())
+        filled.setWidth(round(filled.width() * fraction))
+        if (self.layoutDirection() == Qt.RightToLeft) != self.invertedAppearance():
+            filled.moveRight(option.rect.right())
+        painter.setClipRect(filled)
+        dark = QApplication.palette().color(QPalette.Window).lightness() < 128
+        painter.setPen(QColor("#152d25" if dark else "#ffffff"))
+        painter.drawText(option.rect, Qt.AlignCenter, self.text())
 
 
 def workspace_stylesheet(palette: QPalette, zoom: int = 100) -> str:
@@ -66,7 +90,7 @@ QHeaderView::section {{ background: {background}; color: {muted}; border: none; 
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
 QProgressBar#boxUploadProgress {{ min-height: 24px; max-height: 16777215px; color: {text}; text-align: center; }}
-QProgressBar#boxUploadProgress::chunk {{ background: {tint}; }}
+QProgressBar#boxUploadProgress::chunk {{ background: {accent}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: {background}; }}
 QWidget#cardJobsArea {{ background: {panel}; }}
