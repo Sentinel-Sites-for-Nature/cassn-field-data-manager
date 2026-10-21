@@ -26,6 +26,7 @@ from PySide6.QtCore import QDate, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -707,6 +708,9 @@ class FieldDataWizard(QMainWindow):
 
     def _set_workspace_compact(self, compact: bool) -> None:
         """Give small displays a vertical workspace instead of squeezed columns."""
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        self.metadata_columns.setDirection(direction)
+        self.storage_columns.setDirection(direction)
         self.collection_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.device_tree.setMinimumHeight(100 if compact else 190)
         self.card_jobs_scroll.setMinimumHeight(140 if compact else 0)
@@ -732,18 +736,31 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(workspace_label(
             "Choose the event and devices you’re collecting.", "subtitle", wrap=True,
         ))
-        layout.setContentsMargins(26, 18, 26, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(26, 16, 26, 16)
+        layout.setSpacing(10)
 
         # Form layout for metadata fields
         form_group = QGroupBox("Deployment Information")
+        site_form = QFormLayout()
+        site_form.setContentsMargins(0, 0, 0, 0)
+        site_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form_layout = QFormLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        site_fields = QWidget()
+        site_fields.setLayout(site_form)
+        event_fields = QWidget()
+        event_fields.setLayout(form_layout)
+        self.metadata_columns = QBoxLayout(QBoxLayout.LeftToRight)
+        self.metadata_columns.setContentsMargins(0, 0, 0, 0)
+        self.metadata_columns.setSpacing(24)
+        self.metadata_columns.addWidget(site_fields, 1)
+        self.metadata_columns.addWidget(event_fields, 1)
 
         # Organization
         self.org_combo = QComboBox()
         self.org_combo.addItems(self.lookups.program_config.get("organizations") or ORGANIZATIONS)
-        form_layout.addRow("Organization:", self.org_combo)
+        site_form.addRow("Organization:", self.org_combo)
 
         # Formal site name (with autocomplete)
         self.site_name_combo = QComboBox()
@@ -756,17 +773,17 @@ class FieldDataWizard(QMainWindow):
         completer.setFilterMode(Qt.MatchContains)
         self.site_name_combo.setCompleter(completer)
         self.site_name_combo.currentTextChanged.connect(self.on_site_changed)
-        form_layout.addRow("Site Name:", self.site_name_combo)
+        site_form.addRow("Site Name:", self.site_name_combo)
 
         # Stable relational key and deployment-ID token
         self.site_short_name_edit = QLineEdit()
         self.site_short_name_edit.setReadOnly(True)
-        form_layout.addRow("Site Short Name:", self.site_short_name_edit)
+        site_form.addRow("Site Short Name:", self.site_short_name_edit)
 
         # Acronym
         self.site_code_edit = QLineEdit()
         self.site_code_edit.setReadOnly(True)
-        form_layout.addRow("Site Code:", self.site_code_edit)
+        site_form.addRow("Site Code:", self.site_code_edit)
 
         # Curated deployment-event picker. Device availability and placement
         # metadata are scoped to this selection.
@@ -817,12 +834,13 @@ class FieldDataWizard(QMainWindow):
         self.observer_other_edit.hide()
         form_layout.addRow("", self.observer_other_edit)
 
-        form_group.setLayout(form_layout)
+        form_group.setLayout(self.metadata_columns)
         layout.addWidget(form_group)
 
         # Device selection
         device_group = QGroupBox("Select Devices for Each Plot")
         device_layout = QVBoxLayout()
+        device_layout.setContentsMargins(0, 0, 0, 0)
 
         instructions = QLabel("Check which devices you are downloading data from.")
         device_layout.addWidget(instructions)
@@ -830,6 +848,7 @@ class FieldDataWizard(QMainWindow):
         # Device grid — header row only here; plot rows are built/rebuilt
         # dynamically in _rebuild_plot_grid() based on the chosen site.
         self.grid_layout = QGridLayout()
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
 
         col = 1
         for dev_code, dev_name in DEVICE_TYPES.items():
@@ -872,6 +891,7 @@ class FieldDataWizard(QMainWindow):
         # Staging location
         staging_group = QGroupBox("Local Staging Location")
         staging_layout = QHBoxLayout()
+        staging_layout.setContentsMargins(0, 0, 0, 0)
 
         self.staging_label = QLineEdit(str(self.staging_root))
         self.staging_label.setReadOnly(True)
@@ -885,11 +905,14 @@ class FieldDataWizard(QMainWindow):
         staging_layout.addWidget(self.set_default_cb)
 
         staging_group.setLayout(staging_layout)
-        layout.addWidget(staging_group)
+        self.storage_columns = QBoxLayout(QBoxLayout.LeftToRight)
+        self.storage_columns.setSpacing(16)
+        self.storage_columns.addWidget(staging_group, 1)
 
         # Box connection status
         box_group = QGroupBox("Cloud storage connector")
         box_layout = QVBoxLayout()
+        box_layout.setContentsMargins(0, 0, 0, 0)
 
         # Box connection status indicator
         box_status_layout = QHBoxLayout()
@@ -924,7 +947,8 @@ class FieldDataWizard(QMainWindow):
             box_layout.addWidget(auth_note)
 
         box_group.setLayout(box_layout)
-        layout.addWidget(box_group)
+        self.storage_columns.addWidget(box_group, 1)
+        layout.addLayout(self.storage_columns)
 
         # Navigation button
         nav_layout = QHBoxLayout()

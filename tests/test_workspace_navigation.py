@@ -147,3 +147,37 @@ def test_zoom_actions_resize_text_and_preserve_page_and_selection(workspace_wind
     combo.initStyleOption(option)
     arrow = combo.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, combo)
     assert arrow.width() >= 16
+
+
+@pytest.mark.parametrize("connected", [False, True])
+def test_deployment_page_fits_desktop_and_stacks_on_laptop(monkeypatch, connected):
+    from PySide6.QtWidgets import QBoxLayout, QScrollArea
+    from cassn.gui.preview import sample_lookups
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: None)
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: connected)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
+    lookups = sample_lookups()
+    lookups.plot_names["SantaCruzIsland"][5] = "Five"
+    window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
+    window._card_ejection_timer.stop()
+    try:
+        window.resize(1380, 900)
+        window.show()
+        for _ in range(3):
+            app.processEvents()
+        scroll = window.tabs.widget(0).findChild(QScrollArea)
+        assert window.metadata_columns.direction() == QBoxLayout.LeftToRight
+        assert scroll.verticalScrollBar().maximum() == 0
+        assert scroll.horizontalScrollBar().maximum() == 0
+        window.resize(1000, 740)
+        for _ in range(3):
+            app.processEvents()
+        assert window.metadata_columns.direction() == QBoxLayout.TopToBottom
+        assert window.storage_columns.direction() == QBoxLayout.TopToBottom
+        assert scroll.verticalScrollBar().maximum() > 0
+        assert scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        app.processEvents()
