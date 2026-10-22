@@ -300,6 +300,11 @@ Review the collection summary and staged-file tree, start transfers and verifica
 
 ![Review and upload showing the collection summary, staged deployment tree, action menus, and Box upload progress](screenshots/03-review-upload.png)
 
+#### Box verification complete
+After uploading, the app checks the Box file list and compares local file hashes with Box. The green completion status confirms that both checks finished successfully.
+
+![Completed Box upload with green status confirming the Box file list and hashes were verified](screenshots/04-box-verification.png)
+
 ## Output Structure
 
 The application creates an organized folder structure in your staging location:
