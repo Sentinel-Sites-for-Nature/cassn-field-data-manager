@@ -576,29 +576,61 @@ def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
 
 
 def check_camera_serial(entries: list, device_label: str) -> list[str]:
-    """Cross-check the deployment ``device_id`` against the EXIF camera serial.
+    """Summarize identity and verification gaps across all inventoried images.
 
-    The lookup ``camera_id`` should be contained within the camera's full hardware
-    serial read from EXIF (e.g. ``08021269`` within ``4LPXKT08021269``). Warns once
-    per device when a non-empty ``camera_id`` is **not** a substring of a non-empty
-    ``camera_serial_exif`` (case-insensitive) — a sign the wrong physical camera is
-    deployed at this plot, or the lookup table is stale. Skips when either value is
-    blank, and self-filters to image entries (no-op for audio).
+    Compare full serials exactly, allowing legacy eight-digit numeric camera IDs
+    to match the serial suffix. Read inventory metadata only; never reopen images.
+    Return one device-level warning for mixed cameras, mismatches, or missing
+    evidence. Empty and audio-only inventories are outside this check.
     """
-    for e in entries:
-        if e.get('file_type') != 'image':
+    groups = Counter()
+    examples = {}
+    missing_serial = 0
+    missing_expected = 0
+    for entry in entries:
+        if entry.get("file_type") != "image":
             continue
-        cam_id = str(e.get('camera_id') or '').strip()
-        serial = str(e.get('camera_serial_exif') or '').strip()
-        if not cam_id or not serial:
+        cam_id = str(entry.get("camera_id") or "").strip().upper()
+        serial = str(entry.get("camera_serial_exif") or "").strip().upper()
+        if not cam_id:
+            missing_expected += 1
+        if not serial:
+            missing_serial += 1
             continue
-        if cam_id.lower() not in serial.lower():
-            return [
-                f"camera_id '{cam_id}' (deployments.csv device_id) is not contained in the "
-                f"camera's EXIF serial '{serial}' — possible wrong camera at this plot"
-            ]
-        break  # consistent within a device; one verified image is enough
-    return []
+        key = (serial, cam_id)
+        groups[key] += 1
+        examples.setdefault(key, entry.get("original_filename") or entry.get("filename") or "unknown filename")
+
+    def matches(serial: str, cam_id: str) -> bool:
+        return serial == cam_id or (
+            len(cam_id) == 8 and cam_id.isascii() and cam_id.isdigit()
+            and serial.endswith(cam_id)
+        )
+
+    findings = []
+    if len({serial for serial, _ in groups}) > 1:
+        findings.append("Mixed-camera card: multiple camera serials found")
+    if any(cam_id and not matches(serial, cam_id) for serial, cam_id in groups):
+        findings.append("Camera serial mismatch with deployments.csv device_id")
+    if findings:
+        for (serial, cam_id), count in sorted(groups.items()):
+            status = (
+                f"matches expected camera {cam_id}" if cam_id and matches(serial, cam_id)
+                else f"differs from expected camera {cam_id}" if cam_id
+                else "expected camera ID missing"
+            )
+            findings.append(
+                f"{serial}: {count} image(s), {status} "
+                f"(example: {examples[(serial, cam_id)]})"
+            )
+    if missing_serial:
+        prefix = "Unable to verify camera identity: " if not groups else ""
+        findings.append(f"{prefix}{missing_serial} image(s) have no readable camera serial")
+    if missing_expected:
+        findings.append(
+            f"Unable to compare {missing_expected} image(s): expected camera ID missing"
+        )
+    return [f"{device_label}: " + "; ".join(findings)] if findings else []
 
 
 def _elevation_warnings(plot: str, elev_raw, elev_min: float, elev_max: float) -> list[str]:
