@@ -77,36 +77,86 @@ class FieldWorkspace(QWidget):
         sidebar = QFrame()
         sidebar.setObjectName("workspaceSidebar")
         self.sidebar = sidebar
-        sidebar.setFixedWidth(252)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(18, 28, 18, 22)
-        side.setSpacing(8)
-        side.addWidget(workspace_label("CA-SSN", "sidebarBrand"))
-        side.addWidget(workspace_label("Data Manager", "sidebarBrand"))
-        side.addSpacing(14)
-        side.addWidget(workspace_label("Organization", "muted"))
+        sidebar.setFixedWidth(280)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName("sidebarScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_content = QWidget()
+        sidebar_content.setObjectName("sidebarContent")
+        scroll.setWidget(sidebar_content)
+        sidebar_layout.addWidget(scroll)
+        side = QVBoxLayout(sidebar_content)
+        side.setContentsMargins(16, 16, 16, 16)
+        side.setSpacing(20)
+
+        brand = QFrame()
+        brand.setObjectName("sidebarBrandBlock")
+        brand_layout = QVBoxLayout(brand)
+        brand_layout.setContentsMargins(20, 20, 20, 22)
+        brand_layout.setSpacing(4)
+        brand_layout.addWidget(workspace_label("CA-SSN", "sidebarBrand"))
+        brand_layout.addWidget(workspace_label("Data Manager", "sidebarBrand"))
+        side.addWidget(brand)
+
+        organization = QFrame()
+        organization.setObjectName("sidebarOrganization")
+        organization_layout = QVBoxLayout(organization)
+        organization_layout.setContentsMargins(16, 14, 16, 18)
+        organization_layout.setSpacing(12)
+        organization_layout.addWidget(workspace_label("Organization", "organizationCaption"))
         self.nature_logo = QLabel()
+        self.nature_logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.nature_logo.setAccessibleName("University of California Nature")
         self._refresh_branding()
-        side.addWidget(self.nature_logo)
-        side.addSpacing(24)
-        side.addWidget(workspace_label("Ingest data", "sidebarSection"))
+        organization_layout.addWidget(self.nature_logo)
+        side.addWidget(organization)
+
+        workflow = QWidget()
+        workflow_layout = QVBoxLayout(workflow)
+        workflow_layout.setContentsMargins(0, 0, 0, 0)
+        workflow_layout.setSpacing(8)
+        heading = workspace_label("Ingest data", "sidebarSection")
+        heading.setContentsMargins(10, 0, 0, 8)
+        workflow_layout.addWidget(heading)
         self.navigation = []
         for index, name in enumerate(PAGE_NAMES):
-            button = QPushButton(f"{index + 1}  " + name.replace("&", "&&"))
+            button = QPushButton()
+            button.setMinimumHeight(64)
             button.setToolTip(f"Step {index + 1} of 3: {name}")
             button.setProperty("role", "navigation")
             button.setCheckable(True)
             button.setAutoExclusive(True)
+            button.setCursor(Qt.PointingHandCursor)
             button.setAccessibleName(name)
+            row = QHBoxLayout(button)
+            row.setContentsMargins(12, 12, 12, 12)
+            row.setSpacing(12)
+            number = workspace_label(str(index + 1), "stepNumber")
+            number.setAlignment(Qt.AlignCenter)
+            title = workspace_label(name, "stepTitle", wrap=True)
+            for label in (number, title):
+                label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            row.addWidget(number)
+            row.addWidget(title, 1)
             button.clicked.connect(lambda _checked=False, i=index: self.page_requested.emit(i))
-            side.addWidget(button)
+            workflow_layout.addWidget(button)
             self.navigation.append(button)
+        side.addWidget(workflow)
         side.addStretch()
+
+        status = QFrame()
+        status.setObjectName("sidebarStatus")
+        status_layout = QVBoxLayout(status)
+        status_layout.setContentsMargins(12, 14, 12, 0)
+        status_layout.setSpacing(8)
         self.header_status = workspace_label("", "muted", wrap=True)
-        side.addWidget(self.header_status)
+        status_layout.addWidget(self.header_status)
         self.box_status = workspace_label("", "muted", wrap=True)
-        side.addWidget(self.box_status)
+        status_layout.addWidget(self.box_status)
+        side.addWidget(status)
         shell.addWidget(sidebar)
 
         content = QWidget()
@@ -135,21 +185,22 @@ class FieldWorkspace(QWidget):
     def set_zoom(self, percent):
         self.zoom = max(80, min(200, percent))
         self.setStyleSheet(workspace_stylesheet(QApplication.palette(), self.zoom))
-        self.sidebar.setFixedWidth(round(252 * self.zoom / 100))
+        self.sidebar.setFixedWidth(round(280 * self.zoom / 100))
         self._refresh_branding()
+        for button in self.navigation:
+            button.setMinimumHeight(round(64 * self.zoom / 100))
         self.zoom_in_action.setEnabled(self.zoom < 200)
         self.zoom_out_action.setEnabled(self.zoom > 80)
         self.zoom_reset_action.setText(f"Actual Size (zoom {self.zoom}%)")
 
     def _refresh_branding(self):
         self.nature_logo.setVisible(True)
-        dark = QApplication.palette().color(QPalette.Window).lightness() < 128
-        variant = "white" if dark else "black"
+        variant = "black"  # Organization logos sit on a white brand surface.
         if PROFILE == "csu":
             from PySide6.QtSvg import QSvgRenderer
             from PySide6.QtGui import QPainter
             renderer = QSvgRenderer(str(ARTWORK / "csu-wordmark-stacked.svg"))
-            width = round(216 * self.zoom / 100)
+            width = round(200 * self.zoom / 100)
             ratio = self.devicePixelRatioF()
             size = renderer.defaultSize()
             logo = QPixmap(round(width * ratio), round(width * ratio * size.height() / size.width()))
@@ -169,6 +220,11 @@ class FieldWorkspace(QWidget):
     def _sync_page(self, index):
         for i, button in enumerate(self.navigation):
             button.setChecked(i == index)
+            for label in button.findChildren(QLabel):
+                if label.property("current") != (i == index):
+                    label.setProperty("current", i == index)
+                    label.style().unpolish(label)
+                    label.style().polish(label)
 
     def set_context(self, *, site, dates, devices, staging, box_connected, active_jobs):
         self.box_status.setText("● Box connected" if box_connected else "○ Box not connected")
@@ -177,6 +233,7 @@ class FieldWorkspace(QWidget):
             self.box_status.setProperty("role", role)
             self.box_status.style().unpolish(self.box_status)
             self.box_status.style().polish(self.box_status)
+        self.header_status.setVisible(bool(active_jobs))
         self.header_status.setText(
             f"{active_jobs} card{'s' if active_jobs != 1 else ''} copying"
             if active_jobs else ""

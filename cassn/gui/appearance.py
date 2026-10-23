@@ -21,12 +21,16 @@ def workspace_stylesheet(palette: QPalette, zoom: int = 100) -> str:
     stylesheet = f"""
 QWidget#fieldWorkspace {{ background: {background}; color: {text}; }}
 QWidget {{ color: {text}; font-family: '.AppleSystemUIFont', 'Segoe UI', sans-serif; font-size: 13px; }}
-QFrame#workspaceSidebar {{ background: {panel}; }}
-QFrame#workspaceSidebar {{ border-right: 1px solid {line}; }}
+QFrame#workspaceSidebar {{ background: {background}; border-right: 1px solid {line}; }}
+QScrollArea#sidebarScroll, QWidget#sidebarContent {{ background: {background}; border: none; }}
+QFrame#sidebarBrandBlock {{ background: #174c3c; border: none; border-radius: 10px; }}
+QFrame#sidebarOrganization {{ background: #ffffff; border: 1px solid {line}; border-radius: 10px; }}
+QFrame#sidebarStatus {{ background: transparent; border: none; border-top: 1px solid {line}; }}
+QLabel[role="organizationCaption"] {{ color: #5c6d79; font-size: 12px; font-weight: 600; }}
 QFrame#setupCard {{ background: {panel}; border: 1px solid {line}; border-radius: 10px; }}
 QLabel {{ background: transparent; }}
 QLabel[role="brand"] {{ font-size: 15px; font-weight: 600; }}
-QLabel[role="sidebarBrand"] {{ font-size: 20px; font-weight: 600; }}
+QLabel[role="sidebarBrand"] {{ color: #ffffff; font-size: 22px; font-weight: 600; }}
 QLabel[role="sidebarSection"] {{ font-size: 19px; font-weight: 600; }}
 QLabel[role="brandMark"] {{ background: {accent}; color: {on_accent}; border-radius: 9px; padding: 10px; font-weight: 600; }}
 QLabel[role="muted"], QLabel[role="subtitle"] {{ color: {muted}; }}
@@ -47,9 +51,13 @@ QPushButton#boxConnectButton:hover {{ background: #edf5ff; border-color: #1267cf
 QPushButton#boxConnectButton:pressed {{ background: #dcecff; }}
 QPushButton#boxConnectButton:focus {{ border: 2px solid #1267cf; }}
 QPushButton#boxConnectButton:disabled {{ background: {soft}; color: {muted}; border-color: {line}; }}
-QPushButton[role="navigation"] {{ text-align: left; background: transparent; border: none; padding: 12px; }}
+QPushButton[role="navigation"] {{ text-align: left; background: transparent; border: 1px solid transparent; border-radius: 9px; padding: 0; }}
 QPushButton[role="navigation"]:hover {{ background: {soft}; }}
-QPushButton[role="navigation"]:checked {{ background: {tint}; color: {accent}; font-weight: 600; }}
+QPushButton[role="navigation"]:checked {{ background: {tint}; border-color: {accent}; }}
+QLabel[role="stepTitle"] {{ font-size: 14px; font-weight: 500; }}
+QLabel[role="stepNumber"] {{ background: {panel}; color: {muted}; border: 1px solid {line}; border-radius: 8px; min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px; font-size: 12px; font-weight: 600; }}
+QLabel[role="stepNumber"][current="true"] {{ background: {accent}; color: {on_accent}; border-color: {accent}; }}
+QLabel[role="stepTitle"][current="true"] {{ color: {accent}; font-weight: 600; }}
 QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus {{ border: 1px solid {accent}; }}
 QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px; margin-top: 18px; padding: 18px 12px 12px; font-weight: 600; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
