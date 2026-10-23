@@ -406,3 +406,35 @@ def test_soundhub_submission_reserves_batch_against_staging(manager):
     stage._run_staging_operation(attempted)
     attempted.assert_not_called()
     assert stage._staging_lease is None
+
+
+def test_connect_box_updates_all_windows_under_cloud_lease(manager, monkeypatch):
+    from cassn.gui.box_connect import BoxConnectDialog
+    first, second = manager.new_window(), manager.new_window()
+    config = BoxConfig("new-client", "secret", "folder", "lookup-folder")
+    def login(dialog):
+        assert first._cloud_lease is not None
+        dialog.connected_config = config
+        return BoxConnectDialog.Accepted
+    monkeypatch.setattr(BoxConnectDialog, "exec", login)
+    first.connect_to_box()
+    assert manager.box_authenticated
+    assert manager.box_config == config
+    for window in (first, second):
+        assert window.box_authenticated
+        assert window.box_config == config
+        assert window.box_connection_label.text() == "✓ Connected"
+    assert first._cloud_lease is None
+
+
+def test_connect_box_blocked_during_another_windows_upload(manager, monkeypatch):
+    from cassn.gui.box_connect import BoxConnectDialog
+    first, second = manager.new_window(), manager.new_window()
+    login = MagicMock()
+    monkeypatch.setattr(BoxConnectDialog, "exec", login)
+    held = ResourceLease(manager.lock_directory, ["cloud-operations"])
+    try:
+        second.connect_to_box()
+        login.assert_not_called()
+    finally:
+        held.release()

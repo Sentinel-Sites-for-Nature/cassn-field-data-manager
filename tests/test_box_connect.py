@@ -159,6 +159,58 @@ def test_cancel_and_timeout_close_callback(monkeypatch, config, cancel, timeout,
     assert shared["closed"]
 
 
+def test_dialog_success_persists_only_after_worker_finishes(monkeypatch, config):
+    from PySide6.QtWidgets import QApplication, QDialog
+    from cassn.gui import box_connect as gui
+    app = QApplication.instance() or QApplication([])
+    saved = []
+    monkeypatch.setattr(gui, "save_connection", lambda *args: saved.append(args))
+    dialog = gui.BoxConnectDialog(config)
+    token = SimpleNamespace(access_token="access", refresh_token="refresh")
+    worker = SimpleNamespace(result=(token, "User"), deleteLater=lambda: None)
+    dialog.worker = worker
+    dialog.login_finished()
+    assert saved == [(config, token)]
+    assert dialog.connected_config == config
+    assert dialog.result() == QDialog.Accepted
+    dialog.close()
+
+
+def test_dialog_cancel_before_completion_never_persists(monkeypatch, config):
+    from PySide6.QtWidgets import QApplication, QDialog
+    from cassn.gui import box_connect as gui
+    app = QApplication.instance() or QApplication([])
+    saved = []
+    monkeypatch.setattr(gui, "save_connection", lambda *args: saved.append(args))
+    dialog = gui.BoxConnectDialog(config)
+    dialog.worker = SimpleNamespace(
+        result=(SimpleNamespace(), "User"), requestInterruption=lambda: None,
+        deleteLater=lambda: None,
+    )
+    dialog.reject()
+    dialog.login_finished()
+    assert saved == []
+    assert dialog.connected_config is None
+    assert dialog.result() == QDialog.Rejected
+    dialog.close()
+
+
+def test_dialog_failed_storage_allows_retry(monkeypatch, config):
+    from PySide6.QtWidgets import QApplication
+    from cassn.gui import box_connect as gui
+    app = QApplication.instance() or QApplication([])
+    def fail(*_):
+        raise RuntimeError("sensitive SDK details")
+    monkeypatch.setattr(gui, "save_connection", fail)
+    dialog = gui.BoxConnectDialog(config)
+    dialog.worker = SimpleNamespace(result=(SimpleNamespace(), "User"), deleteLater=lambda: None)
+    dialog.login_finished()
+    assert dialog.connected_config is None
+    assert dialog.connect_button.isEnabled()
+    assert "sensitive" not in dialog.status.text()
+    dialog.close()
+
+
 def test_locked_store_preserves_settings_for_offline_startup(monkeypatch, tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"box": {"client_id": "client", "field_data_folder_id": "123", "app_config_folder_id": "456"}}))

@@ -19,6 +19,11 @@ Nothing in this package performs I/O at import time. All configuration and
 lookup data is loaded explicitly by :func:`cassn.__main__.main`.
 """
 
-from cassn.config import VERSION
+def __getattr__(name):
+    # The unified launcher must choose a project before config creates paths.
+    if name == "VERSION":
+        from cassn.config import VERSION
+        return VERSION
+    raise AttributeError(name)
 
 __all__ = ["VERSION"]

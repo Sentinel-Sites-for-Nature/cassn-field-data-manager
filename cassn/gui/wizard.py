@@ -97,9 +97,9 @@ from cassn.config import (
     APP_TITLE,
     AUDIO_DEVICE_TYPES,
     AUDIO_FIELDS,
-    BOX_TOKEN_FILE,
     BUNDLE_DIR,
     CONFIG_JSON,
+    DEFAULT_STAGING_ROOT,
     DEFAULT_DOWNLOADER,
     DEVICE_TYPES,
     DOWNLOADERS,
@@ -196,7 +196,7 @@ class FieldDataWizard(QMainWindow):
         # Data storage
         self.metadata = {}
         self.devices = []
-        self.staging_root = Path.home() / "Desktop" / "CASSN_field_data_staging"
+        self.staging_root = DEFAULT_STAGING_ROOT
         # Every staging location the user has used, remembered across launches so
         # the resume dialog can surface partial sessions from any of them (e.g. an
         # SSD/Desktop copy and the external G-DRIVE), not just the active root.
@@ -267,10 +267,6 @@ class FieldDataWizard(QMainWindow):
         if not BOX_AVAILABLE:
             return False
 
-        # Look for tokens next to .app (or script folder when not bundled)
-        if not BOX_TOKEN_FILE.exists():
-            return False
-
         try:
             client = get_box_client(self.box_config)
             if client:
@@ -280,6 +276,50 @@ class FieldDataWizard(QMainWindow):
             pass
 
         return False
+
+    def set_box_connection_state(self, connected):
+        self.box_authenticated = connected
+        self.box_connection_label.setText("✓ Connected" if connected else "Box disconnected — connect to upload")
+        self.box_connection_label.setStyleSheet("color: green; font-weight: bold;" if connected else "color: #955300;")
+        busy = bool(self._box_operation_active or any(
+            worker and worker.isRunning() for worker in
+            (self.upload_thread, self.box_verify_thread, self.fixity_thread)))
+        for name in ("upload_now_btn", "box_verify_btn", "fixity_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(connected and not busy)
+        if hasattr(self, "disconnect_box_btn"):
+            from cassn.box.hosted import manager_for
+            self.disconnect_box_btn.setEnabled(manager_for(self.box_config).session is not None)
+        self._refresh_workspace_context()
+
+    def connect_to_box(self):
+        from cassn.gui.box_connect import BoxConnectDialog
+        dialog = BoxConnectDialog(self.box_config, self, auto_start=True)
+        if dialog.exec() == QDialog.Accepted:
+            self.box_config = dialog.connected_config
+            self.set_box_connection_state(True)
+            return True
+        return False
+
+    def disconnect_from_box(self):
+        from cassn.gui.hosted_setup import HostedDisconnectDialog
+        dialog = HostedDisconnectDialog(self.box_config, self)
+        dialog.exec()
+        if dialog.disconnected:
+            self.set_box_connection_state(False)
+            return True
+        return False
+
+    def _check_hosted_state(self):
+        # Read only in-memory status here; token acquisition stays on workers.
+        from cassn.box.hosted import manager_for
+        if manager_for(self.box_config).state in ("reconnect", "denied", "disconnected", "network", "storage"):
+            if self.box_authenticated:
+                if hasattr(self, "_publish_connection"):
+                    self._publish_connection(False)
+                else:
+                    self.set_box_connection_state(False)
 
     def load_config(self):
         """Load saved configuration"""
@@ -354,6 +394,8 @@ class FieldDataWizard(QMainWindow):
             "deployment_folder": str(self.current_deployment_folder),
         }
 
+        if self.box_config.provider == "hosted":
+            session["box_project"] = {"profile": self.box_config.profile, "data_folder": self.box_config.field_data_folder_id}
         error = write_session(self.current_deployment_folder, session)
         if error:
             if hasattr(self, "log_text"):
@@ -391,7 +433,7 @@ class FieldDataWizard(QMainWindow):
         """
         candidates = [
             self.staging_root,
-            Path.home() / "Desktop" / "CASSN_field_data_staging",
+            DEFAULT_STAGING_ROOT,
         ]
         candidates += [Path(p) for p in self.known_staging_roots]
 
@@ -415,7 +457,9 @@ class FieldDataWizard(QMainWindow):
         Delegates to core.inventory's multi-root scanner so the resume dialog
         surfaces partial sessions from the Desktop/SSD and the G-DRIVE alike.
         """
-        return _find_all_sessions_multi(self.staging_roots())
+        from cassn.profile import session_matches
+        return [entry for entry in _find_all_sessions_multi(self.staging_roots())
+                if entry["status"] != "ok" or session_matches(entry["data"], self.box_config)]
 
     def offer_resume_session(self, sessions: list):
         """Show a selection dialog listing all deployments in staging. Lets user open any of them
@@ -483,6 +527,10 @@ class FieldDataWizard(QMainWindow):
 
     def restore_session(self, session_data):
         """Restore app state from a saved session dict."""
+        from cassn.profile import session_matches
+        if not session_matches(session_data, self.box_config):
+            QMessageBox.warning(self, "Different Project", "This deployment belongs to a different project. Open it in its original application.")
+            return
         self.metadata = normalize_deployment_event_metadata(
             session_data.get("metadata", {})
         )
@@ -630,7 +678,7 @@ class FieldDataWizard(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         # Set window icon
-        icon_path = BUNDLE_DIR / "assets" / "cassn_icon.png"
+        icon_path = BUNDLE_DIR / "assets" / "ssn_data_manager_icon.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -738,7 +786,7 @@ class FieldDataWizard(QMainWindow):
         title = workspace_label("Deployments and devices", "pageTitle")
         layout.addWidget(title)
         layout.addWidget(workspace_label(
-            "Choose the event and devices you’re collecting.", "subtitle", wrap=True,
+            "Choose the event and devices you’re ingesting.", "subtitle", wrap=True,
         ))
         layout.setContentsMargins(26, 16, 26, 16)
         layout.setSpacing(10)
@@ -890,16 +938,24 @@ class FieldDataWizard(QMainWindow):
 
         # Staging location
         staging_group = QGroupBox("Local Staging Location")
-        staging_layout = QHBoxLayout()
+        staging_layout = QVBoxLayout()
         staging_layout.setContentsMargins(0, 0, 0, 0)
+        staging_description = workspace_label(
+            "Choose where your data is staged before upload to Box. Make sure this location "
+            "has enough free storage for the full set of SD cards you plan to collect.",
+            "muted", wrap=True,
+        )
+        staging_layout.addWidget(staging_description)
+        staging_controls = QHBoxLayout()
 
         self.staging_label = QLineEdit(str(self.staging_root))
         self.staging_label.setReadOnly(True)
-        staging_layout.addWidget(self.staging_label)
+        staging_controls.addWidget(self.staging_label)
 
         change_btn = QPushButton("Change...")
         change_btn.clicked.connect(self.choose_staging_location)
-        staging_layout.addWidget(change_btn)
+        staging_controls.addWidget(change_btn)
+        staging_layout.addLayout(staging_controls)
 
         self.set_default_cb = QCheckBox("Set as default")
         staging_layout.addWidget(self.set_default_cb)
@@ -924,7 +980,7 @@ class FieldDataWizard(QMainWindow):
         box_logo.setContentsMargins(0, 0, 0, 6)
         box_status_layout.addWidget(box_logo)
         box_status_layout.addSpacing(6)
-        box_status_label = QLabel()
+        box_status_label = self.box_connection_label = QLabel()
         if self.box_authenticated:
             box_status_label.setText("✓ Connected")
             box_status_label.setStyleSheet("color: green; font-weight: bold;")
@@ -941,10 +997,18 @@ class FieldDataWizard(QMainWindow):
         upload_note.setWordWrap(True)
         box_layout.addWidget(upload_note)
 
-        if not self.box_authenticated:
-            auth_note = QLabel("⚠ Box not connected. Run box_auth_setup.py to authenticate.")
-            auth_note.setStyleSheet("color: orange;")
-            box_layout.addWidget(auth_note)
+        self.connect_box_btn = QPushButton("Connect to Box")
+        self.connect_box_btn.clicked.connect(self.connect_to_box)
+        box_layout.addWidget(self.connect_box_btn)
+        if self.box_config.provider == "hosted":
+            self.disconnect_box_btn = QPushButton("Disconnect")
+            self.disconnect_box_btn.clicked.connect(self.disconnect_from_box)
+            self.disconnect_box_btn.setEnabled(self.box_authenticated)
+            box_layout.addWidget(self.disconnect_box_btn)
+            self._hosted_timer = QTimer(self)
+            self._hosted_timer.setInterval(1000)
+            self._hosted_timer.timeout.connect(self._check_hosted_state)
+            self._hosted_timer.start()
 
         box_group.setLayout(box_layout)
         self.storage_columns.addWidget(box_group, 1)
@@ -1303,6 +1367,12 @@ class FieldDataWizard(QMainWindow):
             "Clear this session and begin a new deployment.",
         )
 
+        if self.box_config.provider == "hosted":
+            # Hosted prototype covers ingest and Box; downstream project destinations
+            # have not been configured. Keep UC SoundHub settings out of this flow.
+            for action in (self.soundhub_stage_btn, self.soundhub_upload_btn,
+                           self.soundhub_verify_btn, self.open_soundhub_btn):
+                action.setVisible(False)
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._menu_button("Uploads ▾", [
             self.upload_now_btn,

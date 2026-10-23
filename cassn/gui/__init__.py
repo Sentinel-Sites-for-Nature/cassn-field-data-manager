@@ -8,6 +8,10 @@ than reading module globals, so the data, export, and Box-storage layers it
 drives stay Qt-free and independently testable.
 """
 
-from cassn.gui.wizard import FieldDataWizard
+def __getattr__(name):
+    if name == "FieldDataWizard":
+        from cassn.gui.wizard import FieldDataWizard
+        return FieldDataWizard
+    raise AttributeError(name)
 
 __all__ = ["FieldDataWizard"]
