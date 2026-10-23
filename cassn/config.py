@@ -229,7 +229,7 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "and remove the destination file."
     ),
     "file_size_floor": (
-        "Files copied below device-aware floors are flagged as possible corrupted writes: "
+        "Warnings are reported for copied files below device-aware size minimums: "
         "images <500 KB, bird AudioMoth WAVs <1 GB, and bat AudioMoth WAVs <500 KB."
     ),
     "duplicate_detection": (
@@ -249,6 +249,10 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "Recorded timestamps should fall within the deployment window. Flags files dated "
         "before deployment start, after the collection date, and clock-reset clusters "
         "(many files at the same second)."
+    ),
+    "camera_date_review": (
+        "Camera captures outside the deployment dates block review and upload until "
+        "the operator records an explanation. Original files and camera dates are retained."
     ),
     "camera_timezone_consistency": (
         "Camera clocks are expected to show local Pacific civil time. Original EXIF "

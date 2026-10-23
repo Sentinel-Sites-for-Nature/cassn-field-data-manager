@@ -24,6 +24,7 @@ path helpers; none of them import Qt or Box.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -552,6 +553,55 @@ def validate_datetimes(entries: list, deployment_start: str, collection_date: st
         warnings.append(f"Possible clock reset: {worst[1]} files share timestamp {worst[0].isoformat()} — camera clock may have reset to factory default")
 
     return warnings
+
+
+def camera_date_discrepancies(
+    entries: list[dict], deployment_start: str, collection_date: str,
+) -> list[dict]:
+    """Return camera groups with captures outside the inclusive field-date window.
+
+    The result is evidence for an operator decision, never a timestamp correction.
+    A fingerprint changes when the bounds or any offending file changes, so an
+    earlier review cannot silently clear a new discrepancy.
+    """
+    try:
+        start = datetime.strptime(deployment_start, "%Y-%m-%d")
+        end = datetime.strptime(collection_date, "%Y-%m-%d") + timedelta(days=1)
+    except (TypeError, ValueError):
+        return []
+
+    groups: dict[str, list[tuple[str, str, datetime, str]]] = defaultdict(list)
+    for entry in entries:
+        if entry.get("file_type") != "image":
+            continue
+        recorded = str(entry.get("recorded_datetime") or "")
+        try:
+            wall = datetime.fromisoformat(recorded).replace(tzinfo=None)
+        except ValueError:
+            continue
+        if start <= wall < end:
+            continue
+        label = str(entry.get("device_label") or entry.get("deployment_id") or "Unknown camera")
+        name = str(entry.get("new_filename") or entry.get("filename") or entry.get("original_filename") or "")
+        groups[label].append((name, recorded, wall, "before" if wall < start else "after"))
+
+    findings = []
+    for label, files in sorted(groups.items()):
+        identity = sorted((name, recorded) for name, recorded, _, _ in files)
+        fingerprint = hashlib.sha256(json.dumps(
+            [deployment_start, collection_date, label, identity],
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        findings.append({
+            "device_label": label,
+            "fingerprint": fingerprint,
+            "before_count": sum(kind == "before" for _, _, _, kind in files),
+            "after_count": sum(kind == "after" for _, _, _, kind in files),
+            "earliest": min(wall for _, _, wall, _ in files).isoformat(),
+            "latest": max(wall for _, _, wall, _ in files).isoformat(),
+            "examples": [name for name, _, _, _ in sorted(files, key=lambda item: item[2])[:3]],
+        })
+    return findings
 
 
 def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:

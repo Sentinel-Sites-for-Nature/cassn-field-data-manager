@@ -147,6 +147,7 @@ from cassn.core.inventory import (
 from cassn.core.quality_control import (
     append_qc_report,
     build_box_verification_record,
+    camera_date_discrepancies,
     check_camera_serial,
     check_camera_timezones,
     check_file_size_floor,
@@ -203,6 +204,7 @@ class FieldDataWizard(QMainWindow):
         self.card_concurrency_limit = 4
         self.current_deployment_folder = None
         self.file_inventory = []
+        self.camera_date_reviews = {}
         self.seen_file_hashes = set()  # session-wide duplicate detection
         self.card_ingest_threads: dict[str, CardIngestThread] = {}
         self._retiring_card_threads: set[CardIngestThread] = set()
@@ -234,7 +236,7 @@ class FieldDataWizard(QMainWindow):
         # Build UI
         self.init_ui()
 
-        # A completed card panel remains visible until its source volume is
+        # A finished card panel remains visible until its source volume is
         # actually unmounted, then disappears without requiring a UI action.
         self._card_ejection_timer = QTimer(self)
         self._card_ejection_timer.setInterval(1000)
@@ -348,6 +350,7 @@ class FieldDataWizard(QMainWindow):
             "devices": self.devices,
             "device_statuses": device_statuses,
             "file_inventory": self.file_inventory,
+            "camera_date_reviews": self.camera_date_reviews,
             "deployment_folder": str(self.current_deployment_folder),
         }
 
@@ -501,6 +504,7 @@ class FieldDataWizard(QMainWindow):
             migrated_site_metadata = True
         self.devices = [tuple(d) for d in session_data.get("devices", [])]
         self.file_inventory = session_data.get("file_inventory", [])
+        self.camera_date_reviews = session_data.get("camera_date_reviews", {})
         self.current_deployment_folder = Path(session_data["deployment_folder"])
         try:
             removed_duplicates = deduplicate_exact_storage_entries(self.file_inventory)
@@ -1743,16 +1747,34 @@ class FieldDataWizard(QMainWindow):
         self._reflow_card_panels()
 
     def _remove_ejected_completed_card_panels(self) -> None:
-        """Dismiss successful panels after their source volume is unmounted."""
+        """Dismiss finished panels after ejection, even if a mount folder remains."""
         for device_label, panel in list(self.card_ingest_panels.items()):
-            if not panel.get("complete"):
+            if device_label in self.card_ingest_threads or not panel.get("finished"):
                 continue
             source_dir = panel.get("source_dir")
-            if source_dir is not None and not Path(source_dir).exists():
-                self.log(f"[{device_label}] Source card ejected; cleared completed job panel.")
+            volume = panel.get("source_volume")
+            disconnected = source_dir is not None and not Path(source_dir).exists()
+            if volume is not None:
+                try:
+                    disconnected = disconnected or (
+                        not volume.is_mount()
+                        or volume.stat().st_dev != panel["source_volume_device"]
+                    )
+                except OSError:
+                    disconnected = True
+            if disconnected:
                 self._remove_card_panel(device_label)
+                self.log(f"[{device_label}] Source card ejected; cleared finished job panel.")
 
     def _create_card_panel(self, device_label: str, source_dir: Path) -> None:
+        source_dir = source_dir.resolve()
+        # Remember the mounted filesystem rather than relying on a directory's
+        # existence: an ejected volume can leave its mount-point folder behind.
+        source_volume = next(
+            (path for path in (source_dir, *source_dir.parents)
+             if path.parent != path and path.is_mount()),
+            None,
+        )
         existing = self.card_ingest_panels.pop(device_label, None)
         if existing:
             existing["group"].setParent(None)
@@ -1820,7 +1842,10 @@ class FieldDataWizard(QMainWindow):
             "errors": 0,
             "cancel": cancel,
             "started": time.monotonic(),
-            "source_dir": source_dir.resolve(),
+            "source_dir": source_dir,
+            "source_volume": source_volume,
+            "source_volume_device": source_volume.stat().st_dev if source_volume else None,
+            "finished": False,
             "complete": False,
         }
         self._reflow_card_panels()
@@ -2054,6 +2079,9 @@ class FieldDataWizard(QMainWindow):
         item = self._device_item(device_label)
         panel = self.card_ingest_panels.get(device_label)
 
+        if panel:
+            panel["finished"] = True
+
         if not result.get("ok"):
             cancelled = bool(result.get("cancelled"))
             if item:
@@ -2090,12 +2118,23 @@ class FieldDataWizard(QMainWindow):
 
         if panel:
             timezone_error = check_camera_timezones(device_entries)[0] == "error"
+            date_review_needed = any(
+                not self._camera_date_review_is_current(finding)
+                for finding in camera_date_discrepancies(
+                    device_entries,
+                    self.metadata.get("deployment_event_start_date", ""),
+                    self.metadata.get("deployment_event_end_date", ""),
+                )
+            )
+            qc_blocked = timezone_error or date_review_needed
             panel["status"].setText(
+                "Copy complete — camera date review required; safe to eject card"
+                if date_review_needed else
                 "Copy complete — timezone QC error; safe to eject card"
                 if timezone_error else "Complete — safe to eject card"
             )
             panel["status"].setStyleSheet(
-                f"color: {'#cc0000' if timezone_error else 'green'}; font-weight: bold;"
+                f"color: {'#cc0000' if qc_blocked else 'green'}; font-weight: bold;"
             )
             panel["progress"].setRange(0, max(total_for_device, 1))
             panel["progress"].setValue(total_for_device)
@@ -2551,14 +2590,14 @@ class FieldDataWizard(QMainWindow):
                         self._release_ingest_hash(source_hash, file_type)
                     raise
 
-                # File size floor: flag suspiciously small files using device-aware thresholds.
+                # File size floor: warn when below device-aware thresholds.
                 dest_size = dest_path.stat().st_size
                 size_hit = check_file_size_floor(dest_size, file_type, dev_code)
                 if size_hit is not None:
                     _size_floor, floor_label = size_hit
                     self.log(
-                        f"  Warning: {new_filename} is only {format_size_floor(dest_size)} "
-                        f"(below {floor_label} floor) — possible corrupted write"
+                        f"  Warning: {new_filename} is {format_size_floor(dest_size)} "
+                        f"(below {floor_label} minimum)"
                     )
                     small_file_count += 1
                     small_file_names.append(new_filename)
@@ -2834,6 +2873,88 @@ class FieldDataWizard(QMainWindow):
     # Review / metadata generation
     # ------------------------------------------------------------------
 
+    def _camera_date_findings(self) -> list[dict]:
+        return camera_date_discrepancies(
+            self.file_inventory,
+            self.metadata.get("deployment_event_start_date", ""),
+            self.metadata.get("deployment_event_end_date", ""),
+        )
+
+    def _camera_date_review_is_current(self, finding: dict) -> bool:
+        prior = getattr(self, "camera_date_reviews", {}).get(finding["device_label"], {})
+        return (prior.get("fingerprint") == finding["fingerprint"]
+                and bool(prior.get("decision"))
+                and len(str(prior.get("note", "")).strip()) >= 10)
+
+    def _prompt_camera_date_review(self, finding: dict) -> tuple[str, str] | None:
+        """Require a documented operator decision; never change camera timestamps."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Camera date review — {finding['device_label']}")
+        dlg.setMinimumWidth(540)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(
+            f"<b>{finding['device_label']} has captures outside the deployment dates.</b><br>"
+            f"Before start: {finding['before_count']} · After collection date: {finding['after_count']}<br>"
+            f"Earliest affected: {finding['earliest']} · Latest affected: {finding['latest']}<br>"
+            "Review the camera clock and field records. If field dates or file assignment "
+            "are wrong, cancel and correct them before continuing. Original files and EXIF are never changed."
+        ))
+        confirmed = QCheckBox("I verified the camera clock/date was incorrect; retain its original dates")
+        layout.addWidget(confirmed)
+        layout.addWidget(QLabel("Evidence for the camera-clock finding (required):"))
+        note = QTextEdit()
+        note.setPlaceholderText("For example: setup and retrieval frames align after a two-day camera-date offset.")
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save = buttons.button(QDialogButtonBox.Save)
+        save.setEnabled(False)
+
+        def update_save():
+            save.setEnabled(confirmed.isChecked() and len(note.toPlainText().strip()) >= 10)
+
+        confirmed.toggled.connect(update_save)
+        note.textChanged.connect(update_save)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return "Camera clock/date was incorrect; original camera dates retained", note.toPlainText().strip()
+
+    def _ensure_camera_dates_reviewed(self) -> bool:
+        """Block review/export/upload until every out-of-window camera is addressed."""
+        reviews = getattr(self, "camera_date_reviews", {})
+        for finding in self._camera_date_findings():
+            label = finding["device_label"]
+            if self._camera_date_review_is_current(finding):
+                continue
+            append_qc_report(
+                self.current_deployment_folder, "camera_date_review", label, "error",
+                f"{finding['before_count']} before start; {finding['after_count']} after collection date. "
+                "Operator review required before continuing.",
+            )
+            response = self._prompt_camera_date_review(finding)
+            if response is None:
+                return False
+            decision, note = response
+            if not decision or len(note.strip()) < 10:
+                return False
+            reviews[label] = {
+                "fingerprint": finding["fingerprint"],
+                "decision": decision,
+                "note": note,
+                "reviewed_at": datetime.now().astimezone().isoformat(),
+            }
+            self.camera_date_reviews = reviews
+            if not self.save_session():
+                reviews.pop(label, None)
+                return False
+            append_qc_report(
+                self.current_deployment_folder, "camera_date_review", label, "pass",
+                f"Reviewed: {decision}. Evidence: {note}. Original camera dates retained.",
+            )
+        return True
+
     def validate_and_next_collection(self):
         """Validate collection and proceed to review"""
         if self.card_ingest_threads:
@@ -2860,6 +2981,9 @@ class FieldDataWizard(QMainWindow):
             )
             if reply == QMessageBox.No:
                 return
+
+        if not self._ensure_camera_dates_reviewed():
+            return
 
         # Coordinate validation: latitude/longitude and elevation non-null and
         # within the California study area. All three come from plots.csv, so this
@@ -3141,6 +3265,8 @@ class FieldDataWizard(QMainWindow):
         if self.wi_split_thread and self.wi_split_thread.isRunning():
             return
         if self.upload_thread and self.upload_thread.isRunning():
+            return
+        if not self._ensure_camera_dates_reviewed():
             return
 
         # Hold through callbacks between preparation, upload, and verification.
@@ -3656,6 +3782,29 @@ class FieldDataWizard(QMainWindow):
                 append_qc_report(self.current_deployment_folder, check_name, device_label, "pass", "OK")
 
         if any(entry.get("file_type") == "image" for entry in device_entries):
+            date_findings = camera_date_discrepancies(device_entries, deploy_start, deploy_end)
+            if date_findings:
+                finding = date_findings[0]
+                reviewed = getattr(self, "camera_date_reviews", {}).get(device_label, {})
+                resolved = self._camera_date_review_is_current(finding)
+                append_qc_report(
+                    self.current_deployment_folder, "camera_date_review", device_label,
+                    "pass" if resolved else "error",
+                    (f"Reviewed: {reviewed.get('decision')}. Evidence: {reviewed.get('note')}."
+                     if resolved else
+                     f"{finding['before_count']} before start; {finding['after_count']} after collection date. "
+                     "Operator review required before continuing."),
+                )
+                if not resolved:
+                    any_warnings = True
+                    self._append_card_message(
+                        device_label, "QC error: camera dates need review before continuing.", alert=True,
+                    )
+            else:
+                append_qc_report(
+                    self.current_deployment_folder, "camera_date_review", device_label,
+                    "pass", "No camera dates outside the deployment window.",
+                )
             severity, message = check_camera_timezones(device_entries)
             append_qc_report(
                 self.current_deployment_folder, "camera_timezone_consistency",
@@ -4495,6 +4644,7 @@ class FieldDataWizard(QMainWindow):
             self.metadata = {}
             self.devices = []
             self.file_inventory = []
+            self.camera_date_reviews = {}
             self.seen_file_hashes = set()
             self._ingest_hash_registry = IngestHashRegistry()
             self._active_card_sources.clear()
