@@ -179,6 +179,10 @@ class HostedSetupDialog(QDialog):
                 connected = True
             except HostedError as exc:
                 auth_error = str(exc)
+                if exc.kind in ("keychain_approval", "storage", "reconnect", "denied"):
+                    # Keep recovery visible; do not retry credentials or silently
+                    # enter offline mode after an authentication failure.
+                    return None, False, auth_error
             try:
                 snapshot = bootstrap_lookup_tables(self.config, self.cache_dir)
                 return snapshot, connected and snapshot.source == "box", None

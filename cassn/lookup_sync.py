@@ -519,7 +519,11 @@ def bootstrap_lookup_tables(
         except Exception as exc:
             if isinstance(exc, LookupBootstrapError):
                 box_issue = exc
-            box_error = "Project configuration is unavailable." if identity else str(exc)
+            if identity:
+                from cassn.box.hosted import HostedError
+                box_error = str(exc) if isinstance(exc, HostedError) else "Project configuration is unavailable."
+            else:
+                box_error = str(exc)
 
     try:
         if identity is not None:

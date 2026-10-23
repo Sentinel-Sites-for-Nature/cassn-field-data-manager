@@ -297,3 +297,23 @@ def test_double_connect_does_not_start_a_second_worker(app, monkeypatch):
     assert dialog.worker is worker
     dialog.worker = None
     dialog.close()
+
+
+@pytest.mark.parametrize('kind', ['keychain_approval', 'storage', 'reconnect', 'denied'])
+def test_authentication_failure_stays_recoverable_without_cache_retry(app, monkeypatch, tmp_path, kind):
+    from cassn.box.hosted import HostedError
+    calls = []
+    def token():
+        calls.append('token')
+        raise HostedError(kind)
+    monkeypatch.setattr(hosted_setup, 'manager_for', lambda _: SimpleNamespace(token=token, session=None))
+    monkeypatch.setattr(hosted_setup, 'bootstrap_lookup_tables', lambda *a: pytest.fail('must not retry blocked credentials'))
+    dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
+    dialog.show()
+    settle(app, lambda: dialog.worker is None)
+    assert calls == ['token']
+    assert dialog.result() != QDialog.Accepted
+    assert dialog.connect_button.isVisible() and dialog.connect_button.isEnabled()
+    assert str(HostedError(kind)) in dialog.status.text()
+    assert not dialog.connected
+    dialog.close()

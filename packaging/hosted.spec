@@ -22,10 +22,10 @@ a = Analysis(
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=title,
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=False, target_arch='arm64', codesign_identity=None, entitlements_file=None)
+          console=False, target_arch='arm64', codesign_identity=os.environ.get('CASSN_SIGNING_IDENTITY') or None, entitlements_file=None)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=title)
 app = BUNDLE(coll, name=title + '.app',
              icon=str(root / 'assets' / 'ssn_data_manager_icon.icns'),
              bundle_identifier='org.cassn.' + profile + '.field-data-manager.prototype',
-             info_plist={'CFBundleShortVersionString': '4.0', 'CFBundleVersion': '4010',
+             info_plist={'CFBundleShortVersionString': '4.0', 'CFBundleVersion': '4012',
                          'LSMinimumSystemVersion': '14.0', 'NSHighResolutionCapable': True})

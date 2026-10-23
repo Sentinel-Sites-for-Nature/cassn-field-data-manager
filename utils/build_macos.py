@@ -18,10 +18,27 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=("unified", "uc", "csu"), default="unified")
-    profile = parser.parse_args().profile
+    parser.add_argument("--signing-identity", default=os.environ.get("CASSN_SIGNING_IDENTITY"),
+                        help="Installed Developer ID Application certificate name or SHA-1 fingerprint")
+    parser.add_argument("--dist-dir", type=Path,
+                        help="Build in a separate directory without replacing a running app")
+    args = parser.parse_args()
+    profile = args.profile
     title = "CA-SSN Data Manager" if profile == "unified" else profile.upper() + " Field Data Manager"
+    dist_dir = (args.dist_dir or ROOT / 'dist' / profile).resolve()
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise SystemExit('This build targets Apple Silicon macOS.')
+    if args.signing_identity:
+        import re
+        identities = subprocess.check_output(['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'], text=True)
+        matches = re.findall(r'([0-9A-Fa-f]{40}) "(Developer ID Application:[^"]+)"', identities)
+        selected = [fingerprint for fingerprint, name in matches
+                    if args.signing_identity in (fingerprint, name)]
+        if len(selected) != 1:
+            raise SystemExit('Choose an installed, valid Developer ID Application certificate. No app was rebuilt.')
+        signing_identity = selected[0]
+    else:
+        signing_identity = ''
     tool = shutil.which('exiftool')
     if not tool:
         raise SystemExit('Install ExifTool 13.55 on the build host first.')
@@ -51,14 +68,18 @@ def main():
     env = dict(os.environ, PATH=str(stage) + ':/usr/bin:/bin:/usr/sbin:/sbin')
     assert subprocess.check_output([str(stage / 'exiftool'), '-ver'], text=True, env=env).strip() == version
     subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm',
-                    '--distpath', str(ROOT / 'dist' / profile),
+                    '--distpath', str(dist_dir),
                     '--workpath', str(ROOT / 'build' / (profile + '-pyinstaller')),
-                    str(ROOT / 'packaging' / 'hosted.spec')], cwd=ROOT, env=dict(os.environ, CASSN_BUILD_PROFILE=profile), check=True)
-    app = ROOT / 'dist' / profile / (title + '.app')
+                    str(ROOT / 'packaging' / 'hosted.spec')], cwd=ROOT,
+                    env=dict(os.environ, CASSN_BUILD_PROFILE=profile, CASSN_SIGNING_IDENTITY=signing_identity), check=True)
+    app = dist_dir / (title + '.app')
+    subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)], check=True)
     archive_name = "CA-SSN-Data-Manager-arm64-prototype.zip" if profile == "unified" else profile.upper() + "-Field-Data-Manager-arm64-prototype.zip"
-    archive = ROOT / "dist" / profile / archive_name
+    archive = dist_dir / archive_name
     subprocess.run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(archive)], check=True)
-    print(f'Prototype: {app}\nArchive: {archive}\nPublic distribution still requires Developer ID signing and notarization.')
+    print(f'App: {app}\nArchive: {archive}')
+    print('Developer ID signed; public distribution still requires notarization.' if signing_identity else
+          'Ad-hoc prototype: updates can require Keychain approval again. Public distribution requires Developer ID signing and notarization.')
 
 
 if __name__ == '__main__':

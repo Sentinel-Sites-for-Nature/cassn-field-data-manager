@@ -28,12 +28,19 @@ if "--self-check" in sys.argv:
     assert (BUNDLE_DIR / "assets" / "ssn_data_manager_icon.png").is_file()
     assert Path(certifi.where()).is_file()
     exif = subprocess.check_output(["exiftool", "-ver"], text=True).strip()
+    keychain_checked = "--check-keychain" in sys.argv
+    if keychain_checked:
+        import uuid
+        from cassn.box.secrets import _read_macos_without_prompt
+        # Exercise the packaged Security.framework bridge without accessing any
+        # real saved connection or presenting an authorization dialog.
+        assert _read_macos_without_prompt("diagnostic-missing-" + str(uuid.uuid4())) is None
     print(json.dumps({"app": APP_TITLE, "frozen": bool(getattr(sys, "frozen", False)),
         "architecture": platform.machine(), "profile": config.profile,
         "config_directory": str(CONFIG_DIR), "staging_directory": str(DEFAULT_STAGING_ROOT),
         "data_folder": config.field_data_folder_id, "config_folder": config.app_config_folder_id,
         "service": config.service_url, "exiftool": exif, "gui_imports": True,
-        "certificate_bundle": True}))
+        "certificate_bundle": True, "keychain_no_prompt": keychain_checked}))
 else:
     from cassn.launcher import main
     main()

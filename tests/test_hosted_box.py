@@ -331,7 +331,7 @@ def test_uc_without_local_copy_still_uses_keychain(tmp_path, monkeypatch):
     from cassn.box import secrets as vault
     monkeypatch.setattr(config, 'BASE_CONFIG_DIR', tmp_path)
     session = DeviceSession('c' * 32, 'd' * 43, 9999999999., '123', 'Test')
-    monkeypatch.setattr(vault, 'read', lambda *a: json.dumps(vars(session)))
+    monkeypatch.setattr(vault, 'read', lambda *a, **kw: json.dumps(vars(session)))
     assert SessionStore('uc').load() == session
 
 

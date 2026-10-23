@@ -26,6 +26,30 @@ UC or CSU before loading project settings. Run `python -m cassn.launcher` from
 the repository root, or build with `.venv/bin/python utils/build_macos.py`.
 The packaged app and ZIP are written to `dist/unified/`.
 
+### macOS Keychain and release signing
+
+Startup checks the saved connection without opening a Keychain password dialog.
+When macOS requires approval, setup stays open with recovery instructions. Click
+**Connect to Box** to authorize access with the Mac login password in the macOS
+dialog. Cancelling or denying approval leaves project data intact and permits a
+retry. Expired Box connections request a fresh browser sign-in. Network outages
+can still use the validated offline configuration.
+
+Ad-hoc prototypes have a different signing identity after each rebuild, so
+**Always Allow** may apply only to that build. For releases, install a valid
+Developer ID Application certificate and consistently build with that identity:
+
+```bash
+.venv/bin/python utils/build_macos.py --signing-identity "Developer ID Application: YOUR ORGANIZATION (TEAMID)"
+```
+
+`CASSN_SIGNING_IDENTITY` can supply the same certificate name or SHA-1 fingerprint.
+An explicitly selected identity must match an installed Developer ID certificate;
+the builder fails before rebuilding if it cannot find one. The bundle and nested
+binaries use that identity and are verified before archiving. Notarization is a
+separate distribution step. `--dist-dir dist/release-candidate` builds a separate
+copy without replacing a running app.
+
 UC uses `wrangler.uc.json` and `https://cassn-uc-box-auth.tiny-band-cf20.workers.dev`,
 with data `377166707326` and app_config `377164694031`. Its sessions and encryption
 key are separate from CSU. Both profiles currently allow only John.

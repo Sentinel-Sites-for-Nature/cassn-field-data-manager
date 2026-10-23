@@ -36,6 +36,7 @@ _MESSAGES = {
     "denied": "This account cannot connect to this project. Contact John for access.",
     "invalid": "The sign-in service returned an unexpected response. Please retry.",
     "storage": "Could not save or read the connection securely. Check Keychain access and retry.",
+    "keychain_approval": "This Mac needs approval to use the saved Box connection. Click Connect to Box, enter your Mac login password in the macOS Keychain dialog, and choose Always Allow. If you cancel or deny access, you can retry without losing your project data.",
     "cancelled": "Box sign-in cancelled.",
     "timeout": "Box sign-in timed out. Click Connect to Box to try again.",
     "busy": "The sign-in service is busy. Please retry shortly.",
@@ -163,15 +164,20 @@ class SessionStore:
         finally:
             Path(name).unlink(missing_ok=True)
 
-    def load(self):
+    def load(self, *, interactive=False):
         try:
             local = self._local_copy()
             if local is not None:
                 return local[1]
-            raw = vault.read(self.account)
+            raw = vault.read(self.account, interactive=interactive)
             return DeviceSession.parse(json.loads(raw)) if raw else None
+        except vault.CredentialAccessError as exc:
+            raise HostedError(exc.kind) from None
         except Exception:
             raise HostedError("storage") from None
+
+    def load_interactive(self):
+        return self.load(interactive=True)
 
     def save(self, session):
         try:
@@ -193,7 +199,12 @@ class SessionStore:
                 elif store.get_password(vault.SERVICE, self.account) is not None:
                     store.delete_password(vault.SERVICE, self.account)
                 raise
-        except Exception:
+        except vault.CredentialAccessError as exc:
+            raise HostedError(exc.kind) from None
+        except Exception as exc:
+            access_error = vault._access_error(exc)
+            if access_error.kind == "keychain_approval":
+                raise HostedError(access_error.kind) from None
             raise HostedError("storage") from None
 
     def clear(self):
@@ -290,9 +301,14 @@ class SessionManager:
         self.last_request = -100.
         self.state = "disconnected"
 
-    def _load(self):
+    def _load(self, *, interactive=False):
         if not self.loaded:
-            self.session = self.store.load()
+            load = getattr(self.store, "load_interactive", self.store.load) if interactive else self.store.load
+            try:
+                self.session = load()
+            except HostedError as exc:
+                self.state = "storage" if exc.kind == "keychain_approval" else exc.kind
+                raise
             self.loaded = True
         return self.session
 
@@ -310,7 +326,8 @@ class SessionManager:
 
     def login(self, open_browser, cancelled, progress=lambda _: None):
         with self.lock:
-            old = self._load()  # Check secure storage before opening the browser.
+            progress("Checking your saved connection. If macOS asks, approve Keychain access with your Mac login password…")
+            old = self._load(interactive=True)  # Only an explicit Connect may prompt.
             proof = secrets.token_urlsafe(32)
             challenge = base64.urlsafe_b64encode(hashlib.sha256(proof.encode()).digest()).decode().rstrip("=")
             progress("Opening your browser…")
