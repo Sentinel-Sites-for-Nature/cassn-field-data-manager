@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from cassn.config import CAMERA_DEVICE_TYPES
+from cassn.core.wi_features import validate_wi_feature_type
 from cassn.lookups import normalize_deployment_event_metadata
 
 # WI deployment CSV schema. Column order is significant and must not change.
@@ -187,7 +188,7 @@ def build_wi_rows(
             "event_type": wi_config.get("event_type", "Temporal"),
             "bait_type": wi_config.get(f"bait_type_{dev_type}", ""),
             "bait_description": wi_config.get(f"bait_description_{dev_type}", ""),
-            "feature_type": cam.get("feature_type", ""),
+            "feature_type": validate_wi_feature_type(cam.get("feature_type", "")),
             "feature_type_methodology": "",
             "camera_id": camera_id,
             "quiet_period": wi_config.get("quiet_period", 0),
@@ -247,7 +248,7 @@ def reshape_image_metadata_to_wi(image_csv_path: Path) -> dict[str, list[dict]]:
                 "event_type":              row.get('event_type', ''),
                 "bait_type":               row.get('bait_type', ''),
                 "bait_description":        row.get('bait_description', ''),
-                "feature_type":            row.get('feature_type', ''),
+                "feature_type":            validate_wi_feature_type(row.get('feature_type', '')),
                 "feature_type_methodology": row.get('feature_type_methodology', ''),
                 "camera_id":               row.get('camera_id', ''),
                 "quiet_period":            row.get('quiet_period', ''),

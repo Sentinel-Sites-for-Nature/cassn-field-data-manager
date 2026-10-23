@@ -13,6 +13,7 @@ from typing import Callable
 
 from cassn.box.auth import BoxConfig, get_box_client
 from cassn.box.client import BoxStorage
+from cassn.core.wi_features import validate_wi_feature_type
 from cassn.lookups import (
     AUDIO_DEVICE_TYPES,
     BOX_MANAGED_FILENAMES,
@@ -76,6 +77,16 @@ def validate_deployment_lookups(
     """Validate deployments and events as one relational runtime snapshot."""
     deployments = load_device_deployments(deployments_path)
     deployment_events = load_deployment_events(deployment_events_path)
+
+    for row in deployments:
+        if row["device_type"] in {"ML", "SA"}:
+            try:
+                validate_wi_feature_type(row.get("feature_type", ""))
+            except ValueError as exc:
+                raise LookupSchemaError(
+                    f"deployments.csv {row['site_short_name']} plot "
+                    f"{row['plot_number']} {row['device_type']}: {exc}"
+                ) from exc
 
     closed_without_ids = [
         row

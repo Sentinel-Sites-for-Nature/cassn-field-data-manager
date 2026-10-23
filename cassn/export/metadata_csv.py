@@ -29,6 +29,7 @@ from typing import Callable
 from cassn.config import AUDIO_FIELDS, IMAGE_FIELDS, IMAGE_TIMESTAMP_FIELDS, LOCAL_DATA_DIR, VERSION
 from cassn.core.audio_metadata import normalize_gain
 from cassn.core.aru_status import recording_aru_status
+from cassn.core.wi_features import validate_wi_feature_type
 from cassn.core.quality_control import append_qc_report, snapshot_lookup_tables
 from cassn.export.wildlife_insights import (
     SUBPROJECT_DESIGN,
@@ -196,7 +197,7 @@ def build_metadata_rows(metadata: dict, file_inventory: list, lookups) -> tuple[
                 'event_type':            wi_config.get('event_type', 'Temporal'),
                 'quiet_period':          wi_config.get('quiet_period', 0),
                 'camera_functioning':    wi_config.get('camera_functioning_default', 'Camera Functioning'),
-                'feature_type':          cam.get('feature_type', ''),
+                'feature_type':          validate_wi_feature_type(cam.get('feature_type', '')),
                 'feature_type_methodology': '',
                 'sensor_height':         wi_config.get(f'sensor_height_{dev_type}', ''),
                 'height_other':          '',
