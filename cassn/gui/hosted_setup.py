@@ -164,9 +164,12 @@ class HostedSetupDialog(QDialog):
         for button in (self.connect_button, self.retry_button, self.disconnect_button):
             button.setEnabled(not busy)
 
-    def load_project(self):
+    def load_project(self, *, require_live=False):
         if self.worker:
             return
+        # Retries after browser sign-in must also require a fresh Box snapshot.
+        self._require_live = getattr(self, "_require_live", False) or require_live
+        require_live = self._require_live
         self._busy(True)
         self.details.hide()
         self.status.setText(f"Loading {self.project_name} project configuration…")
@@ -185,7 +188,14 @@ class HostedSetupDialog(QDialog):
                     return None, False, auth_error
             try:
                 snapshot = bootstrap_lookup_tables(self.config, self.cache_dir)
-                return snapshot, connected and snapshot.source == "box", None
+                if (require_live or connected) and snapshot.source != "box":
+                    # A completed browser sign-in is not a completed project
+                    # download. Keep the operator here to reload settings,
+                    # retaining the successful connection for that retry.
+                    return None, connected, (LookupBootstrapError(
+                        "Box sign-in succeeded, but project settings could not be refreshed.")
+                        if connected else auth_error)
+                return snapshot, connected, None
             except LookupBootstrapError as exc:
                 return None, connected, exc if connected else auth_error
         self.worker = TaskWorker(load, self)
@@ -286,7 +296,7 @@ class HostedSetupDialog(QDialog):
         elif worker.result:
             self.raise_()
             self.activateWindow()
-            self.load_project()
+            self.load_project(require_live=True)
         else:
             self.intro_heading.setText("Click Connect to Box below to begin.")
             self.status.setText(worker.error or "Box sign-in cancelled. Connect again when you are ready.")

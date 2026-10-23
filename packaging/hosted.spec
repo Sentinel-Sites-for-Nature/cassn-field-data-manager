@@ -27,5 +27,5 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=title)
 app = BUNDLE(coll, name=title + '.app',
              icon=str(root / 'assets' / 'ssn_data_manager_icon.icns'),
              bundle_identifier='org.cassn.' + profile + '.field-data-manager.prototype',
-             info_plist={'CFBundleShortVersionString': '4.0', 'CFBundleVersion': '4012',
+             info_plist={'CFBundleShortVersionString': '4.0', 'CFBundleVersion': '4013',
                          'LSMinimumSystemVersion': '14.0', 'NSHighResolutionCapable': True})

@@ -232,7 +232,7 @@ def test_setup_one_click_opens_browser_and_loads_project_without_another_dialog(
     assert len(fake_login_worker) == 1
     fake_login_worker[0].result = True
     fake_login_worker[0].finished.emit()
-    load.assert_called_once()
+    load.assert_called_once_with(require_live=True)
     assert dialog.worker is None
     dialog.close()
 
@@ -316,4 +316,47 @@ def test_authentication_failure_stays_recoverable_without_cache_retry(app, monke
     assert dialog.connect_button.isVisible() and dialog.connect_button.isEnabled()
     assert str(HostedError(kind)) in dialog.status.text()
     assert not dialog.connected
+    dialog.close()
+
+
+def test_successful_login_keeps_settings_failure_on_welcome_until_reload(app, monkeypatch, tmp_path):
+    # The broker authenticates successfully, but configuration sync falls back
+    # to cache. Do not claim sign-in failed or send the user into a disconnected
+    # workspace. Reuse that connection when the operator reloads settings.
+    manager = SimpleNamespace(token=lambda: object(), session=object())
+    monkeypatch.setattr(hosted_setup, 'manager_for', lambda _: manager)
+    cached = SimpleNamespace(source='offline-cache', lookups=object())
+    live = SimpleNamespace(source='box', lookups=object())
+    responses = [cached, cached, live]
+    monkeypatch.setattr(hosted_setup, 'bootstrap_lookup_tables', lambda *a: responses.pop(0))
+    dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
+    dialog.show()
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.connected and dialog.result() != QDialog.Accepted
+    assert dialog.retry_button.isVisible() and not dialog.connect_button.isVisible()
+    assert 'signed in' in dialog.status.text()
+    dialog.retry_button.click()
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.connected and dialog.result() != QDialog.Accepted
+    dialog.retry_button.click()
+    settle(app, lambda: dialog.bootstrap is live)
+    assert dialog.result() == QDialog.Accepted and dialog.connected
+    dialog.close()
+
+
+def test_reload_after_explicit_login_does_not_silently_accept_offline_cache(app, monkeypatch, tmp_path):
+    from cassn.box.hosted import HostedError
+    monkeypatch.setattr(hosted_setup.QTimer, 'singleShot', lambda *_: None)
+    def offline():
+        raise HostedError('network')
+    monkeypatch.setattr(hosted_setup, 'manager_for', lambda _: SimpleNamespace(token=offline, session=object()))
+    monkeypatch.setattr(hosted_setup, 'bootstrap_lookup_tables', lambda *a: SimpleNamespace(source='offline-cache', lookups=object()))
+    dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
+    dialog.show()
+    dialog.load_project(require_live=True)
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.result() != QDialog.Accepted
+    dialog.retry_button.click()
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.result() != QDialog.Accepted
     dialog.close()
