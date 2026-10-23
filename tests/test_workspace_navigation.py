@@ -57,6 +57,71 @@ def test_sidebar_review_respects_validation_refusal(workspace_window, tmp_path, 
     validate.assert_called_once()
 
 
+@pytest.mark.parametrize("accept", [False, True])
+@pytest.mark.parametrize("sidebar", [False, True])
+def test_collection_checks_require_explicit_continue(
+    workspace_window, tmp_path, monkeypatch, accept, sidebar
+):
+    from PySide6.QtWidgets import QDialogButtonBox, QTextEdit
+    from cassn.core.quality_control import append_qc_report
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    window.tabs.setCurrentIndex(1)
+    window.devices = [(1, "One", "ML", "p1_ML")]
+    window.populate_collection_list()
+    append_qc_report(tmp_path, "copy", "p1_ML", "error", "Old copy failure")
+    append_qc_report(tmp_path, "copy", "p1_ML", "pass", "Copy recovered")
+    append_qc_report(tmp_path, "file_size_floor", "p1_ML", "warning", "Small image")
+    append_qc_report(tmp_path, "camera_timezone", "p1_ML", "error", "Invalid offset")
+    monkeypatch.setattr(window, "_ensure_camera_dates_reviewed", lambda: True)
+    monkeypatch.setattr(wizard, "validate_coordinates", lambda rows: ["Missing latitude", "Missing elevation"])
+    export = MagicMock()
+    upload = MagicMock()
+    monkeypatch.setattr(window, "generate_metadata_files", export)
+    monkeypatch.setattr(window, "update_review_tab", MagicMock())
+    monkeypatch.setattr(window, "upload_to_box", upload)
+    dialogs = []
+
+    def respond(dialog):
+        dialogs.append(dialog.windowTitle())
+        text = dialog.findChild(QTextEdit).toPlainText()
+        assert "Old copy failure" not in text
+        for expected in ("p1_ML", "Small image", "Invalid offset", "Pending", "Missing latitude", "Missing elevation"):
+            assert expected in text
+        buttons = dialog.findChild(QDialogButtonBox)
+        target = "Continue to review & upload" if accept else "Back to card ingest"
+        next(button for button in buttons.buttons() if button.text() == target).click()
+        return dialog.result()
+
+    monkeypatch.setattr(wizard.QDialog, "exec", respond)
+    if sidebar:
+        window.workspace.navigation[2].click()
+    else:
+        window.validate_and_next_collection()
+    assert dialogs == ["Card ingest checks"]
+    assert window.tabs.currentIndex() == (2 if accept else 1)
+    assert export.call_count == int(accept)
+    upload.assert_not_called()
+
+
+def test_clean_collection_still_shows_checks(workspace_window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel, QTextEdit
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+
+    def respond(dialog):
+        assert "Errors: 0 · Warnings: 0" in [label.text() for label in dialog.findChildren(QLabel)]
+        assert dialog.findChild(QTextEdit).toPlainText() == "No findings to address."
+        return wizard.QDialog.Accepted
+
+    monkeypatch.setattr(wizard.QDialog, "exec", respond)
+    assert window._confirm_collection_review([])
+
+
 @pytest.mark.parametrize("operation", ["card", "box"])
 def test_sidebar_cannot_change_deployment_during_operation(
     workspace_window, tmp_path, monkeypatch, operation

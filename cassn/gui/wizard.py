@@ -3035,23 +3035,6 @@ class FieldDataWizard(QMainWindow):
                 f"Wait for the active card jobs to finish before finalizing:\n{labels}",
             )
             return
-        pending = False
-        for i in range(self.device_tree.topLevelItemCount()):
-            item = self.device_tree.topLevelItem(i)
-            if item.text(2) not in {"Complete", "Skipped"}:
-                pending = True
-                break
-
-        if pending:
-            reply = QMessageBox.question(
-                self,
-                "Incomplete Collection",
-                "Some devices are pending, incomplete, or failed. Continue anyway?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply == QMessageBox.No:
-                return
-
         if not self._ensure_camera_dates_reviewed():
             return
 
@@ -3061,24 +3044,14 @@ class FieldDataWizard(QMainWindow):
         # into the metadata CSVs.
         coord_warnings = validate_coordinates(self.file_inventory)
         if coord_warnings:
-            detail = "\n".join(f"  {w}" for w in coord_warnings)
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Coordinate Validation Warning")
-            msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setText(
-                "Some coordinates or elevations are missing or outside the "
-                "California study area. Review before generating CSVs."
-            )
-            msg_box.setDetailedText(detail)
-            msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-            msg_box.button(QMessageBox.Ok).setText("Continue Anyway")
-            if msg_box.exec() == QMessageBox.Cancel:
-                return
             for w in coord_warnings:
                 append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "warning", w)
         else:
             append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "pass",
                              "All coordinates and elevations non-null and within study-area bounds")
+
+        if not self._confirm_collection_review(coord_warnings):
+            return
 
         self.generate_metadata_files()
         self.update_review_tab()
@@ -3086,6 +3059,77 @@ class FieldDataWizard(QMainWindow):
         # Uploads are operator-initiated. Reaching this tab used to start the
         # Box transfer on its own, which gave no chance to review the summary
         # first and no way to choose a destination.
+
+    def _collection_review_findings(self, coord_warnings: list[str]) -> list[dict]:
+        """Combine current QC with device status; omit superseded QC history."""
+        findings = []
+        for i in range(self.device_tree.topLevelItemCount()):
+            item = self.device_tree.topLevelItem(i)
+            status = item.text(2)
+            if status != "Complete":
+                findings.append({
+                    "severity": "error" if status in {"Failed", "Incomplete"} else "warning",
+                    "message": f"{item.text(0)} · {item.text(1)}: {status}. "
+                    + ("This device was skipped." if status == "Skipped" else
+                       "Collection is incomplete; check this device before uploading."),
+                })
+        path = qc_path_for(self.current_deployment_folder, "qc_report.json")
+        try:
+            report = json.loads(path.read_text()) if path.exists() else {}
+            for entry in report.get("current_state", []):
+                if entry.get("severity") not in {"warning", "error"}:
+                    continue
+                # Coordinate validation can produce multiple messages for the
+                # same check; include the full fresh result below instead.
+                if entry.get("check") == "coordinate_validation":
+                    continue
+                scope = entry.get("_device") or "Deployment"
+                check = entry.get("description") or entry.get("check", "QC")
+                findings.append({
+                    "severity": entry["severity"],
+                    "message": f"{scope} · {check}: {entry.get('message', '')}",
+                })
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            findings.append({
+                "severity": "error",
+                "message": f"Could not read the QC report. Check the report before uploading: {exc}",
+            })
+        findings.extend({"severity": "warning", "message": message} for message in coord_warnings)
+        return sorted(findings, key=lambda finding: finding["severity"] != "error")
+
+    def _confirm_collection_review(self, coord_warnings: list[str]) -> bool:
+        """Show findings expanded before the operator leaves Card ingest."""
+        findings = self._collection_review_findings(coord_warnings)
+        counts = Counter(finding["severity"] for finding in findings)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Card ingest checks")
+        dialog.resize(720, 480)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(f"Errors: {counts['error']} · Warnings: {counts['warning']}")
+        layout.addWidget(summary)
+        explanation = QLabel(
+            "Check the findings below and address anything that needs attention before uploading. "
+            "You can continue to review the staged data. Continuing does not start an upload."
+            if findings else
+            "No warnings or errors were found in the current QC report or collection checks. "
+            "Continue to review the staged data before uploading."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        details = QTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText("\n\n".join(
+            f"{finding['severity'].upper()}: {finding['message']}" for finding in findings
+        ) if findings else "No findings to address.")
+        layout.addWidget(details, 1)
+        buttons = QDialogButtonBox()
+        back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
+        buttons.addButton("Continue to review & upload", QDialogButtonBox.AcceptRole)
+        back.setDefault(True)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog.exec() == QDialog.Accepted
 
     def generate_metadata_files(self):
         """Generate CSVs, deployment_event_record.json, and WI deployment exports."""
