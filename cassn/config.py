@@ -198,25 +198,26 @@ SOUNDHUB_STAGING_DEFAULT = Path.home() / "cassn" / "soundhub" / "s3_upload_stagi
 # encode-time cost; lossless either way, so the audio is identical.
 FLAC_COMPRESSION_LEVEL = 5
 
-# Deployment Template sheet of templates/SoundHub_Metadata_Template.xlsx, in
-# sheet order, with aru_status lowercased for the ingest schema. Internal
-# audio metadata retains ARU_status; mapping happens at the export boundary.
+# Website-linked CDFW Deployment Metadata Template, in sheet order:
+# https://docs.google.com/spreadsheets/d/1SPXHW_70cOeiKz0k_qoZJo92igfLlHtj5EiR1RKgoD0/edit
+# Brian's September 2 ingest correction requires lowercase aru_status.
+# Internal frequency/duration/ARU_status names are mapped at export.
 SOUNDHUB_DEPLOYMENT_FIELDS = [
     "project_short_name", "deployment_id", "subproject", "subproject_design",
-    "placename", "longitude", "latitude", "date_installed",
+    "placename", "longitude", "latitude", "date_installed", "recorded_by",
     "deployment_start_date", "deployment_start_time",
     "deployment_end_date", "deployment_end_time",
-    "frequency", "duration", "gain",
+    "recording_schedule", "recording_duration", "gain",
     "filter_type_khz", "filter_type_duration", "filter_type_amplitude",
     "ARU_make", "ARU_model", "ARU_container", "ARU_microphone",
-    "feature_type", "feature_type_details", "aru_status", "mounted_on",
-    "sensor_height_meters", "recorded_by", "notes",
+    "feature_type", "feature_type_details", "mounted_on",
+    "sensor_height_meters", "aru_status", "notes",
 ]
 
 # recording.csv carries the per-file timestamps SoundHub cannot parse out of our
 # renamed files. Brian's ingest feedback requires a project-relative
 # path and sample_rate in Hz. start/end retain the recording UTC offset.
-SOUNDHUB_RECORDING_FIELDS = ["path", "deployment_id", "start", "end", "sample_rate"]
+SOUNDHUB_RECORDING_FIELDS = ["deployment_id", "path", "start", "end", "sample_rate", "notes"]
 
 # "2026-05-11 00:00:00-07:00" — space-separated date and time, offset retained.
 # Rendered with ``datetime.isoformat(sep=SOUNDHUB_DATETIME_SEPARATOR)`` rather

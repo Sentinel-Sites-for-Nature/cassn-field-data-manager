@@ -265,6 +265,8 @@ def cmd_upload(args) -> int:
             progress=show,
         )
     except SoundHubSubmissionError as e:
+        if e.result.get("transfer_directory"):
+            print(f"Transfer record: {e.result['transfer_directory']}")
         if e.phase == "box_provenance":
             print(
                 "ERROR: S3 verification succeeded, but the Box submission record "
@@ -274,6 +276,7 @@ def cmd_upload(args) -> int:
             print(f"ERROR during {e.phase.replace('_', ' ')}: {e}")
         return 1
 
+    print(f"Transfer record: {result['transfer_directory']}")
     upload = result["upload"]
     print(
         f"\nS3 transfer finished: {upload['uploaded']} object(s) uploaded, "
@@ -370,6 +373,7 @@ def _print_preflight(plan) -> None:
     print(f"  Deployment events in next batch:    {len(provenance.pending_event_ids)}")
     print(f"  SoundHub deployments in next batch: {len(provenance.pending_deployment_ids)}")
     print(f"  Box metadata CSVs to update:         {provenance.pending_file_count}")
+    print(f"  Box metadata access:                 {'API' if provenance.box_store else 'Drive'}")
     print(f"  Box metadata root:                   {provenance.box_year_root}")
     print(f"  S3 objects to upload and verify:     {len(plan.objects)}")
     print(f"  Data in next submission:             {plan.total_bytes / 1e9:.2f} GB")
@@ -445,7 +449,7 @@ def main() -> int:
     )
     p_upload.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box data/<year> folder",
+        help="Use a local Box Drive data/<year> folder instead of the Box API",
     )
     p_upload.add_argument(
         "--submitter",
@@ -465,7 +469,7 @@ def main() -> int:
     )
     p_clear.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box data/<year> folder",
+        help="Use a local Box Drive data/<year> folder instead of the Box API",
     )
     p_clear.set_defaults(func=cmd_clear_completed)
 

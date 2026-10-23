@@ -1,12 +1,9 @@
 """
 The S3 push to SoundHub's landing zone, and its verification.
 
-Brian asked for ``aws s3 cp --recursive`` because it beats ``sync`` on a
-one-way transfer. This uses boto3 instead, which drives the same multipart
-transfer manager the CLI does — so the transfer characteristic he cared about
-is unchanged — while adding what a GUI needs and a shell-out cannot give:
-per-file progress, mid-transfer cancellation, resume across runs, and a
-SHA-256 that S3 validates server-side on arrival.
+Uploads use Brian's requested ``aws s3 cp --recursive``. A temporary tree of
+file symlinks selects only the planned objects without copying large FLACs.
+boto3 handles the read-only listings used for resume and immediate verification.
 
 Two constraints shape everything here:
 
@@ -24,6 +21,11 @@ Two constraints shape everything here:
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import tempfile
+import time
+from collections import deque
 from pathlib import Path
 
 from cassn.config import (
@@ -152,16 +154,21 @@ def upload_project(
     progress=None,
     is_cancelled=None,
     deployment_ids: set[str] | None = None,
+    log_path: Path | None = None,
 ) -> dict:
     """Push the staged project tree to the SoundHub bucket.
 
-    Objects already present at the same size are skipped, which makes an
-    interrupted transfer resumable simply by running it again — the behaviour
-    ``cp --recursive`` lacks and the reason Brian's fallback advice was to
-    switch to ``sync`` after a failure.
+    Select files needing transfer, then run ``aws s3 cp --recursive``. Existing
+    same-size media are skipped; both CSVs are always sent again. The selection
+    is local and never uses ``s3 sync``.
     """
     settings = settings or load_soundhub_config()
     staging_root = staging_root or settings["staging_root"]
+    aws = shutil.which("aws")
+    if aws is None:
+        raise SoundHubUploadError("AWS CLI is not installed or not on PATH; SoundHub upload requires aws s3 cp --recursive.")
+    if is_cancelled is not None and is_cancelled():
+        return dict(cancelled=True, uploaded=0, skipped=0, uploaded_bytes=0, total=0)
     client = _client(settings)
 
     objects = staged_objects(
@@ -169,49 +176,97 @@ def upload_project(
     )
     already = _existing_sizes(client, settings)
 
-    uploaded = skipped = 0
-    uploaded_bytes = 0
-    total = len(objects)
+    selected = [obj for obj in objects if "/" not in obj["relative"]
+                or already.get(obj["key"]) != obj["size"]]
+    skipped = len(objects) - len(selected)
+    completed: set[str] = set()
+    cancelled = False
+    destination = f"s3://{settings['bucket']}/{project_prefix(settings)}/"
+    by_destination = {
+        f"s3://{settings['bucket']}/{obj['key']}": obj for obj in selected
+    }
 
-    for index, obj in enumerate(objects, start=1):
-        if is_cancelled is not None and is_cancelled():
-            return {
-                "cancelled": True,
-                "uploaded": uploaded,
-                "skipped": skipped,
-                "uploaded_bytes": uploaded_bytes,
-                "total": total,
-            }
+    # The CLI recursively walks only these links, not the entire staging tree.
+    # This preserves the exact selected scope and ignores local-only sidecars.
+    with tempfile.TemporaryDirectory(prefix="cassn-soundhub-upload-") as temporary:
+        source = Path(temporary) / "files"
+        source.mkdir()
+        for obj in selected:
+            relative = Path(obj["relative"])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SoundHubUploadError(f"Invalid staged path: {relative}")
+            link = source / relative
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(obj["path"].resolve())
+
+        command = [aws, "s3", "cp", str(source), destination, "--recursive",
+                   "--follow-symlinks", "--no-progress", "--checksum-algorithm", "SHA256"]
+        for option, setting in (("--profile", "aws_profile"), ("--region", "region")):
+            if settings.get(setting):
+                command.extend([option, str(settings[setting])])
 
         if progress is not None:
-            progress(index, total, obj["path"].name)
+            progress(skipped, len(objects), "Starting aws s3 cp --recursive")
+        # Separate file handles let the CLI write while the GUI reads progress,
+        # without pipe backpressure or blocking cancellation on a quiet upload.
+        # The shared submission workflow supplies a permanent archive path.
+        # Direct low-level calls retain the historical temporary-log behavior.
+        log_path = Path(log_path) if log_path is not None else Path(temporary) / "upload.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        recent = deque(maxlen=20)
+        with log_path.open("wb") as output, log_path.open(encoding="utf-8", errors="replace") as log:
+            try:
+                process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+            except OSError as exc:
+                raise SoundHubUploadError(f"Could not start AWS CLI: {exc}") from exc
 
-        # The two project CSVs are cumulative and change as deployments are
-        # added, so they are always re-put; media objects are immutable.
-        is_manifest = "/" not in obj["relative"]
-        if not is_manifest and already.get(obj["key"]) == obj["size"]:
-            skipped += 1
-            continue
+            def read_progress():
+                while True:
+                    position = log.tell()
+                    line = log.readline()
+                    if not line:
+                        return
+                    if not line.endswith("\n") and process.poll() is None:
+                        log.seek(position)
+                        return
+                    line = line.rstrip()
+                    recent.append(line)
+                    target = line.rpartition(" to ")[2]
+                    if line.startswith("upload: ") and target in by_destination and target not in completed:
+                        completed.add(target)
+                        if progress is not None:
+                            progress(skipped + len(completed), len(objects), by_destination[target]["path"].name)
 
-        try:
-            client.upload_file(
-                str(obj["path"]),
-                settings["bucket"],
-                obj["key"],
-                ExtraArgs={"ChecksumAlgorithm": "SHA256"},
-            )
-        except (BotoCoreError, ClientError) as e:
-            raise SoundHubUploadError(f"Upload failed for {obj['key']}: {e}") from e
-
-        uploaded += 1
-        uploaded_bytes += obj["size"]
+            try:
+                while process.poll() is None:
+                    read_progress()
+                    if is_cancelled is not None and is_cancelled():
+                        cancelled = True
+                        break
+                    time.sleep(0.1)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+            read_progress()
+            if not cancelled and process.returncode != 0:
+                raise SoundHubUploadError(
+                    f"aws s3 cp --recursive failed (exit {process.returncode}):\n"
+                    + "\n".join(recent)
+                )
+            if not cancelled and len(completed) != len(selected):
+                raise SoundHubUploadError("AWS CLI did not report completion for every selected object; verify staging before retrying.")
 
     return {
-        "cancelled": False,
-        "uploaded": uploaded,
+        "cancelled": cancelled,
+        "uploaded": len(completed),
         "skipped": skipped,
-        "uploaded_bytes": uploaded_bytes,
-        "total": total,
+        "uploaded_bytes": sum(by_destination[key]["size"] for key in completed),
+        "total": len(objects),
     }
 
 

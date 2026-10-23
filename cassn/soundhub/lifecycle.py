@@ -195,7 +195,15 @@ def plan_completed_batch_cleanup(
     report_sets: list[set[str]] = []
     reports_by_event: list[dict[str, Path]] = []
     for event_root in event_roots:
-        reports = _verified_reports(event_root)
+        try:
+            if provenance.box_store is not None:
+                document = next(doc for doc in provenance.documents if doc.path.parent == event_root)
+                reports = provenance.box_store.verified_reports(document.box_file.parent_id, event_root)
+            else:
+                reports = _verified_reports(event_root)
+        except Exception as exc:
+            plan.errors.append(f"Could not read submission reports for {event_root}: {exc}")
+            continue
         reports_by_event.append(reports)
         report_sets.append(set(reports))
         if not reports:
@@ -225,7 +233,8 @@ def clear_completed_batch(plan: CompletedBatchPlan) -> CompletedBatchClearResult
 
     fresh = plan_completed_batch_cleanup(
         plan.staging_root,
-        plan.provenance.box_year_root if plan.provenance else None,
+        plan.provenance.box_year_root
+        if plan.provenance and plan.provenance.box_store is None else None,
     )
     if not fresh.clearable:
         detail = "; ".join(fresh.errors) or "batch is no longer complete"

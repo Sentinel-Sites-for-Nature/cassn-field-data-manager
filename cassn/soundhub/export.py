@@ -27,7 +27,7 @@ from cassn.config import (
     SOUNDHUB_PROJECT_SHORT_NAME,
     SOUNDHUB_RECORDING_FIELDS,
 )
-from cassn.core.aru_status import deployment_aru_status, recording_aru_status
+from cassn.core.aru_status import LOW_VOLTAGE, deployment_aru_status, recording_aru_status
 from cassn.export.wildlife_insights import (
     SUBPROJECT_DESIGN,
     format_wi_coordinate,
@@ -37,6 +37,13 @@ from cassn.soundhub.staging import SoundHubStagingError, fragments_root, project
 
 DEPLOYMENT_CSV = "deployment.csv"
 RECORDING_CSV = "recording.csv"
+
+# Allowed labels in the website-linked deployment template. Preserve the raw
+# low-voltage reason internally; John selected Unknown Failure for submission.
+SOUNDHUB_ARU_STATUSES = frozenset({
+    "Functioning", "Unknown Failure", "Vandalism", "Theft", "Memory Card",
+    "Hardware Failure", "Wildlife Damage", "Water Damage",
+})
 
 
 # An AudioMoth WAV that failed before any audio was written (e.g. an SD card
@@ -61,8 +68,10 @@ REQUIRED_DEPLOYMENT_FIELDS = (
     "deployment_start_time",
     "deployment_end_date",
     "deployment_end_time",
-    "frequency",
-    "duration",
+    "recording_schedule",
+    "recording_duration",
+    "aru_status",
+    "feature_type",
     "gain",
     "ARU_make",
     "ARU_model",
@@ -230,7 +239,12 @@ def build_deployment_rows(audio_rows: list[dict]) -> list[dict]:
         row = {field: source.get(field, "") for field in SOUNDHUB_DEPLOYMENT_FIELDS}
         row["project_short_name"] = SOUNDHUB_PROJECT_SHORT_NAME
         row["deployment_id"] = deployment_id
-        row["aru_status"] = deployment_aru_status(rows)
+        row["recording_schedule"] = source.get("frequency", "")
+        row["recording_duration"] = source.get("duration", "")
+        row["aru_status"] = (
+            "Unknown Failure" if deployment_aru_status(rows) == LOW_VOLTAGE
+            else "Functioning"
+        )
         if not str(row.get("feature_type") or "").strip():
             row["feature_type"] = "None"
         if row["mounted_on"] == "metal_pole":
@@ -277,11 +291,12 @@ def build_recording_rows(audio_rows: list[dict]) -> list[dict]:
             missing.append(name)
         out.append(
             {
-                "path": f"{row.get('deployment_id', '')}/{name}",
                 "deployment_id": row.get("deployment_id", ""),
+                "path": f"{row.get('deployment_id', '')}/{name}",
                 "start": _format_datetime(start),
                 "end": _format_datetime(start, duration) if duration else "",
                 "sample_rate": _sample_rate(row.get("sample_rate_hz"), name),
+                "notes": "",
             }
         )
     if missing:
@@ -500,6 +515,11 @@ def validate_staging_manifests(staging_root) -> dict:
         if row["project_short_name"] != SOUNDHUB_PROJECT_SHORT_NAME:
             raise SoundHubStagingError(
                 f"{root / DEPLOYMENT_CSV} row {number}: unexpected project_short_name"
+            )
+        if row["aru_status"] not in SOUNDHUB_ARU_STATUSES:
+            raise SoundHubStagingError(
+                f"{root / DEPLOYMENT_CSV} row {number}: aru_status must use a "
+                "documented SoundHub status label"
             )
         if row["subproject_design"] != SUBPROJECT_DESIGN:
             raise SoundHubStagingError(

@@ -136,7 +136,8 @@ class SoundHubUploadThread(QThread):
                 self.completed.emit(
                     False, True,
                     f"Upload cancelled after {upload['uploaded']} object(s). "
-                    "Objects already sent stay in the bucket; re-run to resume.",
+                    "Objects already sent stay in the bucket; re-run to resume. "
+                    f"Transfer record: {result['transfer_directory']}",
                     result,
                 )
                 return
@@ -147,7 +148,8 @@ class SoundHubUploadThread(QThread):
                     False, False,
                     f"Upload finished but verification failed: "
                     f"{len(check['missing'])} missing, {len(check['mismatched'])} "
-                    "size mismatch(es). Re-run the upload to resume.",
+                    "size mismatch(es). Re-run the upload to resume. "
+                    f"Transfer record: {result['transfer_directory']}",
                     result,
                 )
                 return
@@ -155,14 +157,20 @@ class SoundHubUploadThread(QThread):
             upload = result["upload"]
             check = result["verification"]
             provenance = result["provenance"]
+            record_note = (
+                "Metadata and reports were saved directly to Box. "
+                if self.submission_plan.provenance.box_store is not None else
+                "Keep Box Drive running until the metadata and reports finish syncing. "
+            )
             self.completed.emit(
                 True, False,
                 f"Uploaded {upload['uploaded']} object(s) "
                 f"({upload['skipped']} already present), verified all "
                 f"{check['checked']} object(s), and recorded "
                 f"{provenance.changed_rows} Box metadata row(s) across "
-                f"{provenance.changed_files} deployment event(s). Keep Box Drive "
-                "running until the updated metadata and submission reports finish syncing.",
+                f"{provenance.changed_files} deployment event(s). "
+                f"{record_note}"
+                f"Transfer record: {result['transfer_directory']}",
                 result,
             )
         except SoundHubSubmissionError as exc:
@@ -173,6 +181,8 @@ class SoundHubUploadThread(QThread):
                 )
             else:
                 message = f"SoundHub {exc.phase.replace('_', ' ')} failed: {exc}"
+            if exc.result.get("transfer_directory"):
+                message += f" Transfer record: {exc.result['transfer_directory']}"
             self.completed.emit(False, False, message, exc.result)
         except Exception as exc:
             self.completed.emit(False, False, f"SoundHub upload failed: {exc}", {})
