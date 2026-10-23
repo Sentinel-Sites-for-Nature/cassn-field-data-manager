@@ -9,7 +9,9 @@ ever touches the filesystem to ensure the config directories exist, which is
 idempotent and safe.
 """
 
+import os
 from pathlib import Path
+from cassn.profile import HOSTED, PROFILE, PROJECTS
 from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
@@ -19,7 +21,11 @@ from zoneinfo import ZoneInfo
 # assets (logos) live next to the package, under BUNDLE_DIR.
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR = Path.home() / ".cassn_config"
+# CASSN_CONFIG_ROOT is an explicit development/test override, never a PI setting.
+BASE_CONFIG_DIR = Path(os.environ.get("CASSN_CONFIG_ROOT", Path.home() / ".cassn_config"))
+CONFIG_DIR = BASE_CONFIG_DIR / "profiles" / PROFILE if HOSTED else BASE_CONFIG_DIR
+LOCK_DIR = BASE_CONFIG_DIR / "window-locks"
+DEFAULT_STAGING_ROOT = Path.home() / "Desktop" / (f"{PROFILE.upper()}_CASSN_field_data_staging" if HOSTED else "CASSN_field_data_staging")
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 BUNDLE_DIR = Path(__file__).resolve().parent.parent
@@ -35,7 +41,8 @@ BOX_TOKEN_FILE = CONFIG_DIR / "box_tokens.json"
 # ---------------------------------------------------------------------------
 
 VERSION = "4.0"
-APP_TITLE = "CA-SSN Field Data Manager"
+APP_TITLE = (f"CA-SSN Data Manager — {PROFILE.upper()}" if HOSTED and os.environ.get("CASSN_UNIFIED") == "1"
+             else PROJECTS[PROFILE]["title"] if HOSTED else "CA-SSN Field Data Manager")
 
 # Camera EXIF and AudioMoth filenames both encode local Pacific time.
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")

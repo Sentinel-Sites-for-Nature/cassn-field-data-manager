@@ -17,3 +17,7 @@ Pillow==12.3.0           # image EXIF reading
 piexif==1.1.3            # image EXIF reading
 PyExifTool==0.5.6        # camera metadata (requires the exiftool binary, see note above)
 openpyxl==3.1.5          # WI tracker imports
+
+keyring==25.7.0         # OS credential storage (macOS Keychain)
+
+certifi==2026.7.22      # Verified HTTPS in the hosted Box client and Mac bundle
