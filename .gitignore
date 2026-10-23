@@ -84,6 +84,8 @@ scratch/
 # Local scratch and generated output
 output/
 outputs/
+# Compatibility symlink for historical local output links
+/outputs
 tmp/
 
 # Local agent operating instructions

@@ -260,72 +260,36 @@ If the path is omitted it checks the normal local lookup cache.
 
 ## `box_auth_setup.py`
 
-Runs the Box OAuth setup flow and writes reusable Box tokens to
-`~/.cassn_config/box_tokens.json`.
+Opens the same secure **Connect to Box** dialog used by the application. Prefer
+clicking **Connect to Box** in the app; this launcher is available for standalone
+setup or reconnecting before running a Box-backed maintenance utility.
 
-### When to use
+### Requirements and setup
 
-Use this script the first time you connect the CA-SSN Field Data Manager to Box,
-or any time your saved Box tokens stop working and need to be refreshed.
-
-### Requirements
-
-The project's pinned dependencies include `box-sdk-gen`; install them with the
-[main setup instructions](../README.md#installation).
-
-You also need `~/.cassn_config/config.json` with your Box app
-`client_id` and `client_secret`.
-
-To verify `box-sdk-gen` is installed:
-
-```bash
-.venv/bin/python -c "import box_sdk_gen; print('box-sdk-gen ok')"
-```
-
-### Setup
-
-1. Confirm your Box credentials file exists:
-   ```bash
-   ls ~/.cassn_config/config.json
-   ```
-2. If `~/.cassn_config/config.json` does not exist, create it from the example file:
-   ```bash
-   mkdir -p ~/.cassn_config
-   cp config.json.example ~/.cassn_config/config.json
-   ```
-3. Edit `~/.cassn_config/config.json` and add your Box app `client_id` and `client_secret`.
+Install the project's pinned dependencies, including `box-sdk-gen`, `PySide6`,
+and `keyring`. Your administrator must register
+`http://127.0.0.1:8765/callback` as an OAuth redirect URI in the Box Developer
+Console. Enter the Box app credentials and folder IDs under **Box app settings…**
+if they are not already configured.
 
 ### Run
+
 ```bash
 .venv/bin/python utils/box_auth_setup.py
 ```
 
-During the OAuth flow, `box_auth_setup.py` will:
+Click **Connect to Box**, sign in in your browser, and grant access. The browser
+returns to the app automatically. The dialog supports cancellation and retry;
+there is no redirect URL to paste.
 
-1. Open your browser to the Box authorization page.
-2. Ask you to log in and grant access.
-3. Ask you to paste the full redirect URL back into the terminal.
-4. Exchange that authorization code for tokens.
-5. Save `box_tokens.json` to `~/.cassn_config/`.
+### Storage
 
-### Output
-
-On success, the script writes:
-
-```text
-~/.cassn_config/box_tokens.json
-```
-
-That token file is then used by the application and every Box-backed utility.
-Those commands consume the saved token; they do not run this setup script.
-
-### Notes
-
-- If the script finds an existing token file, it tests that connection first
-- If the existing token is invalid, it falls back to a fresh OAuth flow
-- Refreshed tokens are written back to `~/.cassn_config/box_tokens.json` automatically
-- The browser may redirect to a page that does not load; that is expected
-- Paste the entire redirect URL, not just the authorization code
+The client secret and access/refresh tokens are saved in the system credential
+store (macOS Keychain on Mac). After verified secure writes, the client secret
+is removed from `~/.cassn_config/config.json` and the legacy `box_tokens.json`
+is deleted. Ordinary settings and folder IDs remain in the config. Automatic
+refreshes use the same secure storage in the app and Box-backed utilities.
+Existing JSON credentials continue to work until a successful dialog sign-in.
 
 ---
 
@@ -605,7 +569,7 @@ python utils/prep_soundhub.py upload --verify-only
 | `stage --root PATH` | Scan below this folder for every deployment with an `audio_file_metadata.csv`. |
 | `upload --verify-only` | Skip the transfer; only reconcile staging against the bucket. |
 | `upload --preflight-only` | Validate exact staged-FLAC coverage in Box metadata without S3 or Box writes. |
-| `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `data/<year>` folder. |
+| `upload --box-year-root DIR` | Explicitly use a local Box Drive `data/<year>` folder instead of the normal Box API connection. |
 | `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
 | `clear-completed` | Read-only cleanup preflight for a fully submitted local batch. |
 | `clear-completed --apply` | Delete the preflighted derived staging project after SoundHub acceptance. |
@@ -644,10 +608,25 @@ so the submission travels to Box alongside the raw data.
   unsubmitted. The same concise Markdown report is saved into every affected
   Box deployment event's `soundhub/` folder with the destination, counts,
   manifest hashes, and verification result.
-- **Automatic year selection.** The normal Box Drive `data/<year>` folder
-  is inferred from the staged deployment IDs, including future years. A staging
-  tree containing multiple years is rejected; `--box-year-root` is only for a
-  nonstandard Box location, not routine year selection.
+- **Direct Box metadata access.** SoundHub uses the hosted **UC** Box connection,
+  including from the standalone CLI; sign in through the UC app's Connect to Box
+  flow first. It does not depend on legacy token files or change CLI staging paths.
+  The connection is reloaded after S3 verification, before Box updates, so the
+  long transfer does not retain an obsolete credential source. It reads fixed
+  metadata versions, verifies checksums, and checks update/report permissions.
+  Conditional version uploads reject concurrent edits and saved files are
+  verified on Box. This does not depend on Box Drive hydration or indexing.
+  Raw Box media is never traversed or downloaded.
+- **Readable attempt summaries.** Every archive attempt saves `upload_summary.md`
+  alongside `transfer.json` and the AWS log, updating it for success, failure,
+  cancellation, and interruption. S3 verification, Box flags/reports, and SoundHub
+  ingestion are separate outcomes. The full `submission_report.md` is still
+  generated after Box flags are saved. If a previous attempt verified the same
+  destination and exact object batch but failed to finish bookkeeping, another
+  upload is blocked; repair the Box record using the preserved attempt instead.
+- **Automatic year selection.** The configured Box data folder's `<year>` child
+  is inferred from staged deployment IDs, including future years. Mixed-year
+  staging is rejected. `--box-year-root` explicitly opts into local Drive access.
 - **No accidental historical re-upload.** Backlog media already marked as
   submitted on Box closes the current local batch. The GUI and CLI refuse to
   append new deployments until that completed batch has been deliberately

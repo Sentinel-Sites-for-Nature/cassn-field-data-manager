@@ -95,75 +95,50 @@ brew install flac
 sudo apt install flac
 ```
 
-### Configure Box Credentials
+### Configure Box Connection
 
-Box credentials live in `~/.cassn_config/`, a hidden folder in your home
-directory, outside the repo so they are never accidentally committed to version
-control. The app also caches synced lookup tables and Box tokens here.
+Install the pinned dependencies, then launch the app. Click **Connect to Box**
+in the Cloud storage connector, sign in in your browser, and grant access.
+The browser returns directly to the app; no terminal command or pasted URL is
+needed. If configuration is missing at startup, the connection dialog opens
+before lookup tables are downloaded.
 
-Create the folder and config file:
+For the first setup, open **Box app settings…** and enter the client ID, client
+secret, field data folder ID, and app config folder ID supplied by your program
+administrator. The administrator must register this exact OAuth redirect URI in
+the [Box Developer Console](https://app.box.com/developers/console) once:
 
-```bash
-mkdir -p ~/.cassn_config
-cp config.json.example ~/.cassn_config/config.json
+```text
+http://127.0.0.1:8765/callback
 ```
 
-Edit `~/.cassn_config/config.json` and add your Box application credentials and
-folder IDs:
+The callback listens only on this computer during sign-in. Port 8765 must be
+available. Denied, cancelled, and timed-out sign-ins can be retried in the dialog.
 
-```json
-{
-  "box": {
-    "client_id": "YOUR_BOX_CLIENT_ID",
-    "client_secret": "YOUR_BOX_CLIENT_SECRET",
-    "field_data_folder_id": "YOUR_CASSN_FIELD_DATA_FOLDER_ID",
-    "app_config_folder_id": "YOUR_CASSN_APP_CONFIG_FOLDER_ID"
-  }
-}
-```
+- **Field data folder ID:** the Box folder uploads are written to.
+- **App config folder ID:** the canonical folder containing lookup CSVs and JSON defaults.
+- **Client secret and OAuth tokens:** stored in macOS Keychain (or a supported OS
+  credential store on Windows/Linux). macOS may ask you to allow Python access.
+- **Folder IDs, client ID, and settings:** stored in `~/.cassn_config/config.json`.
 
-- **`field_data_folder_id`** — the Box folder uploads are written to.
-- **`app_config_folder_id`** — the canonical Box folder containing sites,
-  plots, JSON defaults, `deployment_events.csv`, and `deployments.csv`.
-
-Lock down the folder permissions so only you can read it:
-
-```bash
-chmod 700 ~/.cassn_config
-chmod 600 ~/.cassn_config/config.json
-```
-
-**To get Box credentials:**
-1. Go to https://app.box.com/developers/console
-2. Create a new app (Custom App → OAuth 2.0)
-3. Copy the Client ID and Client Secret
-4. Navigate to each Box folder and copy its ID from the URL (e.g. `https://app.box.com/folder/123456789` → folder ID is `123456789`)
-
-> For a managed program, the organization admin typically provides a ready-made
-> `config.json` (client credentials + the two folder IDs) over a secure channel.
-> Treat it like a password — never commit it or place it in a shared cloud folder.
+Existing JSON credentials keep working until you connect through the new dialog.
+After a successful sign-in, the app verifies secure storage, removes the client
+secret from the config, and deletes the old `box_tokens.json`. Automatic token
+refreshes then save directly to the secure credential store. This does not
+remove secrets from any separate backups you may have made.
 
 ## Usage
 
-### 1. Box Authentication (First Time Setup)
+### 1. Box Authentication
 
-After configuring `~/.cassn_config/config.json`, authenticate with Box
-using the utility script:
+Use **Connect to Box** for first-time authentication or to reconnect an expired
+session. The optional compatibility command opens the same graphical dialog:
 
 ```bash
 .venv/bin/python utils/box_auth_setup.py
 ```
 
-Follow the prompts to:
-- Open the Box authorization URL in your browser
-- Grant access to the application
-- Paste the full redirect URL back into the terminal
-
-This creates or refreshes `~/.cassn_config/box_tokens.json`, which enables
-automatic cloud uploads and lookup-table sync. No manual copy step is required.
 For detailed Box utility documentation, see [`utils/README.md`](utils/README.md).
-Box tokens expire after ~60 days of inactivity — re-run the command above to
-refresh them.
 
 ### 2. Run the Application
 
@@ -175,7 +150,7 @@ From the repository root:
 
 #### Install the macOS Dock Launcher
 
-After setting up `.venv` and authenticating with Box, install the clickable
+After setting up `.venv`, install the clickable
 launcher:
 
 ```bash
@@ -411,15 +386,19 @@ from current curated lookups and defaults, and recomputes ARU status from stop
 reasons without modifying the source CSV.
 
 **`deployment.csv`** — one row per SoundHub deployment, in the column order of the
-Deployment Template sheet of `templates/SoundHub_Metadata_Template.xlsx`. It uses
+website-linked [CDFW Deployment Metadata Template](https://docs.google.com/spreadsheets/d/1SPXHW_70cOeiKz0k_qoZJo92igfLlHtj5EiR1RKgoD0/edit). It uses
 the source rows with the enrichment above, with `ARU_status` exported as
 `aru_status` and `metal_pole` normalized to `pole`. `feature_type` and `aru_status`
 columns are always included; absent features use the template value `None`.
 Dates and times carry **no** UTC offset.
 
-Deployment `aru_status` is `low voltage` if any source recording for that recorder
-reports it, including header-only recordings excluded from the upload; otherwise
-it is `functioning`, a default that does not certify complete recording coverage.
+Internal `frequency` and `duration` export as `recording_schedule` and
+`recording_duration`. The checked-in workbook uses different column names.
+
+Deployment `aru_status` is `Unknown Failure` if any source recording for that recorder
+reports `low voltage`, including header-only recordings excluded from the upload; otherwise
+it is `Functioning`, a default that does not certify complete recording coverage.
+The original `low voltage` reason remains in source audio metadata.
 
 Note that one CA-SSN deployment *event* (`UC_StrathearnRanch_20260714`) contains
 several SoundHub *deployments* — one per plot's recorder
@@ -440,6 +419,7 @@ resolves this.
 | `deployment_id` | Straight from `audio_file_metadata.csv` |
 | `start` | Stored `recorded_datetime` — GUANO timestamp preferred, otherwise the original AudioMoth filename interpreted as local Pacific time |
 | `end` | `start` plus `recording_duration_sec` |
+| `notes` | Blank, matching the supplied recording example |
 
 Legacy staging fragments must be regenerated from their source audio metadata
 before uploading with this schema. Rebuilding refuses old headers instead of
@@ -464,6 +444,11 @@ Both steps are on the **Review & Finalize** tab and are operator-initiated.
    batch, shows its exact scope for confirmation, uploads only recordings not
    already recorded as submitted on Box, verifies them immediately, then stamps
    the exact Box rows and writes the submission report.
+
+   Both GUI and CLI uploads use `aws s3 cp --recursive`, as requested by Brian.
+   A temporary tree of file symlinks selects the approved files without copying
+   FLAC data. Same-size media already in the landing zone are skipped locally;
+   both manifests are always uploaded. Cancellation stops the CLI process.
 
 **QC Checks → Check SoundHub Landing Zone** is a diagnostic for the currently
 pending batch. Successful uploads are verified automatically; a later empty
@@ -503,6 +488,27 @@ writes the same Markdown submission report into the `soundhub/` folder of every
 affected Box deployment event. Completed and pending recordings are never
 allowed in the same submission batch.
 
+SoundHub reads and updates these small sidecars through the app's existing Box
+API connection, so Box Drive indexing or file hydration cannot block the normal
+workflow. Preflight downloads fixed metadata versions, verifies their checksums,
+and checks write permissions. Before stamping rows it rechecks every source
+version; conditional uploads reject concurrent edits, and each saved file is
+checked against Box's returned checksum and size. No raw Box media is enumerated
+or downloaded. `--box-year-root DIR` explicitly selects the legacy local Drive
+workflow for maintenance or tests; it is not needed for normal submissions.
+
+Every live transfer attempt also gets a dated local archive beside the staging
+root: `~/cassn/soundhub/transfers/<UTC timestamp>_<attempt ID>/` with the default
+configuration. It keeps exact copies of `deployment.csv` and `recording.csv`,
+the AWS CLI's `upload.log`, and an atomically updated `transfer.json` containing
+the planned objects, counts, manifest hashes, destination, phase, verification
+result, and any error. Successful runs also save `submission_report.md` there.
+Cancellation and failures retain their records; a forcibly killed process may
+leave an unfinished `running` record, which does not establish success. Preflight
+alone creates no transfer attempt. These archives survive staging cleanup.
+S3 verification and SoundHub ingestion are recorded as separate facts; a transfer
+report does not establish that SoundHub has ingested or processed the recordings.
+
 Staging is cumulative **within one submission batch**, not across completed
 submissions. Once every staged recording is recorded as submitted, the GUI
 refuses to add another deployment to those completed manifests. After SoundHub
@@ -518,15 +524,17 @@ Cleanup removes the local project mirror and its `.cassn_fragments` rebuild
 inputs. It never changes Box, S3, source WAVs, or event-local submission reports.
 
 The submitter defaults to `Imperato, John`. The Box year folder is inferred from
-the staged deployment IDs and the standard Box Drive location—2027 deployments
-automatically resolve to `data/2027`; CLI overrides remain available for
-a different submitter or Box location. Mixed-year staging is rejected so each
+the staged deployment IDs under the configured Box data folder—2027 deployments
+automatically resolve to `data/2027`. CLI overrides remain available for
+a different submitter or a local Box Drive source. Mixed-year staging is rejected so each
 submission has one unambiguous Box source root.
 
 ### Configuration
 
-AWS credentials are **not** read by the app — boto3 resolves them from the standard
-chain (`~/.aws/credentials`, environment, instance role). Confirm the right identity
+Install AWS CLI v2 and ensure `aws` is on PATH for SoundHub uploads. The AWS CLI
+uploads files; boto3 lists the landing zone for resume and verification. Both use
+the configured profile/region and standard credential chain (`~/.aws/credentials`,
+environment, instance role). Confirm the right identity
 before a first push:
 
 ```bash
@@ -589,6 +597,16 @@ One row per camera image, including archival/QC fields and inputs to the Wildlif
 | `is_uploaded_to_osdf`, `osdf_uploader`, `osdf_upload_datetime` | Verified OSDF publication provenance; independent of the transfer client |
 | `is_submitted_to_wi`, `wi_submitter`, `wi_submission_datetime` | WI submission provenance |
 | `notes` | Free text |
+
+Camera `feature_type` uses Wildlife Insights' controlled vocabulary. Survey123
+builds use `cassn.core.wi_features.feature_type_from_survey123`: ML reads
+`mlCameraLocation`, and SA retains the first `cameraHabitat` selection. Supported
+choices are translated to WI spelling; unsupported nonblank choices and explicit
+`other` become `Other`. Missing answers stay blank, and explicit `None` remains
+distinct. Original habitat choices and free-text descriptions remain in the
+preserved Survey123 exports and archived source versions. Lookup validation,
+image metadata generation, and WI export reject incompatible nonblank values
+instead of silently changing the category downstream.
 
 ### `audio_file_metadata.csv`
 
@@ -825,6 +843,25 @@ cassn-field-data-manager/
 └── README.md                         # This file
 ```
 
-Operational data lives outside the repo: credentials, Box tokens, and the
-synced lookup-table cache are kept in `~/.cassn_config/`, and deployments are
-staged under `~/Desktop/CASSN_field_data_staging/` by default.
+Operational data lives outside the repo: settings and the synced lookup-table
+cache are kept in `~/.cassn_config/`; connected Box credentials and tokens use the
+system credential store. Legacy JSON secrets remain until a successful sign-in
+migrates them. Deployments are staged under
+`~/Desktop/CASSN_field_data_staging/` by default.
+
+## Hosted Box desktop prototype
+
+The unified **CA-SSN Data Manager** opens with a UC/CSU organization selector,
+then **Connect to Box**. Browser sign-in loads the selected project's configuration
+without asking users for secrets or folder IDs. Each project retains its own
+connection, lookup cache, deployment history, and staging folder. Close and reopen
+the app to choose another organization.
+The CSU profile is implemented but waits for its own curated configuration.
+Both pilots currently permit only John. Existing installations retain local OAuth.
+
+See the [authentication service guide](services/box-auth/README.md) for the
+hosted protocol, configuration, and deployment instructions. Build on Apple Silicon with
+`.venv/bin/python utils/build_macos.py`. The unified ZIP is written to `dist/unified/`.
+Use `python -m cassn.launcher` to run the unified launcher from source.
+Public downloads still need
+Apple Developer ID signing and notarization; this is a local prototype.
