@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from cassn.config import SOUNDHUB_RECORDING_FIELDS
+from cassn.soundhub.box_metadata import BoxMetadataStore
 from cassn.soundhub.lifecycle import (
     SoundHubLifecycleError,
     clear_completed_batch,
@@ -149,6 +150,47 @@ def test_completed_batch_requires_one_shared_verified_report(tmp_path):
     assert any("no verified SoundHub submission report" in error for error in plan.errors)
 
 
+@pytest.mark.parametrize("status,verified", [
+    ("Verified successfully", True),
+    ("S3 transfer verified successfully; Box submission records repaired.", True),
+    ("S3 transfer verified successfully; Box submission records pending.", False),
+    ("Verified successfully; Box submission records failed.", False),
+    ("Failed", False),
+])
+def test_cleanup_report_statuses_for_drive_and_api(tmp_path, monkeypatch, status, verified):
+    staging, box_year, event_roots = _fixture(tmp_path)
+    provenance = plan_submission_provenance(staging, box_year)
+    apply_submission_provenance(provenance)
+    payload = f"# SoundHub submission report\n\n**Status:** {status}\n".encode()
+    for event_root in event_roots:
+        folder = event_root / "soundhub"
+        folder.mkdir()
+        (folder / REPORT_NAME).write_bytes(payload)
+
+    drive_plan = plan_completed_batch_cleanup(staging, box_year)
+    assert drive_plan.closed
+    assert drive_plan.clearable is verified
+    provenance = drive_plan.provenance
+
+    store = BoxMetadataStore(object(), "data")
+    monkeypatch.setattr(store.storage, "find_child_folder", lambda *args: "reports")
+    monkeypatch.setattr(store.storage, "iter_folder_items", lambda *args, **kwargs: [
+        SimpleNamespace(type="file", name=REPORT_NAME, id="report")
+    ])
+    monkeypatch.setattr(store, "snapshot", lambda file_id: file_id)
+    monkeypatch.setattr(store, "read", lambda ref: payload)
+    for document in provenance.documents:
+        document.box_file = SimpleNamespace(parent_id=document.path.parent.name)
+    provenance.box_store = store
+    monkeypatch.setattr(
+        "cassn.soundhub.lifecycle.plan_submission_provenance", lambda *args, **kwargs: provenance
+    )
+    api_plan = plan_completed_batch_cleanup(staging, box_year)
+    assert api_plan.closed
+    assert api_plan.clearable is verified
+    assert api_plan.report_name == drive_plan.report_name
+
+
 def test_cleanup_revalidates_if_staging_changes(tmp_path):
     staging, box_year, event_roots = _fixture(tmp_path)
     _complete(staging, box_year, event_roots)
@@ -218,3 +260,105 @@ def test_clear_cli_is_dry_run_by_default_then_applies(
     output = capsys.readouterr().out
     assert "COMPLETED SOUNDHUB BATCH CLEARED" in output
     assert "Box data, source WAVs, submission reports, and S3 were not changed" in output
+
+
+def test_force_cleanup_allows_missing_flacs_and_cli_stays_dry_run(
+    tmp_path, monkeypatch
+):
+    staging, box_year, event_roots = _fixture(tmp_path)
+    _complete(staging, box_year, event_roots)
+    for media in project_root(staging).rglob('*.flac'):
+        media.unlink()
+
+    normal = plan_completed_batch_cleanup(staging, box_year)
+    assert not normal.clearable
+    assert any('staged FLAC missing' in error for error in normal.errors)
+    # Upload preflight continues to require every local recording.
+    assert not plan_submission_provenance(staging, box_year).ok
+
+    monkeypatch.setattr(
+        'utils.prep_soundhub.load_soundhub_config',
+        lambda: {'staging_root': str(staging)},
+    )
+    args = SimpleNamespace(
+        staging=str(staging), box_year_root=str(box_year), apply=False, force=True
+    )
+    assert cmd_clear_completed(args) == 0
+    assert project_root(staging).exists()
+    args.apply = True
+    assert cmd_clear_completed(args) == 0
+    assert not project_root(staging).exists()
+    assert all((event / 'source_wavs_untouched.txt').exists() for event in event_roots)
+
+
+@pytest.mark.parametrize('blocker', ['pending', 'report', 'metadata'])
+def test_force_cleanup_bypasses_submission_requirements(tmp_path, blocker):
+    staging, box_year, event_roots = _fixture(tmp_path)
+    if blocker != 'pending':
+        _complete(staging, box_year, event_roots)
+    if blocker == 'report':
+        (event_roots[0] / 'soundhub' / REPORT_NAME).unlink()
+    if blocker == 'metadata':
+        (event_roots[0] / 'audio_file_metadata.csv').unlink()
+    for media in project_root(staging).rglob('*.flac'):
+        media.unlink()
+
+    plan = plan_completed_batch_cleanup(staging, box_year, force=True)
+    assert plan.clearable
+    assert plan.force
+    assert plan.provenance is None
+    clear_completed_batch(plan)
+    assert not project_root(staging).exists()
+
+
+@pytest.mark.parametrize('target', ['project', 'fragments', 'nested', 'root'])
+def test_force_soundhub_refuses_symlinks(tmp_path, target):
+    staging, box_year, _ = _fixture(tmp_path)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'keep').write_text('keep')
+    if target == 'root':
+        link = tmp_path / 'linked-root'
+        link.symlink_to(staging, target_is_directory=True)
+        staging = link
+    elif target == 'nested':
+        (project_root(staging) / 'linked').symlink_to(outside, target_is_directory=True)
+    else:
+        import shutil
+        path = project_root(staging) if target == 'project' else fragments_root(staging)
+        shutil.rmtree(path)
+        path.symlink_to(outside, target_is_directory=True)
+    plan = plan_completed_batch_cleanup(staging, box_year, force=True)
+    assert not plan.clearable
+    with pytest.raises(SoundHubLifecycleError):
+        clear_completed_batch(plan)
+    assert (outside / 'keep').read_text() == 'keep'
+
+
+def test_force_soundhub_needs_no_manifest_or_box_and_detects_local_changes(tmp_path, monkeypatch):
+    staging, _, _ = _fixture(tmp_path)
+    (project_root(staging) / 'recording.csv').unlink()
+    def unavailable(*args, **kwargs):
+        raise AssertionError('force must not contact Box or plan provenance')
+    monkeypatch.setattr('cassn.soundhub.lifecycle.plan_submission_provenance', unavailable)
+    plan = plan_completed_batch_cleanup(staging, force=True)
+    assert plan.clearable
+    (project_root(staging) / 'new_file').write_text('new')
+    with pytest.raises(SoundHubLifecycleError, match='changed after cleanup preflight'):
+        clear_completed_batch(plan)
+    plan = plan_completed_batch_cleanup(staging, force=True)
+    clear_completed_batch(plan)
+    assert not project_root(staging).exists()
+
+
+def test_force_soundhub_clears_orphan_fragments_only(tmp_path):
+    staging = tmp_path / 'staging'
+    fragments = fragments_root(staging)
+    fragments.mkdir(parents=True)
+    (fragments / 'leftover').write_text('leftover')
+    plan = plan_completed_batch_cleanup(staging, force=True)
+    assert plan.clearable
+    assert plan.local_file_count == 1
+    clear_completed_batch(plan)
+    assert staging.exists()
+    assert not fragments.exists()

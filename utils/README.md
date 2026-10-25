@@ -56,8 +56,9 @@ deletion but never deletes them.
 
 ## `clear_box_verified_staging.py`
 
-Permanently clears local deployment-event folders only after each event passes
-a fresh, metadata-only Box verification. The command compares the SHA-1 values
+Normally clears local deployment-event folders only after each event passes
+a fresh, metadata-only Box verification. An explicit `--force` bypasses data
+verification. The command compares the SHA-1 values
 recorded at ingest with Box's server-side SHA-1 values. It does not download
 Box media or re-hash local images and recordings.
 
@@ -84,11 +85,54 @@ only the safe events with:
 cassn-clear-staging --apply
 ```
 
-An event is blocked unless device collection is complete, all metadata rows are
+Use `--force` for an explicit **unverified deletion**. It bypasses all data
+and Box checks, including missing media, mismatched metadata, unfinished
+collection, missing session records, and unavailable Box credentials. It does
+not contact Box. `--apply` is still required for deletion:
+
+```bash
+cassn-clear-staging --force          # Preview
+cassn-clear-staging --force --apply  # Delete listed events without verification
+```
+
+Without `--force`, an event is blocked unless device collection is complete, all metadata rows are
 stamped as uploaded to Box, the normal post-upload verification artifact
 passed, every local raw file is represented in `session.json`, and a live Box
 listing contains matching paths and server-side hashes. Box is never modified,
-and no cleanup receipt or other persistent record is created.
+and no cleanup receipt or other persistent record is created. Normal cleanup
+accepts forward SoundHub submission updates in Box audio metadata when all
+recordings and other fields match; unrelated changes still block cleanup.
+
+Force deletes the entire event folder, including remaining SA media and local
+metadata. Default discovery selects event folders containing `session.json`;
+use `--event FOLDER_NAME --force` to explicitly select an event without it.
+Neither mode permits deleting the staging root, targets outside it, or
+symlinked targets/contents. Both refuse changes detected after preflight.
+
+## `cassn-clear-soundhub`
+
+Runs `prep_soundhub.py clear-completed` using the repository virtual environment
+from any working directory. Installed in `~/.local/bin` by
+`install_macos_app.py`, alongside `cassn-clear-staging` and the SD card commands.
+Uses the configured SoundHub staging root. Run only after SoundHub acceptance
+has been confirmed; the preflight verifies local staging and Box records, not
+SoundHub ingestion.
+
+```bash
+cassn-clear-soundhub          # Preview; no deletion
+cassn-clear-soundhub --apply  # Delete the completed local batch
+```
+
+Use `--force` for **unverified deletion** of the local project and fragment
+folders, including unfinished batches. It bypasses missing FLACs/manifests,
+submission status, Box credentials, and report checks, and performs no remote
+verification. It retains path/symlink checks and detects changes after preflight.
+It can also clear fragments left behind after the project folder was removed.
+
+```bash
+cassn-clear-soundhub --force          # Preview unverified deletion
+cassn-clear-soundhub --force --apply  # Delete local batch without verification
+```
 
 ## `cassn-mount-sd`
 
@@ -573,6 +617,7 @@ python utils/prep_soundhub.py upload --verify-only
 | `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
 | `clear-completed` | Read-only cleanup preflight for a fully submitted local batch. |
 | `clear-completed --apply` | Delete the preflighted derived staging project after SoundHub acceptance. |
+| `clear-completed --force` | Preview local deletion without data/submission checks; add `--apply` to delete. |
 
 ### Output
 

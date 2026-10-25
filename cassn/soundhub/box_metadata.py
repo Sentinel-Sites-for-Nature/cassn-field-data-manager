@@ -140,7 +140,7 @@ class BoxMetadataStore:
         files[name] = file_id
 
     def verified_reports(self, event_id: str, event_root: Path) -> dict[str, Path]:
-        from cassn.soundhub.lifecycle import REPORT_GLOB, VERIFIED_REPORT_MARKER
+        from cassn.soundhub.lifecycle import REPORT_GLOB, is_verified_submission_report
 
         folder_id = self.storage.find_child_folder(event_id, "soundhub")
         if folder_id is None:
@@ -149,6 +149,6 @@ class BoxMetadataStore:
         for item in self.storage.iter_folder_items(folder_id, fields=["id", "name", "type"]):
             if item.type == "file" and Path(item.name).match(REPORT_GLOB):
                 payload = self.read(self.snapshot(item.id))
-                if VERIFIED_REPORT_MARKER in payload.decode("utf-8"):
+                if is_verified_submission_report(payload.decode("utf-8")):
                     reports[item.name] = event_root / "soundhub" / item.name
         return reports

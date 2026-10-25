@@ -4,7 +4,8 @@ The workflow is intentionally metadata-only: it compares SHA-1 values captured
 at ingest with the SHA-1 values Box computes from stored bytes.  It never
 downloads Box media and never re-hashes local media.  A deployment is eligible
 only after the normal application workflow has completed and written a passing
-``qc/box_upload_verification.json`` artifact.
+``qc/box_upload_verification.json`` artifact. Explicit force bypasses data
+verification while retaining local deletion boundaries and change detection.
 """
 
 from __future__ import annotations
@@ -63,10 +64,11 @@ class StagingCleanupPlan:
     file_count: int = 0
     local_bytes: int = 0
     event_signature: str = ""
+    force: bool = False
 
     @property
     def clearable(self) -> bool:
-        return not self.reasons and bool(self.box_folder_id and self.event_signature)
+        return not self.reasons and bool(self.event_signature and (self.force or self.box_folder_id))
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ def _provenance_errors(deployment_folder: Path) -> list[str]:
 
 
 def _resolve_box_deployment(
-    storage: BoxStorage,
+    storage: BoxStorage | None,
     field_data_folder_id: str,
     *,
     year: str,
@@ -209,16 +211,63 @@ def _resolve_box_deployment(
     return str(event_id), box_path
 
 
+def _soundhub_submission_updates_only(local_bytes: bytes, box_bytes: bytes) -> bool:
+    """Accept only forward submission bookkeeping changes on identical CSV rows."""
+    import io
+    from datetime import datetime
+
+    fields = {"is_submitted_to_soundhub", "soundhub_submitter", "soundhub_submission_datetime"}
+    try:
+        local = csv.DictReader(io.StringIO(local_bytes.decode("utf-8-sig")))
+        remote = csv.DictReader(io.StringIO(box_bytes.decode("utf-8-sig")))
+        headers = local.fieldnames
+        if (not headers or headers != remote.fieldnames
+                or len(headers) != len(set(headers))
+                or not (fields | {"filename", "deployment_id"}) <= set(headers)):
+            return False
+        def indexed(reader):
+            rows = {}
+            for row in reader:
+                key = (row["deployment_id"], row["filename"])
+                if not all(key) or key in rows or None in row or any(v is None for v in row.values()):
+                    raise ValueError("invalid or duplicate CSV row")
+                rows[key] = row
+            return rows
+        before, after = indexed(local), indexed(remote)
+        if not before or before.keys() != after.keys():
+            return False
+        for key, old in before.items():
+            new = after[key]
+            if old == new:
+                continue
+            if any(old[f] != new[f] for f in set(headers) - fields):
+                return False
+            if (old["is_submitted_to_soundhub"].strip().lower() not in {"", "false", "0"}
+                    or old["soundhub_submitter"].strip()
+                    or old["soundhub_submission_datetime"].strip()
+                    or new["is_submitted_to_soundhub"].strip().lower() not in {"true", "1"}
+                    or not new["soundhub_submitter"].strip()):
+                return False
+            stamp = datetime.fromisoformat(new["soundhub_submission_datetime"].replace("Z", "+00:00"))
+            if stamp.utcoffset() is None:
+                return False
+        return True
+    except (UnicodeError, ValueError, KeyError, TypeError, csv.Error):
+        return False
+
+
 def inspect_deployment_for_cleanup(
     deployment_folder: Path,
     staging_root: Path,
     storage: BoxStorage,
     field_data_folder_id: str,
+    *,
+    force: bool = False,
 ) -> StagingCleanupPlan:
-    """Build a live, fail-closed cleanup plan for one staged deployment."""
+    """Verify an event, or explicitly bypass data verification with force."""
     root = Path(staging_root).expanduser().resolve()
     deployment = Path(deployment_folder).expanduser()
-    plan = StagingCleanupPlan(root, deployment, deployment.name)
+    plan = StagingCleanupPlan(root, deployment, deployment.name, force=force)
 
     if Path(staging_root).expanduser().is_symlink():
         plan.reasons.append(f"staging root is a symlink: {staging_root}")
@@ -234,6 +283,18 @@ def inspect_deployment_for_cleanup(
     plan.deployment_folder = deployment
     if deployment == root or deployment.parent != root:
         plan.reasons.append("deployment is not a direct child of the staging root")
+        return plan
+
+    if not deployment.is_dir():
+        plan.reasons.append("deployment target is not a directory")
+        return plan
+    if force:
+        plan.event_signature, errors = _event_signature(deployment)
+        plan.reasons.extend(errors)
+        for path in deployment.rglob("*"):
+            if not path.is_symlink() and path.is_file():
+                plan.file_count += 1
+                plan.local_bytes += path.stat().st_size
         return plan
 
     session_path = deployment / "session.json"
@@ -348,7 +409,7 @@ def inspect_deployment_for_cleanup(
         if size != recorded_size:
             plan.reasons.append(f"local file size changed after ingest: {relative}")
 
-    plan.file_count = len(expected_raw)
+    plan.file_count = len(expected_raw & local_raw)
     plan.local_bytes = sum(
         deployment.joinpath(*relative.split("/")).stat().st_size
         for relative in expected_raw
@@ -388,11 +449,11 @@ def inspect_deployment_for_cleanup(
         plan.reasons.append(str(exc))
         return plan
 
-    expected_on_box = local_uploadable - _LOCAL_ONLY_AFTER_UPLOAD
+    expected_on_box = (local_uploadable | expected_raw) - _LOCAL_ONLY_AFTER_UPLOAD
     missing_box = sorted(expected_on_box - set(box_hashes))
     if missing_box:
         plan.reasons.append(
-            f"{len(missing_box)} local uploadable file(s) are missing from Box: "
+            f"{len(missing_box)} required file(s) are missing from Box: "
             f"{_path_examples(missing_box)}"
         )
 
@@ -425,7 +486,19 @@ def inspect_deployment_for_cleanup(
             continue
         local_hash = compute_file_sha1(deployment.joinpath(*relative.split("/")))
         if box_hash != local_hash:
-            plan.reasons.append(f"Box copy is not current: {relative}")
+            if relative == "audio_file_metadata.csv":
+                try:
+                    file_id = storage.folder_file_map(plan.box_folder_id)[relative]
+                    from cassn.soundhub.box_metadata import BoxMetadataStore
+                    store = BoxMetadataStore(storage.client, field_data_folder_id)
+                    box_bytes = store.read(store.snapshot(file_id))
+                    if _soundhub_submission_updates_only(
+                        deployment.joinpath(relative).read_bytes(), box_bytes
+                    ):
+                        continue
+                except Exception as exc:
+                    plan.reasons.append(f"could not compare Box audio metadata: {exc}")
+            plan.reasons.append(f"local and Box metadata differ: {relative}")
 
     return plan
 
@@ -435,6 +508,8 @@ def clear_verified_deployment(plan: StagingCleanupPlan) -> StagingCleanupResult:
     if not plan.clearable:
         raise StagingCleanupError("deployment did not pass cleanup preflight")
 
+    if plan.staging_root.is_symlink():
+        raise StagingCleanupError("staging root became a symlink after preflight")
     root = plan.staging_root.resolve()
     deployment = plan.deployment_folder
     if deployment.is_symlink():

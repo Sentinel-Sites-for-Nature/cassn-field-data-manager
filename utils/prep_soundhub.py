@@ -308,23 +308,28 @@ def cmd_clear_completed(args) -> int:
         plan = plan_completed_batch_cleanup(
             staging_root,
             args.box_year_root,
+            force=getattr(args, "force", False),
         )
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
 
-    print("Completed SoundHub batch cleanup preflight")
+    print("SoundHub staging cleanup preflight")
+    if plan.force:
+        print("  FORCE — UNVERIFIED: Box, S3, and submission checks bypassed.")
     print(f"  Local project folder:     {plan.project_root}")
     print(f"  Local fragment folder:    {plan.fragments_root}")
-    print(f"  Deployment events:        {plan.event_count}")
-    print(f"  SoundHub deployments:     {plan.deployment_count}")
-    print(f"  Recordings:               {plan.recording_count}")
-    print(f"  Pending recordings:       {plan.pending_count}")
+    if not plan.force:
+        print(f"  Deployment events:        {plan.event_count}")
+        print(f"  SoundHub deployments:     {plan.deployment_count}")
+        print(f"  Recordings:               {plan.recording_count}")
+        print(f"  Pending recordings:       {plan.pending_count}")
     print(f"  Local files to remove:    {plan.local_file_count}")
     print(f"  Local data to remove:     {plan.local_bytes / 1e9:.2f} GB")
-    print(f"  Shared verified report:   {plan.report_name or '(not confirmed)'}")
+    if not plan.force:
+        print(f"  Shared verified report:   {plan.report_name or '(not confirmed)'}")
 
-    if not plan.closed:
+    if not plan.closed and not plan.force:
         print("\nCLEANUP BLOCKED — this staging batch is not fully submitted.")
         for error in plan.errors:
             print(f"  - {error}")
@@ -337,15 +342,12 @@ def cmd_clear_completed(args) -> int:
 
     if not args.apply:
         print("\nDRY RUN PASSED — nothing was deleted.")
-        print(
-            "This verifies local staging and Box Drive records; it does not "
-            "confirm SoundHub ingestion."
-        )
-        print(
-            "After SoundHub acceptance is confirmed, delete this derived local "
-            "batch with:\n"
-            "  python utils/prep_soundhub.py clear-completed --apply"
-        )
+        if plan.force:
+            print("UNVERIFIED: no submission or remote-copy verification was performed.")
+            print("Run cassn-clear-soundhub --force --apply to remove these local folders.")
+        else:
+            print("This verifies local staging and Box records; it does not confirm SoundHub ingestion.")
+            print("After SoundHub acceptance, run cassn-clear-soundhub --apply to clear staging.")
         return 0
 
     try:
@@ -354,7 +356,8 @@ def cmd_clear_completed(args) -> int:
         print(f"\nCLEANUP FAILED — {exc}")
         return 1
 
-    print("\nCOMPLETED SOUNDHUB BATCH CLEARED")
+    print("\nSOUNDHUB STAGING CLEARED — UNVERIFIED FORCE" if plan.force
+          else "\nCOMPLETED SOUNDHUB BATCH CLEARED")
     print(f"  Removed project folder:  {result.removed_project_root}")
     if result.removed_fragments_root is not None:
         print(f"  Removed fragment folder: {result.removed_fragments_root}")
@@ -461,6 +464,11 @@ def main() -> int:
     p_clear = sub.add_parser(
         "clear-completed",
         help="Preview or clear a completed local staging batch after acceptance",
+    )
+    p_clear.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass data and submission verification; deletion still requires --apply",
     )
     p_clear.add_argument(
         "--apply",

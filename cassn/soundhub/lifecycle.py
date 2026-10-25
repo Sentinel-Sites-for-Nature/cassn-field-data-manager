@@ -22,6 +22,21 @@ from cassn.soundhub.staging import fragments_root, project_root
 
 REPORT_GLOB = "*_soundhub_submission.md"
 VERIFIED_REPORT_MARKER = "**Status:** Verified successfully"
+RECOVERED_REPORT_MARKER = (
+    "**Status:** S3 transfer verified successfully; Box submission records repaired."
+)
+
+
+def is_verified_submission_report(text: str) -> bool:
+    """Recognize successful transfer reports, including completed recovery.
+
+    These statuses establish transfer bookkeeping, not SoundHub acceptance.
+    Match a whole status line so failed or incomplete recovery is not accepted.
+    """
+    return any(
+        line.strip() in (VERIFIED_REPORT_MARKER, RECOVERED_REPORT_MARKER)
+        for line in text.splitlines()
+    )
 
 
 class SoundHubLifecycleError(Exception):
@@ -37,6 +52,7 @@ class CompletedBatchPlan:
     fragments_root: Path
     provenance: ProvenancePlan | None = None
     closed: bool = False
+    force: bool = False
     local_file_count: int = 0
     local_bytes: int = 0
     file_signature: tuple[tuple[str, int, int], ...] = ()
@@ -47,7 +63,7 @@ class CompletedBatchPlan:
 
     @property
     def clearable(self) -> bool:
-        return self.closed and not self.errors
+        return (self.force or self.closed) and not self.errors
 
     @property
     def recording_count(self) -> int:
@@ -148,7 +164,7 @@ def _verified_reports(event_root: Path) -> dict[str, Path]:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if VERIFIED_REPORT_MARKER in text:
+        if is_verified_submission_report(text):
             reports[path.name] = path
     return reports
 
@@ -156,14 +172,19 @@ def _verified_reports(event_root: Path) -> dict[str, Path]:
 def plan_completed_batch_cleanup(
     staging_root: Path,
     box_year_root: Path | None = None,
+    *,
+    force: bool = False,
 ) -> CompletedBatchPlan:
-    """Inspect staging and Box records without changing either location."""
-    staging_root = Path(staging_root).expanduser().resolve()
+    """Inspect local targets; force explicitly bypasses submission verification."""
+    original_root = Path(staging_root).expanduser()
+    staging_root = original_root.resolve()
     root, fragments, path_errors = _safe_cleanup_paths(staging_root)
-    plan = CompletedBatchPlan(staging_root, root, fragments, errors=path_errors)
-    if path_errors:
+    plan = CompletedBatchPlan(staging_root, root, fragments, force=force, errors=path_errors)
+    if original_root.is_symlink():
+        plan.errors.append(f"refusing to clear a symlinked staging root: {original_root}")
+    if plan.errors:
         return plan
-    if not root.is_dir():
+    if not root.is_dir() and not (force and fragments.is_dir()):
         plan.errors.append(f"no SoundHub batch is staged at {root}")
         return plan
 
@@ -174,6 +195,9 @@ def plan_completed_batch_cleanup(
     plan.local_file_count = len(signature)
     plan.local_bytes = sum(size for _, size, _ in signature)
     plan.errors.extend(signature_errors)
+
+    if force:
+        return plan
 
     provenance = plan_submission_provenance(staging_root, box_year_root)
     plan.provenance = provenance
@@ -235,6 +259,7 @@ def clear_completed_batch(plan: CompletedBatchPlan) -> CompletedBatchClearResult
         plan.staging_root,
         plan.provenance.box_year_root
         if plan.provenance and plan.provenance.box_store is None else None,
+        force=plan.force,
     )
     if not fresh.clearable:
         detail = "; ".join(fresh.errors) or "batch is no longer complete"
@@ -251,7 +276,8 @@ def clear_completed_batch(plan: CompletedBatchPlan) -> CompletedBatchClearResult
     removed_fragments = fresh.fragments_root if fresh.fragments_root.exists() else None
     if removed_fragments is not None:
         shutil.rmtree(removed_fragments)
-    shutil.rmtree(fresh.project_root)
+    if fresh.project_root.exists():
+        shutil.rmtree(fresh.project_root)
     return CompletedBatchClearResult(
         removed_project_root=fresh.project_root,
         removed_fragments_root=removed_fragments,

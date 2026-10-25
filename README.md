@@ -159,7 +159,7 @@ launcher:
 
 The installer creates **CA-SSN Field Data Manager.app** in `~/Applications`
 and command symlinks in `~/.local/bin` for `cassn-app`, `cassn-clear-staging`,
-`cassn-mount-sd`, and `cassn-eject-sd`. Open the `.app` in Finder, then
+`cassn-clear-soundhub`, `cassn-mount-sd`, and `cassn-eject-sd`. Open the `.app` in Finder, then
 right-click its Dock icon and choose **Options → Keep in Dock**. Adding `--open`
 to the installer command also starts the app after installation.
 
@@ -521,7 +521,10 @@ python utils/prep_soundhub.py clear-completed --apply
 ```
 
 Cleanup removes the local project mirror and its `.cassn_fragments` rebuild
-inputs. It never changes Box, S3, source WAVs, or event-local submission reports.
+inputs. For an explicit unverified deletion, use
+`cassn-clear-soundhub --force` to preview, then add `--apply` to delete. Force
+bypasses data and submission checks, including Box authentication, while
+retaining path/symlink boundaries and checks for changes after preflight. It never changes Box, S3, source WAVs, or event-local submission reports.
 
 The submitter defaults to `Imperato, John`. The Box year folder is inferred from
 the staged deployment IDs under the configured Box data folder—2027 deployments
