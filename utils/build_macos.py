@@ -11,8 +11,44 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def install_built_app(app: Path, install_dir: Path) -> Path:
+    """Replace the installed bundle at a stable Dock path, preserving it on failure."""
+    app = app.resolve(strict=True)
+    install_dir = install_dir.expanduser().resolve()
+    destination = install_dir / app.name
+    if app == destination:
+        raise RuntimeError('Build outside the installation directory before installing.')
+    executable = destination / 'Contents' / 'MacOS' / app.stem
+    processes = subprocess.check_output(['/bin/ps', '-axo', 'command='], text=True)
+    if any(line.strip() == str(executable) or line.strip().startswith(str(executable) + ' ')
+           for line in processes.splitlines()):
+        raise RuntimeError(f'Quit {destination} before installing the new build. Built app: {app}')
+    if destination.is_symlink():
+        raise RuntimeError(f'Refusing to replace a symlink: {destination}')
+    backup = install_dir / ('.' + app.name + '.previous')
+    if backup.exists():
+        raise RuntimeError(f'Previous installation backup needs review: {backup}')
+    install_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.cassn-install-', dir=install_dir) as temporary:
+        candidate = Path(temporary) / app.name
+        shutil.copytree(app, candidate, symlinks=True)
+        subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(candidate)], check=True)
+        try:
+            if destination.exists():
+                destination.rename(backup)
+            candidate.rename(destination)
+        except Exception:
+            if backup.exists() and not destination.exists():
+                backup.rename(destination)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+    return destination
 
 
 def main():
@@ -22,6 +58,10 @@ def main():
                         help="Installed Developer ID Application certificate name or SHA-1 fingerprint")
     parser.add_argument("--dist-dir", type=Path,
                         help="Build in a separate directory without replacing a running app")
+    parser.add_argument("--install-dir", type=Path, default=Path.home() / 'Applications',
+                        help="Permanent application location (default: ~/Applications)")
+    parser.add_argument("--no-install", action='store_true',
+                        help="Build distribution artifacts without updating the installed app")
     args = parser.parse_args()
     profile = args.profile
     title = "CA-SSN Data Manager" if profile == "unified" else profile.upper() + " Field Data Manager"
@@ -78,6 +118,8 @@ def main():
     archive = dist_dir / archive_name
     subprocess.run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(archive)], check=True)
     print(f'App: {app}\nArchive: {archive}')
+    if not args.no_install:
+        print(f'Installed: {install_built_app(app, args.install_dir)}')
     print('Developer ID signed; public distribution still requires notarization.' if signing_identity else
           'Ad-hoc prototype: updates can require Keychain approval again. Public distribution requires Developer ID signing and notarization.')
 

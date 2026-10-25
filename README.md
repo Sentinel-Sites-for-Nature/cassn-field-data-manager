@@ -876,6 +876,10 @@ Both pilots currently permit only John. Existing installations retain local OAut
 See the [authentication service guide](services/box-auth/README.md) for the
 hosted protocol, configuration, and deployment instructions. Build on Apple Silicon with
 `.venv/bin/python utils/build_macos.py`. The unified ZIP is written to `dist/unified/`.
+Each build also updates `~/Applications/CA-SSN Data Manager.app`, the permanent
+location to keep in the Dock. Quit that installed app before rebuilding; reopen
+it afterward using the same Dock icon. Use `--no-install` for distribution-only
+builds or `--install-dir` to choose a different permanent location.
 Use `python -m cassn.launcher` to run the unified launcher from source.
 Public downloads still need
 Apple Developer ID signing and notarization; this is a local prototype.
