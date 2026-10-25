@@ -159,6 +159,8 @@ from cassn.core.quality_control import (
     validate_coordinates,
     validate_datetimes,
 )
+from cassn.core.qc_review import collection_review_findings, small_file_findings
+from cassn.gui.qc_review import CollectionReviewDialog
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
 from cassn.lookups import (
@@ -2310,9 +2312,9 @@ class FieldDataWizard(QMainWindow):
             self.seen_file_hashes.discard(file_hash)
 
     def _append_ingest_qc(
-        self, deployment_folder, check, device, severity, message
+        self, deployment_folder, check, device, severity, message, findings=None
     ) -> None:
-        append_qc_report(deployment_folder, check, device, severity, message)
+        append_qc_report(deployment_folder, check, device, severity, message, findings)
 
     def _ingest_cancelled(self) -> bool:
         return False
@@ -2781,9 +2783,16 @@ class FieldDataWizard(QMainWindow):
         if hash_mismatch_count == 0 and files_copied == 0:
             # No copy attempts logged — don't write a hash_verification entry
             pass
-        if small_file_count > 0:
-            self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "warning",
-                                   f"{small_file_count} file(s) below device-aware size floor(s): {floor_summary}")
+        # Include retained files on resume so a no-op copy cannot clear an
+        # existing small-file warning or lose its evidence.
+        device_rows = [row for row in self.file_inventory if row.get("device_label") == device_label]
+        size_findings = small_file_findings(device_rows)
+        if size_findings:
+            self._append_ingest_qc(
+                self.current_deployment_folder, "file_size_floor", device_label, "warning",
+                f"{len(size_findings)} file(s) below device-aware size floor(s). "
+                "See retained findings for filenames and measured sizes.", size_findings,
+            )
         elif expected_floor is not None:
             self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "pass",
                                    f"All {files_copied} file(s) above {format_size_floor(expected_floor)} threshold")
@@ -3061,13 +3070,15 @@ class FieldDataWizard(QMainWindow):
         # first and no way to choose a destination.
 
     def _collection_review_findings(self, coord_warnings: list[str]) -> list[dict]:
-        """Combine current QC with device status; omit superseded QC history."""
-        findings = []
+        """Combine current QC and device status into actionable, grouped findings."""
+        entries = []
         for i in range(self.device_tree.topLevelItemCount()):
             item = self.device_tree.topLevelItem(i)
             status = item.text(2)
             if status != "Complete":
-                findings.append({
+                entries.append({
+                    "check": "Device collection status",
+                    "_device": item.data(0, Qt.UserRole) or item.text(0),
                     "severity": "error" if status in {"Failed", "Incomplete"} else "warning",
                     "message": f"{item.text(0)} · {item.text(1)}: {status}. "
                     + ("This device was skipped." if status == "Skipped" else
@@ -3076,59 +3087,26 @@ class FieldDataWizard(QMainWindow):
         path = qc_path_for(self.current_deployment_folder, "qc_report.json")
         try:
             report = json.loads(path.read_text()) if path.exists() else {}
-            for entry in report.get("current_state", []):
-                if entry.get("severity") not in {"warning", "error"}:
-                    continue
-                # Coordinate validation can produce multiple messages for the
-                # same check; include the full fresh result below instead.
-                if entry.get("check") == "coordinate_validation":
-                    continue
-                scope = entry.get("_device") or "Deployment"
-                check = entry.get("description") or entry.get("check", "QC")
-                findings.append({
-                    "severity": entry["severity"],
-                    "message": f"{scope} · {check}: {entry.get('message', '')}",
-                })
+            current = report.get("current_state", [])
+            if not isinstance(current, list) or not all(
+                isinstance(entry, dict) and isinstance(entry.get("check"), str)
+                and isinstance(entry.get("severity"), str)
+                and isinstance(entry.get("_device", ""), str) for entry in current
+            ):
+                raise ValueError("Invalid current_state in QC report")
+            entries.extend(entry for entry in current if entry.get("check") != "coordinate_validation")
         except (OSError, ValueError, TypeError, AttributeError) as exc:
-            findings.append({
-                "severity": "error",
-                "message": f"Could not read the QC report. Check the report before uploading: {exc}",
-            })
-        findings.extend({"severity": "warning", "message": message} for message in coord_warnings)
-        return sorted(findings, key=lambda finding: finding["severity"] != "error")
+            entries.append({"check": "QC report could not be read", "severity": "error",
+                "message": f"Check the QC report and ingest log before uploading: {exc}"})
+        entries.extend({"check": "coordinate_validation", "severity": "warning", "message": message}
+                       for message in coord_warnings)
+        return collection_review_findings(entries, self.file_inventory)
 
     def _confirm_collection_review(self, coord_warnings: list[str]) -> bool:
-        """Show findings expanded before the operator leaves Card ingest."""
-        findings = self._collection_review_findings(coord_warnings)
-        counts = Counter(finding["severity"] for finding in findings)
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Card ingest checks")
-        dialog.resize(720, 480)
-        layout = QVBoxLayout(dialog)
-        summary = QLabel(f"Errors: {counts['error']} · Warnings: {counts['warning']}")
-        layout.addWidget(summary)
-        explanation = QLabel(
-            "Check the findings below and address anything that needs attention before uploading. "
-            "You can continue to review the staged data. Continuing does not start an upload."
-            if findings else
-            "No warnings or errors were found in the current QC report or collection checks. "
-            "Continue to review the staged data before uploading."
+        dialog = CollectionReviewDialog(
+            self._collection_review_findings(coord_warnings), self.file_inventory,
+            self.current_deployment_folder, parent=self,
         )
-        explanation.setWordWrap(True)
-        layout.addWidget(explanation)
-        details = QTextEdit()
-        details.setReadOnly(True)
-        details.setPlainText("\n\n".join(
-            f"{finding['severity'].upper()}: {finding['message']}" for finding in findings
-        ) if findings else "No findings to address.")
-        layout.addWidget(details, 1)
-        buttons = QDialogButtonBox()
-        back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
-        buttons.addButton("Continue to review & upload", QDialogButtonBox.AcceptRole)
-        back.setDefault(True)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
         return dialog.exec() == QDialog.Accepted
 
     def generate_metadata_files(self):
@@ -3875,23 +3853,26 @@ class FieldDataWizard(QMainWindow):
         deploy_start = self.metadata.get("deployment_event_start_date", "")
         deploy_end = self.metadata.get("deployment_event_end_date", "")
 
+        sequence_findings = []
+        serial_findings = []
         check_results = [
-            ("sequence_gap", check_sequence_integrity(device_entries, device_label)),
-            ("temporal_plausibility", validate_datetimes(device_entries, deploy_start, deploy_end)),
-            ("camera_serial_match", check_camera_serial(device_entries, device_label)),
-            ("recording_stop_reason", check_recording_stop_reasons(device_entries, device_label)),
+            ("sequence_gap", check_sequence_integrity(device_entries, device_label, findings=sequence_findings), sequence_findings),
+            ("temporal_plausibility", validate_datetimes(device_entries, deploy_start, deploy_end), None),
+            ("camera_serial_match", check_camera_serial(device_entries, device_label, findings=serial_findings), serial_findings),
+            ("recording_stop_reason", check_recording_stop_reasons(device_entries, device_label), None),
         ]
 
         any_warnings = False
-        for check_name, warnings_list in check_results:
+        for check_name, warnings_list, evidence in check_results:
             if warnings_list:
                 any_warnings = True
                 for msg in warnings_list:
-                    self._append_card_message(
-                        device_label, f"QC warning: {msg}", alert=True
-                    )
+                    self._append_card_message(device_label, f"QC warning: {msg}", alert=True)
                     self.log(f"  QC [{device_label}] {msg}")
-                    append_qc_report(self.current_deployment_folder, check_name, device_label, "warning", msg)
+                append_qc_report(
+                    self.current_deployment_folder, check_name, device_label, "warning",
+                    "\n".join(warnings_list), findings=evidence,
+                )
             else:
                 append_qc_report(self.current_deployment_folder, check_name, device_label, "pass", "OK")
 
@@ -3919,10 +3900,11 @@ class FieldDataWizard(QMainWindow):
                     self.current_deployment_folder, "camera_date_review", device_label,
                     "pass", "No camera dates outside the deployment window.",
                 )
-            severity, message = check_camera_timezones(device_entries)
+            timezone_findings = []
+            severity, message = check_camera_timezones(device_entries, findings=timezone_findings)
             append_qc_report(
                 self.current_deployment_folder, "camera_timezone_consistency",
-                device_label, severity, message,
+                device_label, severity, message, findings=timezone_findings,
             )
             if severity != "pass":
                 any_warnings = True
@@ -3946,9 +3928,11 @@ class FieldDataWizard(QMainWindow):
             if entry.get("file_type") == "image"
         }):
             entries = [entry for entry in self.file_inventory if entry.get("device_label") == label]
-            severity, message = check_camera_timezones(entries)
+            timezone_findings = []
+            severity, message = check_camera_timezones(entries, findings=timezone_findings)
             append_qc_report(
                 self.current_deployment_folder, "camera_timezone_consistency", label, severity, message,
+                findings=timezone_findings,
             )
             self._append_card_message(label, f"QC {severity}: {message}", alert=severity != "pass")
             self.log(f"QC [{label}] {severity}: {message}")

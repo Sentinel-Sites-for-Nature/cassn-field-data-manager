@@ -1016,3 +1016,22 @@ def test_camera_time_resolution_preserves_image_bytes_and_resume(tmp_path, monke
     ingest()
     assert json.dumps(context.file_inventory, sort_keys=True) == before
     assert original.read_bytes() == staged.read_bytes() == contents
+
+
+def test_small_file_evidence_survives_noop_resume(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    before = json.loads((context.current_deployment_folder / "qc/qc_report.json").read_text())
+    original = next(e for e in before["current_state"] if e["check"] == "file_size_floor")
+    assert original["severity"] == "warning"
+    assert len(original["findings"]) == 6
+    copied, _, _ = _ingest_camera(context, source, reconyx)
+    assert copied == 0
+    after = json.loads((context.current_deployment_folder / "qc/qc_report.json").read_text())
+    current = next(e for e in after["current_state"] if e["check"] == "file_size_floor")
+    assert current["severity"] == "warning"
+    assert current["findings"] == original["findings"]
+    for finding in current["findings"]:
+        assert finding["files"][0]["filename"]
+        assert "bytes" in finding["message"]

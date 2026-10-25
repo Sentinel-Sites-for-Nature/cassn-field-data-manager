@@ -710,6 +710,26 @@ The `description` is a plain-English explanation of what the check is testing,
 so the file is self-documenting — you don't need to come back to this README
 to interpret it.
 
+Before leaving **Card ingest**, the checks dialog groups findings by the action
+needed. Unusual findings retain affected filenames and evidence; when the same
+file is unusually small and lacks a capture time or serial, its symptoms appear
+together. Select a finding to see next steps, measured sizes or burst context,
+and use **Open file** to inspect an available staged file. **Technical details**
+expands the original diagnostic and check explanation.
+
+Resolved camera timezone-offset discrepancies appear as one notice with photo
+and device counts, without an exhaustive filename list. This means the timezone
+interpretation was resolved; camera clock accuracy has not been verified.
+Unresolved capture times and historical timestamp errors still need attention.
+**Continue to review** opens the staged-data review and does not start an upload.
+
+New size, serial, burst and camera-time results include optional structured
+`findings` in `qc_report.json`. Burst results retain all findings for a device.
+Older reports are supplemented from retained inventory metadata when sufficient
+matching evidence is available; otherwise the original result remains visible
+and the dialog explains that file details were not retained. No media files are
+opened or changed to build the summary.
+
 ### All checks at a glance
 
 | Check (qc_report key) | Description | When it runs | Where it's reported |

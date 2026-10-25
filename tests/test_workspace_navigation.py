@@ -62,7 +62,7 @@ def test_sidebar_review_respects_validation_refusal(workspace_window, tmp_path, 
 def test_collection_checks_require_explicit_continue(
     workspace_window, tmp_path, monkeypatch, accept, sidebar
 ):
-    from PySide6.QtWidgets import QDialogButtonBox, QTextEdit
+    from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
     from cassn.core.quality_control import append_qc_report
     from cassn.gui import wizard
 
@@ -86,12 +86,14 @@ def test_collection_checks_require_explicit_continue(
 
     def respond(dialog):
         dialogs.append(dialog.windowTitle())
-        text = dialog.findChild(QTextEdit).toPlainText()
+        tree = dialog.findChild(QTreeWidget)
+        findings = [tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(tree.topLevelItemCount())]
+        text = "\n".join(finding["message"] for finding in findings)
         assert "Old copy failure" not in text
         for expected in ("p1_ML", "Small image", "Invalid offset", "Pending", "Missing latitude", "Missing elevation"):
             assert expected in text
         buttons = dialog.findChild(QDialogButtonBox)
-        target = "Continue to review & upload" if accept else "Back to card ingest"
+        target = "Continue to review" if accept else "Back to card ingest"
         next(button for button in buttons.buttons() if button.text() == target).click()
         return dialog.result()
 
@@ -114,7 +116,7 @@ def test_clean_collection_still_shows_checks(workspace_window, tmp_path, monkeyp
     window.current_deployment_folder = tmp_path
 
     def respond(dialog):
-        assert "Errors: 0 · Warnings: 0" in [label.text() for label in dialog.findChildren(QLabel)]
+        assert "Card ingest checks passed" in [label.text() for label in dialog.findChildren(QLabel)]
         assert dialog.findChild(QTextEdit).toPlainText() == "No findings to address."
         return wizard.QDialog.Accepted
 
@@ -251,3 +253,14 @@ def test_deployment_page_fits_desktop_and_stacks_on_laptop(monkeypatch, connecte
     finally:
         window.close()
         app.processEvents()
+
+
+@pytest.mark.parametrize("contents", ["not json", '[]', '{"current_state": [null]}',
+                                     '{"current_state": [{"check": [], "severity": "error"}]}'])
+def test_unreadable_collection_qc_report_remains_visible(workspace_window, tmp_path, contents):
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    (tmp_path / "qc").mkdir()
+    (tmp_path / "qc/qc_report.json").write_text(contents)
+    findings = window._collection_review_findings([])
+    assert any(f["severity"] == "error" and f["title"] == "QC report could not be read" for f in findings)

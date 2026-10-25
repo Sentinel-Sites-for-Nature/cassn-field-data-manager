@@ -107,9 +107,9 @@ class _WorkerContext:
         self._uncommitted_hashes.clear()
 
     def _append_ingest_qc(
-        self, deployment_folder, check, device, severity, message
+        self, deployment_folder, check, device, severity, message, findings=None
     ) -> None:
-        append_qc_report(deployment_folder, check, device, severity, message)
+        append_qc_report(deployment_folder, check, device, severity, message, findings)
 
     def _ingest_cancelled(self) -> bool:
         return self.thread.is_cancelled()
