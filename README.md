@@ -253,8 +253,8 @@ be brought forward through the Python icon in the Dock or Mission Control.
 - At ingest completion, oversized camera folders are already prepared in Wildlife Insights batches of at most 15,000 images
 - Start transfers by hand from the grouped action menus at the bottom of the tab.
   Nothing uploads on its own:
-  - **Uploads** — Box upload, and the two-step SoundHub path (prepare, then upload)
-  - **QC Checks** — Box verification, Box↔local hashes, camera timezone checks, SoundHub verification
+  - **Prepare & Upload** — upload to Box or add bird audio to local SoundHub staging
+  - **QC Checks** — Box verification, Box↔local hashes, camera timezone checks
   - **Deployment** — open either staging folder, switch deployment, start a new one
 - Start new deployment or exit
 
@@ -428,11 +428,13 @@ silently dropping fields.
 Unlike the deployment dates, `start` and `end` **do** carry a UTC offset:
 `2026-05-11 00:00:00-07:00`.
 
-### Preparing and uploading from the app
+### Preparing SoundHub staging from the app
 
-Both steps are on the **Review & Finalize** tab and are operator-initiated.
+UC SoundHub staging is available on **Review & upload**, including when using
+hosted Box sign-in. This screen provides local staging only; SoundHub upload and
+landing-zone checks are available through the maintenance CLI below.
 
-1. **Uploads → Add Bird Audio to SoundHub Staging…** transcodes the open
+**Prepare & Upload → Add Bird Audio to SoundHub Staging…** transcodes the open
    deployment event's BD WAVs to FLAC (level 5, `--verify`,
    `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
    local staging batch. Existing staged events remain, the two project CSVs are
@@ -440,19 +442,8 @@ Both steps are on the **Review & Finalize** tab and are operator-initiated.
    per-file and the job is cancellable; completed files are kept, so re-running
    resumes. A copy of both CSVs is also written to the event's `soundhub/`
    subfolder so the metadata travels to Box alongside the raw data.
-2. **Uploads → Upload Bird Data to SoundHub** preflights the whole waiting
-   batch, shows its exact scope for confirmation, uploads only recordings not
-   already recorded as submitted on Box, verifies them immediately, then stamps
-   the exact Box rows and writes the submission report.
-
-   Both GUI and CLI uploads use `aws s3 cp --recursive`, as requested by Brian.
-   A temporary tree of file symlinks selects the approved files without copying
-   FLAC data. Same-size media already in the landing zone are skipped locally;
-   both manifests are always uploaded. Cancellation stops the CLI process.
-
-**QC Checks → Check SoundHub Landing Zone** is a diagnostic for the currently
-pending batch. Successful uploads are verified automatically; a later empty
-landing zone is expected after SoundHub ingests the batch.
+**Deployment → Open SoundHub Staging Folder** opens the local batch in Finder.
+Staging does not initiate an upload. CSU does not expose the UC staging destination.
 
 ### Preparing previously-downloaded deployments
 

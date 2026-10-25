@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from cassn.config import (
@@ -46,9 +47,20 @@ class SoundHubStagingError(Exception):
     """A staging precondition failed. Raised before any file is written."""
 
 
+def flac_executable() -> str | None:
+    """Find FLAC even when a Finder-launched bundle has a minimal PATH."""
+    encoder = shutil.which("flac")
+    if encoder is None and sys.platform == "darwin":
+        for candidate in ("/opt/homebrew/bin/flac", "/usr/local/bin/flac"):
+            encoder = shutil.which(candidate)
+            if encoder is not None:
+                break
+    return encoder
+
+
 def flac_available() -> bool:
-    """True when the ``flac`` encoder is on PATH."""
-    return shutil.which("flac") is not None
+    """True when the encoder is on PATH or in a standard macOS Homebrew location."""
+    return flac_executable() is not None
 
 
 def project_root(staging_root) -> Path:
@@ -224,6 +236,9 @@ def convert_wav_to_flac(src: Path, dst: Path, *, level: int = FLAC_COMPRESSION_L
     quirk) is first copied locally with the pad restored, since flac refuses the
     unpadded original; the source WAV is never modified.
     """
+    encoder = flac_executable()
+    if encoder is None:
+        raise SoundHubStagingError("Could not find the 'flac' encoder. Install it with: brew install flac")
     dst.parent.mkdir(parents=True, exist_ok=True)
     partial = dst.with_suffix(dst.suffix + ".partial")
     partial.unlink(missing_ok=True)
@@ -238,7 +253,7 @@ def convert_wav_to_flac(src: Path, dst: Path, *, level: int = FLAC_COMPRESSION_L
     try:
         result = subprocess.run(
             [
-                "flac",
+                encoder,
                 f"-{level}",
                 "--silent",
                 "--verify",

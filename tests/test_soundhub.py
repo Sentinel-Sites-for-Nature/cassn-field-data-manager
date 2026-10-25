@@ -945,3 +945,18 @@ def test_excluded_low_voltage_failure_marks_only_its_deployment(deployment):
 def test_deployment_feature_type_uses_template_none(feature, expected):
     row = audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", feature_type=feature)
     assert build_deployment_rows([row])[0]["feature_type"] == expected
+
+
+@pytest.mark.parametrize("installed", ["/opt/homebrew/bin/flac", "/usr/local/bin/flac"])
+def test_flac_lookup_without_homebrew_on_path(monkeypatch, installed):
+    from cassn.soundhub import staging
+    monkeypatch.setattr(staging.sys, "platform", "darwin")
+    monkeypatch.setattr(staging.shutil, "which", lambda name: installed if name == installed else None)
+    assert staging.flac_available()
+    assert staging.flac_executable() == installed
+
+
+def test_flac_lookup_respects_existing_path(monkeypatch):
+    from cassn.soundhub import staging
+    monkeypatch.setattr(staging.shutil, "which", lambda name: "/custom/flac" if name == "flac" else None)
+    assert staging.flac_executable() == "/custom/flac"

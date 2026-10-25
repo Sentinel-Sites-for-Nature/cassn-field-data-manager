@@ -1341,11 +1341,6 @@ class FieldDataWizard(QMainWindow):
             "Add or refresh this deployment event in the cumulative SoundHub "
             "staging batch. Source WAVs are not modified and nothing is uploaded.",
         )
-        self.soundhub_upload_btn = self._menu_action(
-            "Upload Bird Data to SoundHub",
-            self.upload_to_soundhub,
-            "Push the staged FLAC tree and project manifests to the SoundHub S3 bucket.",
-        )
 
         self.box_verify_btn = self._menu_action(
             "Verify Box Upload",
@@ -1359,12 +1354,6 @@ class FieldDataWizard(QMainWindow):
             self.run_fixity_check,
             "End-to-end Box/local verification: compare each local raw file's "
             "SHA-1 against the SHA-1 reported by Box.",
-        )
-        self.soundhub_verify_btn = self._menu_action(
-            "Check SoundHub Landing Zone",
-            self.verify_soundhub,
-            "Diagnostic only: compare the currently pending batch with the S3 "
-            "landing zone. Successful uploads are verified automatically.",
         )
 
         self.open_btn = self._menu_action(
@@ -1385,18 +1374,15 @@ class FieldDataWizard(QMainWindow):
             "Clear this session and begin a new deployment.",
         )
 
-        if self.box_config.provider == "hosted":
-            # Hosted prototype covers ingest and Box; downstream project destinations
-            # have not been configured. Keep UC SoundHub settings out of this flow.
-            for action in (self.soundhub_stage_btn, self.soundhub_upload_btn,
-                           self.soundhub_verify_btn, self.open_soundhub_btn):
+        if self.box_config.profile == "csu":
+            # The existing SoundHub staging configuration belongs to UC.
+            for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
         button_layout = QHBoxLayout()
-        button_layout.addWidget(self._menu_button("Uploads ▾", [
+        button_layout.addWidget(self._menu_button("Prepare && Upload ▾", [
             self.upload_now_btn,
             None,
             self.soundhub_stage_btn,
-            self.soundhub_upload_btn,
         ]))
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
             self.box_verify_btn,
@@ -1405,8 +1391,6 @@ class FieldDataWizard(QMainWindow):
                 "Check Camera Timezones", self.run_camera_timezone_check,
                 "Compare original camera EXIF offsets with local Pacific time. Does not change images.",
             ),
-            None,
-            self.soundhub_verify_btn,
         ]))
         button_layout.addWidget(self._menu_button("Deployment ▾", [
             self.open_btn,
@@ -3195,10 +3179,10 @@ class FieldDataWizard(QMainWindow):
             f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
             "<h3>Before you finish</h3>"
             "<p>Review the staged event tree and resolve any QC findings. "
-            "Use <b>Uploads → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
+            "Use <b>Prepare &amp; Upload → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
             "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
-            "<p>For bird audio, <b>Uploads → Add Bird Audio to SoundHub Staging</b> adds this event to the "
-            "pending batch. Submit the cumulative SoundHub batch when ready.</p>"
+            "<p>For bird audio, <b>Prepare &amp; Upload → Add Bird Audio to SoundHub Staging</b> adds this event to the "
+            "local staging batch. No SoundHub upload is performed from this screen.</p>"
         )
         self._populate_staged_event_tree()
 
@@ -4196,11 +4180,8 @@ class FieldDataWizard(QMainWindow):
     # ------------------------------------------------------------------
     # Wildlife SoundHub
     #
-    # Two operator-initiated steps: transcode the bird audio into the local
-    # tree that mirrors the S3 bucket, then push it. They are separate because
-    # the transcode is long, restartable, and worth reviewing before anything
-    # leaves the machine — and because the upload role cannot delete, so a
-    # wrong key is permanent.
+    # Review exposes local staging only. Submission and landing-zone methods
+    # remain separate from the staging action and have no menu entries.
     # ------------------------------------------------------------------
 
     def _soundhub_staging_root(self) -> Path:
@@ -4213,12 +4194,7 @@ class FieldDataWizard(QMainWindow):
         return False
 
     def _set_soundhub_actions_enabled(self, enabled: bool):
-        for action in (
-            self.soundhub_stage_btn,
-            self.soundhub_upload_btn,
-            self.soundhub_verify_btn,
-        ):
-            action.setEnabled(enabled)
+        self.soundhub_stage_btn.setEnabled(enabled)
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
             action.setEnabled(enabled and not self._box_operation_active)
 
@@ -4498,7 +4474,8 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_status_label.setStyleSheet("color: green;")
             QMessageBox.information(
                 self, "SoundHub Preparation Complete",
-                message + "\n\nUse Uploads → Upload Bird Data to SoundHub when ready.",
+                message + "\n\nStaging is complete. Source WAVs are unchanged and nothing was uploaded. "
+                "Use Deployment → Open SoundHub Staging Folder to review the local batch.",
             )
             return
 

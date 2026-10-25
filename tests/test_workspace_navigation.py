@@ -10,18 +10,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from cassn.box.auth import BoxConfig
+from cassn.box.auth import BoxConfig, hosted_config
 from cassn.gui.wizard import FieldDataWizard
 from cassn.lookups import LookupTables
 
 
 @pytest.fixture
-def workspace_window(monkeypatch):
+def workspace_window(monkeypatch, request):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: None)
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
-    window = FieldDataWizard(lookups=LookupTables(), box_config=BoxConfig())
+    window = FieldDataWizard(lookups=LookupTables(), box_config=getattr(request, "param", BoxConfig()))
     window._card_ejection_timer.stop()
     yield app, window
     window.card_ingest_threads.clear()
@@ -29,6 +29,55 @@ def workspace_window(monkeypatch):
     window.current_deployment_folder = None
     window.close()
     app.processEvents()
+
+
+@pytest.mark.parametrize("workspace_window", [hosted_config("uc"), hosted_config("csu"), BoxConfig()], indirect=True)
+def test_review_exposes_uc_staging_without_soundhub_upload(workspace_window):
+    from PySide6.QtWidgets import QToolButton
+
+    _app, window = workspace_window
+    uc = window.box_config.profile != "csu"
+    assert window.soundhub_stage_btn.isVisible() == uc
+    assert window.open_soundhub_btn.isVisible() == uc
+    buttons = [button for button in window.tabs.widget(2).findChildren(QToolButton) if button.menu()]
+    # Qt requires && to render a literal ampersand instead of a mnemonic.
+    prepare = next(button for button in buttons if button.text() == "Prepare && Upload ▾")
+    assert window.upload_now_btn in prepare.menu().actions()
+    assert window.soundhub_stage_btn in prepare.menu().actions()
+    menus = [button.menu() for button in buttons]
+    visible = [action for menu in menus for action in menu.actions() if action.isVisible()]
+    assert (window.soundhub_stage_btn in visible) == uc
+    assert (window.open_soundhub_btn in visible) == uc
+    assert not any("Upload Bird Data to SoundHub" in action.text() or "SoundHub Landing Zone" in action.text()
+                   for action in visible)
+
+
+@pytest.mark.parametrize("workspace_window", [hosted_config("uc")], indirect=True)
+def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path / "event"
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    monkeypatch.setattr(wizard.QMessageBox, "question", lambda *args: wizard.QMessageBox.Yes)
+    worker = MagicMock()
+    stage = MagicMock(return_value=worker)
+    upload = MagicMock(side_effect=AssertionError("Staging must not start an upload"))
+    monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
+    monkeypatch.setattr(wizard, "SoundHubUploadThread", upload)
+    notice = MagicMock()
+    monkeypatch.setattr(wizard.QMessageBox, "information", notice)
+    window.soundhub_stage_btn.trigger()
+    stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups)
+    worker.start.assert_called_once()
+    assert not window.soundhub_stage_btn.isEnabled()
+    window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
+    assert window.soundhub_stage_btn.isEnabled()
+    assert "nothing was uploaded" in notice.call_args.args[2]
+    assert "Upload Bird Data to SoundHub" not in notice.call_args.args[2]
+    upload.assert_not_called()
+    window.soundhub_stage_thread = None
 
 
 def test_sidebar_cannot_bypass_missing_deployment(workspace_window, monkeypatch):

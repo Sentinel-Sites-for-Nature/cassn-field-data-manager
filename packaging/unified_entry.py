@@ -28,6 +28,22 @@ if "--self-check" in sys.argv:
     assert (BUNDLE_DIR / "assets" / "ssn_data_manager_icon.png").is_file()
     assert Path(certifi.where()).is_file()
     exif = subprocess.check_output(["exiftool", "-ver"], text=True).strip()
+    from cassn.soundhub.staging import flac_executable
+    flac = flac_executable()
+    flac_checked = "--check-flac" in sys.argv
+    if flac_checked:
+        import tempfile
+        import wave
+        from cassn.soundhub.staging import convert_wav_to_flac
+        assert flac is not None, "FLAC encoder could not be found"
+        with tempfile.TemporaryDirectory(prefix="cassn-flac-check-") as temporary:
+            source = Path(temporary) / "test.wav"
+            encoded = Path(temporary) / "test.flac"
+            with wave.open(str(source), "wb") as recording:
+                recording.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+                recording.writeframes(b"\x00\x00" * 480)
+            convert_wav_to_flac(source, encoded)
+            subprocess.run([flac, "--test", "--silent", str(encoded)], check=True)
     keychain_checked = "--check-keychain" in sys.argv
     if keychain_checked:
         import uuid
@@ -39,7 +55,8 @@ if "--self-check" in sys.argv:
         "architecture": platform.machine(), "profile": config.profile,
         "config_directory": str(CONFIG_DIR), "staging_directory": str(DEFAULT_STAGING_ROOT),
         "data_folder": config.field_data_folder_id, "config_folder": config.app_config_folder_id,
-        "service": config.service_url, "exiftool": exif, "gui_imports": True,
+        "service": config.service_url, "exiftool": exif, "flac": flac,
+        "flac_conversion_checked": flac_checked, "gui_imports": True,
         "certificate_bundle": True, "keychain_no_prompt": keychain_checked}))
 else:
     from cassn.launcher import main
