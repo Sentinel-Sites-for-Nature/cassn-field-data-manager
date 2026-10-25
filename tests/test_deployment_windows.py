@@ -20,6 +20,8 @@ from cassn.gui.preview import sample_lookups
 from cassn.gui.windows import DeploymentWindows, ResourceBusy, ResourceLease
 from cassn.gui.wizard import FieldDataWizard
 
+LOAD_CONFIG = FieldDataWizard.load_config
+
 
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
@@ -208,6 +210,54 @@ def test_settings_merge_other_window_roots_without_losing_credentials(manager, t
     state = json.loads(config.read_text())
     assert state["box"] == {"sample": "preserve"}
     assert state["known_staging_roots"] == ["old", str(first.staging_root), str(second.staging_root)]
+
+
+def test_staging_default_saves_before_starting_collection(manager, tmp_path, monkeypatch):
+    window = manager.new_window()
+    window.config_file = tmp_path / "config.json"
+    window.staging_root = tmp_path / "chosen"
+    window.set_default_cb.setChecked(True)
+    assert json.loads(window.config_file.read_text())["staging_root"] == str(window.staging_root)
+    assert window.current_deployment_folder is None
+
+    # Changing the location again while checked must update the saved default.
+    selected = tmp_path / "another"
+    monkeypatch.setattr("cassn.gui.wizard.QFileDialog.getExistingDirectory", lambda *args: str(selected))
+    window.choose_staging_location()
+    assert json.loads(window.config_file.read_text())["staging_root"] == str(selected)
+    reopened = manager.new_window()
+    reopened.config_file = window.config_file
+    LOAD_CONFIG(reopened)
+    assert reopened.staging_root == selected
+    assert reopened.current_deployment_folder is None
+
+
+def test_uc_migrates_local_preferences_without_box_credentials(manager, tmp_path, monkeypatch):
+    import cassn.gui.wizard as wizard
+
+    monkeypatch.setattr(wizard, "BASE_CONFIG_DIR", tmp_path)
+    legacy = tmp_path / "config.json"
+    original = json.dumps({"staging_root": str(tmp_path / "raw"), "card_concurrency_limit": 3,
+                           "box": {"client_secret": "must-not-migrate"}})
+    legacy.write_text(original)
+    window = manager.new_window()
+    window.config_file = tmp_path / "profiles" / "uc" / "config.json"
+    window.box_config = BoxConfig(provider="hosted", profile="uc")
+    LOAD_CONFIG(window)
+    saved = json.loads(window.config_file.read_text())
+    assert saved["staging_root"] == str(tmp_path / "raw")
+    assert saved["card_concurrency_limit"] == 3
+    assert "box" not in saved
+    assert legacy.read_text() == original
+    # Existing profile preferences always win over the legacy file.
+    legacy.write_text(json.dumps({"staging_root": str(tmp_path / "other")}))
+    LOAD_CONFIG(window)
+    assert window.staging_root == tmp_path / "raw"
+    csu = manager.new_window()
+    csu.config_file = tmp_path / "profiles" / "csu" / "config.json"
+    csu.box_config = BoxConfig(provider="hosted", profile="csu")
+    LOAD_CONFIG(csu)
+    assert not csu.config_file.exists()
 
 
 def test_window_dialogs_do_not_make_other_windows_modal(manager, monkeypatch):

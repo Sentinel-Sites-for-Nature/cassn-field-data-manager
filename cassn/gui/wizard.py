@@ -98,6 +98,7 @@ from cassn.config import (
     AUDIO_DEVICE_TYPES,
     AUDIO_FIELDS,
     BUNDLE_DIR,
+    BASE_CONFIG_DIR,
     CONFIG_JSON,
     DEFAULT_STAGING_ROOT,
     DEFAULT_DOWNLOADER,
@@ -326,8 +327,19 @@ class FieldDataWizard(QMainWindow):
     def load_config(self):
         """Load saved configuration"""
         try:
-            if self.config_file.exists():
-                with open(self.config_file, "r") as f:
+            source = self.config_file
+            legacy = BASE_CONFIG_DIR / "config.json"
+            migrate = (
+                not source.exists()
+                and self.box_config.provider == "hosted"
+                and self.box_config.profile == "uc"
+                and source != legacy
+                and legacy.exists()
+            )
+            if migrate:
+                source = legacy
+            if source.exists():
+                with open(source, "r") as f:
                     config = json.load(f)
                     if "staging_root" in config:
                         self.staging_root = Path(config["staging_root"])
@@ -341,6 +353,9 @@ class FieldDataWizard(QMainWindow):
                         )
                     except (TypeError, ValueError):
                         self.card_concurrency_limit = 4
+                if migrate:
+                    # Carry forward local preferences, never legacy Box credentials.
+                    self.save_config()
         except Exception:
             pass
 
@@ -960,6 +975,7 @@ class FieldDataWizard(QMainWindow):
         staging_layout.addLayout(staging_controls)
 
         self.set_default_cb = QCheckBox("Set as default")
+        self.set_default_cb.toggled.connect(self._on_staging_default_changed)
         staging_layout.addWidget(self.set_default_cb)
 
         staging_group.setLayout(staging_layout)
@@ -1542,7 +1558,7 @@ class FieldDataWizard(QMainWindow):
                     cell_layout.setSpacing(2)
                     for row in rows:
                         sequence = int(row.get("deployment_sequence") or 0)
-                        label = "" if len(rows) == 1 else f"seq{sequence:02d}"
+                        label = "" if len(rows) == 1 else f"Deployment {sequence + 1}"
                         cb = QCheckBox(label)
                         cb.setChecked(True)
                         cb.toggled.connect(self._refresh_workspace_context)
@@ -1601,6 +1617,12 @@ class FieldDataWizard(QMainWindow):
             self._remember_staging_root(self.staging_root)
             self.staging_label.setText(str(self.staging_root))
             self._refresh_workspace_context()
+            if self.set_default_cb.isChecked():
+                self.save_config()
+
+    def _on_staging_default_changed(self, checked):
+        if checked:
+            self.save_config()
 
     def validate_and_next(self):
         """Validate metadata and proceed to collection tab"""

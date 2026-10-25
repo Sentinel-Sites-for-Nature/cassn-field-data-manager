@@ -639,7 +639,7 @@ def test_gui_lists_completed_and_open_events_without_inventing_collection_dates(
         assert window.deploy_start_date.isReadOnly()
         assert window.deploy_end_date.isReadOnly()
         checks = window.device_checkboxes[1]["ML"]
-        assert [checkbox.text() for _row, checkbox in checks] == ["seq00", "seq01"]
+        assert [checkbox.text() for _row, checkbox in checks] == ["Deployment 1", "Deployment 2"]
         assert all(checkbox.isChecked() for _row, checkbox in checks)
         assert window.observer_combo.currentText() == "Imperato, John"
         assert window.deploy_event_combo.currentText() == "UC_TestSite_20260424 (2 deployments)"
