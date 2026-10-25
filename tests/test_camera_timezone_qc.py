@@ -61,15 +61,15 @@ def test_errors_are_not_hidden_by_missing_offset_or_legacy_warning():
             {"file_type": "audio"}]
     severity, summary = check_camera_timezones(rows)
     assert severity == "error"
-    assert "3 image(s); 0 passed, 1 errors, 2 warnings" in summary
-    assert "reported -08:00; expected -07:00" in summary
+    assert "Timezone tag says UTC-08:00; expected UTC-07:00" in summary
+    assert "Stored timestamps still need correction; this check did not change them" in summary
     assert "one.jpg" in summary
 
 
 def test_aggregate_bounds_examples_and_ignores_converted_timestamp():
     severity, summary = check_camera_timezones([image(name=f"{n}.jpg") for n in range(100)])
     assert severity == "error"
-    assert "100 image(s): Camera timezone offset mismatch" in summary
+    assert "100 photos: Timezone tag says UTC-08:00" in summary
     assert "2.jpg" in summary and "3.jpg" not in summary
 
 

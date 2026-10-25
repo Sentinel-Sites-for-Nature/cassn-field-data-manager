@@ -263,12 +263,7 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "the operator records an explanation. Original files and camera dates are retained."
     ),
     "camera_timezone_consistency": (
-        "Camera clocks are expected to show local Pacific civil time. Original EXIF "
-        "clock readings resolve in America/Los_Angeles for new processing. Reported "
-        "offset discrepancies are warnings after resolution. Invalid, nonexistent, "
-        "or ambiguous capture times remain unresolved errors. Historical offset "
-        "errors remain errors until separately corrected. Clock accuracy is not verified. "
-        "This check does not rewrite images or stored timestamps."
+        "Checks camera timezone tags against Pacific time; does not verify camera clock accuracy."
     ),
     "coordinate_validation": (
         "Coordinates and elevation (from plots.csv) should be non-null and fall within the "

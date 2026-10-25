@@ -57,6 +57,7 @@ def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
     groups = {}
     images = [entry for entry in entries if entry.get("file_type") == "image"]
     for entry in images:
+        status = "unverified_camera_time"
         if "camera_datetime_original" not in entry:
             severity, message = "warning", "Original camera EXIF not retained in this inventory; timezone cannot be verified"
         else:
@@ -65,23 +66,57 @@ def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
                 "OffsetTimeOriginal": entry.get("camera_offset_time_original"),
             })
             severity, message = result.check.severity, result.check.message
+            status = result.status
+            base_status = status.split(";")[0]
+            pacific_time = "Pacific daylight time" if result.effective_offset == "-07:00" else "Pacific standard time"
+            offset_messages = {
+                "offset_mismatch_corrected": (
+                    f"Timezone tag says UTC{result.check.reported_offset}; "
+                    f"expected UTC{result.effective_offset} ({pacific_time})"
+                ),
+                "offset_missing": "Timezone tag is missing",
+                "offset_invalid": "Timezone tag is invalid",
+            }
+            if base_status in offset_messages:
+                message = offset_messages[base_status]
             if (entry.get("camera_timestamp_source") != CAMERA_TIMESTAMP_SOURCE
-                    and result.status.split(";")[0] in {"offset_mismatch_corrected", "offset_invalid"}):
+                    and base_status in {"offset_mismatch_corrected", "offset_invalid"}):
                 # A QC rerun must not imply that legacy stored times were fixed.
                 severity = "error"
-                message = message.replace("; resolved using local civil time", "")
-                message += "; historical timestamp has not been recalculated"
+                status = "historical_camera_time"
+                message += ". Stored timestamps still need correction; this check did not change them"
+            elif base_status in offset_messages:
+                message += f". Camera clock reading unchanged; interpreted as {pacific_time}"
+                if ";datetime_fallback" in status:
+                    message += "; original capture time was missing, so the EXIF DateTime field was used"
+                else:
+                    message += ". No timezone action needed"
         counts[severity] += 1
         if severity != "pass":
-            group = groups.setdefault((severity, message), {"count": 0, "examples": []})
+            resolved = severity == "warning" and status in {
+                "offset_mismatch_corrected", "offset_missing", "offset_invalid",
+            }
+            group = groups.setdefault((severity, message), {
+                "count": 0, "examples": [],
+                "resolved": resolved,
+            })
             group["count"] += 1
             if len(group["examples"]) < 3:
                 group["examples"].append(entry.get("new_filename") or entry.get("original_filename") or "unnamed image")
     severity = "error" if counts["error"] else "warning" if counts["warning"] else "pass"
-    summary = f"Camera timezone QC: {len(images)} image(s); {counts['pass']} passed, {counts['error']} errors, {counts['warning']} warnings."
-    for (_, message), group in groups.items():
-        summary += f"\n{group['count']} image(s): {message}. Examples: {', '.join(group['examples'])}"
-    return severity, summary
+    lines = []
+    if not images:
+        lines.append("No camera photos to check.")
+    elif counts["pass"]:
+        noun = "photo" if counts["pass"] == 1 else "photos"
+        lines.append(f"{counts['pass']:,} {noun}: timezone tags match.")
+    for (level, message), group in groups.items():
+        noun = "photo" if group["count"] == 1 else "photos"
+        line = f"{group['count']:,} {noun}: {message}."
+        if not group["resolved"]:
+            line += f" Examples: {', '.join(group['examples'])}"
+        lines.append(line)
+    return severity, "Camera timezone QC: " + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
