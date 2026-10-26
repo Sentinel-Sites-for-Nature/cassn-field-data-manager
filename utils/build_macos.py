@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--signing-identity", default=os.environ.get("CASSN_SIGNING_IDENTITY"),
                         help="Installed Developer ID Application certificate name or SHA-1 fingerprint")
     parser.add_argument("--dist-dir", type=Path,
-                        help="Build in a separate directory without replacing a running app")
+                        help="Artifact output directory; installation still occurs unless --no-install is set")
     parser.add_argument("--install-dir", type=Path, default=Path.home() / 'Applications',
                         help="Permanent application location (default: ~/Applications)")
     parser.add_argument("--no-install", action='store_true',

@@ -22,9 +22,9 @@ the returned access token to those folders. Folder-restricted token issuance is
 not implemented in this prototype.
 The standalone desktop prototypes use this protocol through `cassn/box/hosted.py`.
 Existing local-secret installations remain available. The unified desktop selects
-UC or CSU before loading project settings. Run `python -m cassn.launcher` from
-the repository root, or build with `.venv/bin/python utils/build_macos.py`.
-The packaged app and ZIP are written to `dist/unified/`.
+UC or CSU before loading project settings. See the main README for
+[desktop setup](../../README.md#hosted-box-desktop-prototype) and the complete
+[Mac build guide](../../README.md#build-the-hosted-mac-app).
 
 ### macOS Keychain and release signing
 
@@ -36,19 +36,9 @@ retry. Expired Box connections request a fresh browser sign-in. Network outages
 can still use the validated offline configuration.
 
 Ad-hoc prototypes have a different signing identity after each rebuild, so
-**Always Allow** may apply only to that build. For releases, install a valid
-Developer ID Application certificate and consistently build with that identity:
-
-```bash
-.venv/bin/python utils/build_macos.py --signing-identity "Developer ID Application: YOUR ORGANIZATION (TEAMID)"
-```
-
-`CASSN_SIGNING_IDENTITY` can supply the same certificate name or SHA-1 fingerprint.
-An explicitly selected identity must match an installed Developer ID certificate;
-the builder fails before rebuilding if it cannot find one. The bundle and nested
-binaries use that identity and are verified before archiving. Notarization is a
-separate distribution step. `--dist-dir dist/release-candidate` builds a separate
-copy without replacing a running app.
+**Always Allow** may apply only to that build. Release signing, prerequisites,
+outputs, and installation effects are documented in the
+[Mac build guide](../../README.md#build-the-hosted-mac-app).
 
 UC uses `wrangler.uc.json` and `https://cassn-uc-box-auth.tiny-band-cf20.workers.dev`,
 with data `377166707326` and app_config `377164694031`. Its sessions and encryption
@@ -56,9 +46,28 @@ key are separate from CSU. Both profiles currently allow only John.
 
 ## Deploy
 
-Use Node 22 or newer. Run `npm install`, `npm test`, and `npm run check` here.
-Authenticate Wrangler to the existing account. `npm run deploy` creates the
-Worker and its SQLite Durable Object namespace; no paid plan is needed.
+Use Node 22 or newer and an account authorized to deploy these Workers. From
+`services/box-auth/`, install dependencies and run the existing checks:
+
+```bash
+npm install
+npm test
+npm run check
+```
+
+`npm run check` is a Wrangler deployment dry run, not a live Box test.
+Authenticate Wrangler to the existing Cloudflare account before deployment.
+The default `wrangler.json` targets **CSU**; UC uses `wrangler.uc.json`. After
+reviewing the selected configuration, deploy only the intended service:
+
+```bash
+# CSU
+npm run deploy
+# UC (alternative)
+npm run deploy -- --config wrangler.uc.json
+```
+
+Deployment creates or updates the Worker and its SQLite Durable Object namespace.
 
 Configure these encrypted Worker secrets (never in source, command arguments,
 plaintext variables, or log output):
@@ -66,9 +75,59 @@ plaintext variables, or log output):
 - `BOX_CLIENT_SECRET`: secret for the configured Box OAuth client.
 - `TOKEN_ENCRYPTION_KEY`: 32 random bytes encoded as unpadded base64url.
 
-Register the exact hosted callback above in the Box app's redirect URI list,
+Register the exact hosted callback for the selected Worker origin
+(`/oauth/callback`) in the Box app's redirect URI list,
 retaining the existing local callback. Verify `/health` returns `ready: true`,
 then test a fresh browser login from the desktop client.
+
+## Administrator onboarding
+
+The current pilot admits only John. Expanding access requires an explicit owner
+decision; the steps below describe the work for an approved participant.
+
+1. Confirm the participant's numeric Box user ID and the account they will use.
+   Have that same account accept invitations to the intended data and app-config
+   folders with the permissions required for its work. Add its ID to
+   `ALLOWED_BOX_USER_IDS` in the selected Worker configuration. The allow-list
+   and Box permissions are separate checks; neither substitutes for the other.
+   Explain the account-wide OAuth scope described above before sign-in.
+2. Prepare genuine project configuration, not UC placeholder records for CSU.
+   The app-config folder needs `sites.csv`, `plots.csv`, `deployments.csv`,
+   `deployment_events.csv`, `soundhub_config.json`, and `wi_config.json`.
+   CSU also requires `program_config.json`; UC can use its bundled program
+   defaults when this file is absent. In that JSON, `organizations` and
+   `observers` must be nonempty lists of nonblank strings, and
+   `default_downloader` must name an entry in `observers`.
+3. Check the curated directory locally from the repository root:
+
+   ```bash
+   .venv/bin/python utils/validate_curated_lookups.py /path/to/curated-lookups
+   ```
+
+   This validates the six runtime lookup files and their relationships. It does
+   not validate `program_config.json`; hosted setup additionally checks the
+   program rules above before accepting the configuration. A passing local
+   check does not establish Box access or a working hosted connection.
+4. Deploy and validate the service **before** distributing a desktop update
+   that relies on its responses. Keep each service's encryption key stable.
+   Confirm readiness, then use the unified app's intended organization and
+   **Connect to Box**. If project settings are rejected, correct the curated
+   files and click **Reload project settings**; another sign-in is not normally
+   needed for that correction.
+5. Before field use, run an approved synthetic trial: sign in, ingest a small
+   fixture, upload and verify it, relaunch, check token renewal and expiry,
+   disconnect, and check permission removal. Include a clean second Mac before
+   wider distribution. Mocked tests and `/health` readiness alone do not prove
+   these end-to-end behaviors.
+
+For access denial, check the selected organization, numeric user ID, accepted
+folder invitations, and permissions first. For invalid project settings, use
+the validation and reload steps above. For Keychain approval, use the recovery
+instructions above; network failures may permit a previously validated offline
+configuration but do not prove current server access. If campus policy blocks
+consent, involve the participant's Box administrator. When reporting a failure,
+include app/macOS versions, the exact error, and time; exclude tokens, proofs,
+client secrets, and OAuth callback URLs.
 
 ## Desktop protocol
 
@@ -125,8 +184,8 @@ access tokens remain subject to Box permissions and expiry. Keep the encryption
 key stable during updates; replacing it makes existing hosted sessions unreadable.
 No production rollout to additional users should occur before end-to-end testing
 of the desktop integration, renewal, expiry, disconnect, and permission removal.
-See [CSU onboarding](../../docs/csu_box_onboarding.md) for the per-user checklist
-and the service-before-desktop update order for terminal failure responses.
+See [Administrator onboarding](#administrator-onboarding) for the per-user
+checklist and service-before-desktop update order.
 
 ## Validation
 

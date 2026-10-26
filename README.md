@@ -33,12 +33,38 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 
 ## Installation
 
-These steps set up CA-SSN Field Data Manager from this repository. On macOS,
-the Dock launcher runs this checkout using its `.venv` Python environment.
-Keep both in a permanent location: the launcher depends on them and uses the
-current code each time it starts. Earlier standalone macOS builds bundled their
-own application copy; these instructions describe the current repository and
-Dock launcher setup.
+Choose the packaged hosted prototype or run a source checkout. These use
+separate launchers and connection settings.
+
+### Hosted Box desktop prototype
+
+The packaged **CA-SSN Data Manager** targets Apple Silicon Macs running macOS 14
+or newer. Obtain the prototype ZIP from the project maintainer, extract it, and
+keep the app in `~/Applications/` before adding it to the Dock. Python, Qt,
+certificates, and ExifTool are bundled; users do not need a repository checkout
+for ingest and Box upload. SoundHub audio preparation still needs the external
+FLAC encoder described below.
+
+Open the app, choose UC or CSU, then **Connect to Box** and sign in through the
+browser. Hosted setup supplies project folder IDs without asking users for client
+secrets. Each project retains its own connection, lookup cache, deployment
+history, and staging folder. Close and reopen the app to choose another
+organization. Both pilots currently permit only John; CSU still needs its own
+curated configuration before field use. This is a local prototype, not a signed
+and notarized public download.
+
+Administrators should use the [service onboarding guide](services/box-auth/README.md#administrator-onboarding).
+Developers should use [Build the hosted Mac app](#build-the-hosted-mac-app).
+After installing the source dependencies below, run the same organization selector
+with `.venv/bin/python -m cassn.launcher`.
+
+### Source checkout and Dock launcher
+
+The following steps set up CA-SSN Field Data Manager from this repository.
+Its Dock launcher runs this checkout using its `.venv` Python environment.
+Keep both in a permanent location: the launcher uses the current code each time
+it starts. This launcher is named **CA-SSN Field Data Manager**; it is separate
+from the packaged **CA-SSN Data Manager** above.
 
 ### Prerequisites
 
@@ -96,6 +122,9 @@ sudo apt install flac
 ```
 
 ### Configure Box Connection
+
+This section applies to the source app (`.venv/bin/python -m cassn`) and its
+local OAuth connection. Hosted users use the organization selector above.
 
 Install the pinned dependencies, then launch the app. Click **Connect to Box**
 in the Cloud storage connector, sign in in your browser, and grant access.
@@ -825,11 +854,68 @@ test suite with its Python interpreter and warnings treated as errors:
 .venv/bin/python -m pytest -q -W error
 ```
 
+### Build the hosted Mac app
+
+Build from the repository root on an Apple Silicon Mac, using an arm64 Python
+3.10-or-newer `.venv` created above. The packaged app requires macOS 14 or newer.
+Install the runtime requirements **and** the pinned packaging tools:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt -r packaging/requirements-build.txt
+.venv/bin/python -c 'import platform; print(platform.machine())'  # Must print arm64
+exiftool -ver                                                # Must print 13.55
+```
+
+The builder requires exactly **ExifTool 13.55** on `PATH`, with its Homebrew
+`libexec/lib/perl5` library tree available beside the resolved executable. A
+newer version installed by `brew install exiftool` does not satisfy this pinned
+build check. Arrange that version and layout before building; end users receive
+the bundled copy. macOS `codesign` and `ditto` must also be available.
+
+Quit the installed app, then build:
+
+```bash
+.venv/bin/python utils/build_macos.py
+```
+
+The default unified build writes `dist/unified/CA-SSN Data Manager.app` and
+`dist/unified/CA-SSN-Data-Manager-arm64-prototype.zip`, and **also replaces**
+`~/Applications/CA-SSN Data Manager.app`. Reopen it through the existing Dock icon.
+The builder refuses to replace a running installed app. Build work directories
+under `build/` are reused; this is not a side-effect-free validation command.
+
+For distribution artifacts without changing the installed app:
+
+```bash
+.venv/bin/python utils/build_macos.py --no-install --dist-dir dist/release-candidate
+```
+
+`--dist-dir` only changes the artifact destination; it does **not** disable
+installation. `--install-dir` changes the permanent installation directory.
+`--profile uc` or `--profile csu` builds a dedicated pilot app; the default
+`--profile unified` provides the organization selector.
+
+Builds are ad-hoc signed by default. For a release, install a valid Apple
+Developer ID Application certificate and select it consistently:
+
+```bash
+.venv/bin/python utils/build_macos.py --no-install --signing-identity "Developer ID Application: YOUR ORGANIZATION (TEAMID)"
+```
+
+`CASSN_SIGNING_IDENTITY` can instead supply the certificate name or SHA-1
+fingerprint. An explicit identity must match an installed Developer ID
+certificate; otherwise the builder fails before rebuilding. It verifies the
+bundle signature before archiving. Notarization is a separate release step and
+is not performed by this script. Changing an ad-hoc build can trigger another
+macOS Keychain approval; see [connection recovery](services/box-auth/README.md#macos-keychain-and-release-signing).
+
 ### Project Structure
 
 ```
 cassn-field-data-manager/
 ├── cassn/                            # Application package — run with `python -m cassn`
+│   ├── launcher.py                   # Hosted UC/CSU organization selector
+│   ├── profile.py                    # Per-project hosted configuration
 │   ├── __main__.py                   # Entry point: wires config, lookups, and the GUI together
 │   ├── config.py                     # Paths, thresholds, schema field lists, QC descriptions
 │   ├── lookups.py                    # Lookup-table loaders + LookupTables container
@@ -840,11 +926,14 @@ cassn-field-data-manager/
 │   ├── soundhub/                     # SoundHub FLAC staging, CSV export, S3 upload
 │   └── gui/                          # PySide6 wizard UI
 ├── utils/                            # Standalone CLI tools (see utils/README.md)
+│   ├── build_macos.py                # Bundled hosted Mac app and installation
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
 │   ├── clear_box_verified_staging.py # Box-verified local staging cleanup
 │   ├── install_macos_app.py          # Dock-ready macOS launcher installer
 │   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
-├── assets/                           # Application and macOS launcher icons
+├── packaging/                        # PyInstaller specification and build requirements
+├── services/box-auth/                # Hosted Box OAuth Worker and service tests
+├── assets/                           # Application icons and welcome/workspace artwork
 ├── schemas/                          # Published machine-readable data contracts
 ├── screenshots/                      # Application screenshots for this README
 ├── templates/                        # SoundHub reference workbook
@@ -863,23 +952,8 @@ system credential store. Legacy JSON secrets remain until a successful sign-in
 migrates them. Deployments are staged under
 `~/Desktop/CASSN_field_data_staging/` by default.
 
-## Hosted Box desktop prototype
-
-The unified **CA-SSN Data Manager** opens with a UC/CSU organization selector,
-then **Connect to Box**. Browser sign-in loads the selected project's configuration
-without asking users for secrets or folder IDs. Each project retains its own
-connection, lookup cache, deployment history, and staging folder. Close and reopen
-the app to choose another organization.
-The CSU profile is implemented but waits for its own curated configuration.
-Both pilots currently permit only John. Existing installations retain local OAuth.
-
-See the [authentication service guide](services/box-auth/README.md) for the
-hosted protocol, configuration, and deployment instructions. Build on Apple Silicon with
-`.venv/bin/python utils/build_macos.py`. The unified ZIP is written to `dist/unified/`.
-Each build also updates `~/Applications/CA-SSN Data Manager.app`, the permanent
-location to keep in the Dock. Quit that installed app before rebuilding; reopen
-it afterward using the same Dock icon. Use `--no-install` for distribution-only
-builds or `--install-dir` to choose a different permanent location.
-Use `python -m cassn.launcher` to run the unified launcher from source.
-Public downloads still need
-Apple Developer ID signing and notarization; this is a local prototype.
+Hosted settings and lookup caches instead live below
+`~/.cassn_config/profiles/uc/` or `~/.cassn_config/profiles/csu/`, with default
+staging folders `~/Desktop/UC_CASSN_field_data_staging/` and
+`~/Desktop/CSU_CASSN_field_data_staging/`. Hosted credentials use the system
+credential store too.
