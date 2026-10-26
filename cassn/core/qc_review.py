@@ -7,6 +7,7 @@ Legacy and unknown checks always have a visible diagnostic fallback.
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 
 from cassn.core.classification import format_size_floor
 from cassn.core.quality_control import (
@@ -28,6 +29,47 @@ CHECK_TITLES = {
     "camera_date_review": "Camera dates need review",
     "recording_stop_reason": "Recording stopped early",
 }
+
+
+_OUTSTANDING_TASKS = {
+    "All devices complete": "Complete collection for all devices",
+    "Hash verification passed": "Verify file hashes",
+    "Box upload completed": "Complete the Box upload",
+    "No QC errors recorded": "Review unresolved QC errors",
+    "Camera timezone QC has no errors": "Review camera timezone errors",
+}
+
+
+def checklist_task(label: str) -> str:
+    """Name an unmet requirement as work to do, rather than a completed result."""
+    return _OUTSTANDING_TASKS.get(label, label)
+
+
+def departure_warning_message(labels: list[str]) -> str:
+    tasks = [checklist_task(label) for label in labels]
+    noun = "task" if len(tasks) == 1 else "tasks"
+    return f"Proceeded with {len(tasks)} outstanding {noun}: " + "; ".join(tasks)
+
+
+def _departure_review(entry, diagnostic):
+    message = str(entry.get("message") or "")
+    legacy = re.fullmatch(r"Acknowledged with (\d+) unmet item\(s\): (.+)", message)
+    if legacy:
+        labels = legacy[2].split(", ")
+        if len(labels) == int(legacy[1]):
+            message = departure_warning_message(labels)
+    when = str(entry.get("timestamp") or "").replace("T", " ")
+    level = "error" if entry["severity"] == "error" else "warning"
+    return {
+        "severity": entry["severity"], "title": f"Saved deployment checklist {level}",
+        "affected": "Deployment", "files": [],
+        "action": "Complete any tasks that are still outstanding; this saved warning is not a current completion status.",
+        "message": (f"Saved checklist {level}{(' from ' + when) if when else ''}:\n{message}\n\n"
+                    "This checklist entry records requirements that were still unmet at that time. "
+                    "Acknowledging it does not complete an upload or verify file hashes.\n\n"
+                    "This is a deployment-wide checklist; no individual file list applies."),
+        "technical": diagnostic,
+    }
 
 
 def quantity(count, unit):
@@ -113,6 +155,9 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
         diagnostic = f"{scope} · {entry.get('check', 'QC')}: {entry.get('message', '')}"
         if entry.get("description"):
             diagnostic += f"\nCheck explanation: {entry['description']}"
+        if entry.get("check") == "pre_departure":
+            fallback.append(_departure_review(entry, diagnostic))
+            continue
         issues = entry.get("findings")
         if issues is None:
             issues = _legacy_findings(entry, by_device.get(entry.get("_device", ""), []))

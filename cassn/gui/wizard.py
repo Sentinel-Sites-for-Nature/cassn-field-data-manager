@@ -163,7 +163,9 @@ from cassn.core.quality_control import (
     validate_coordinates,
     validate_datetimes,
 )
-from cassn.core.qc_review import collection_review_findings, small_file_findings
+from cassn.core.qc_review import (
+    checklist_task, collection_review_findings, departure_warning_message, small_file_findings,
+)
 from cassn.gui.qc_review import CollectionReviewDialog
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
@@ -4636,7 +4638,8 @@ class FieldDataWizard(QMainWindow):
         list_widget = QListWidget()
         for it in items:
             icon = "✓" if it["ok"] else "⚠"
-            text = f"{icon}  {it['label']}"
+            label = it["label"] if it["ok"] else checklist_task(it["label"])
+            text = f"{icon}  {label}"
             if it["note"]:
                 text += f"\n     {it['note']}"
             entry = QListWidgetItem(text)
@@ -4666,7 +4669,7 @@ class FieldDataWizard(QMainWindow):
             failed = [it["label"] for it in items if not it["ok"]]
             if failed:
                 append_qc_report(self.current_deployment_folder, "pre_departure", "", "warning",
-                                 f"Acknowledged with {len(failed)} unmet item(s): {', '.join(failed)}")
+                                 departure_warning_message(failed))
             else:
                 append_qc_report(self.current_deployment_folder, "pre_departure", "", "pass",
                                  "All pre-departure items satisfied")

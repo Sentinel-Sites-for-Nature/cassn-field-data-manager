@@ -2,7 +2,7 @@
 import json
 
 from cassn.core.image_metadata import CAMERA_TIMESTAMP_SOURCE
-from cassn.core.qc_review import collection_review_findings, small_file_findings
+from cassn.core.qc_review import collection_review_findings, departure_warning_message, small_file_findings
 from cassn.core.quality_control import (
     append_qc_report, check_camera_serial, check_camera_timezones, check_sequence_integrity,
 )
@@ -131,6 +131,28 @@ def test_legacy_error_is_not_downgraded_by_new_inventory_interpretation():
     finding, = collection_review_findings([entry], [row])
     assert finding["severity"] == "error"
     assert "Historical error requires separate correction" in finding["message"]
+
+
+def test_saved_departure_warning_names_pending_tasks_without_changing_history():
+    entry = {"check": "pre_departure", "severity": "warning", "timestamp": "2026-10-25T09:35:31",
+             "message": "Acknowledged with 2 unmet item(s): Hash verification passed, Box upload completed"}
+    before = json.dumps(entry)
+    finding, = collection_review_findings([entry], [])
+    assert "Verify file hashes; Complete the Box upload" in finding["message"]
+    assert "2026-10-25 09:35:31" in finding["message"]
+    assert "no individual file list applies" in finding["message"]
+    assert "not retained" not in finding["message"]
+    assert finding["files"] == [] and finding["severity"] == "warning"
+    assert entry["message"] in finding["technical"]
+    assert json.dumps(entry) == before
+
+
+def test_new_departure_message_stays_outstanding_when_reopened():
+    message = departure_warning_message(["Hash verification passed", "Box upload completed"])
+    assert message == "Proceeded with 2 outstanding tasks: Verify file hashes; Complete the Box upload"
+    finding, = collection_review_findings([{"check": "pre_departure", "severity": "warning", "message": message}], [])
+    assert message in finding["message"] and finding["severity"] == "warning"
+    assert "does not complete an upload" in finding["message"]
 
 
 def test_all_burst_findings_and_observed_file_context_survive_report_reload(tmp_path):

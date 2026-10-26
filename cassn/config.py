@@ -313,8 +313,9 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "files are flagged so they can be repaired before being silently lost."
     ),
     "pre_departure": (
-        "Aggregate readiness check before closing or switching deployments: all devices "
-        "complete, fixity check run, Box upload done, no QC errors."
+        "Saved checklist before closing or switching deployments: collection, hash "
+        "verification, Box upload and QC status. An acknowledged warning records "
+        "outstanding requirements at that time; it does not confirm completion."
     ),
     "lookup_snapshot": (
         "Lookup/config snapshot: copies the currently loaded lookup tables into "
