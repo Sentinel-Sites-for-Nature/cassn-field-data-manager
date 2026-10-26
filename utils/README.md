@@ -85,14 +85,23 @@ only the safe events with:
 cassn-clear-staging --apply
 ```
 
-Use `--force` for an explicit **unverified deletion**. It bypasses all data
-and Box checks, including missing media, mismatched metadata, unfinished
+Use `--force` for an explicit **unverified deletion**. It bypasses ordinary data
+and Box verification, including missing media, mismatched metadata, unfinished
 collection, missing session records, and unavailable Box credentials. It does
-not contact Box. `--apply` is still required for deletion:
+not contact Box. `--apply` is still required for deletion.
+
+Both modes still block deletion for saved `ingest_safety` or `card_ingest`
+errors, unreadable ingest-hold evidence, and an existing Box publication record
+that is unreadable or not marked `published`. Unfinished collection alone can
+be bypassed; a saved ingest error cannot. Preserve the source card, staged
+files, QC records and publication journals for review. Do not remove or edit
+those records to bypass a hold.
+
+After reviewing the preview's targets and `BLOCKED` results:
 
 ```bash
 cassn-clear-staging --force          # Preview
-cassn-clear-staging --force --apply  # Delete listed events without verification
+cassn-clear-staging --force --apply  # Delete only unblocked events, without Box/data verification
 ```
 
 Without `--force`, an event is blocked unless device collection is complete, all metadata rows are

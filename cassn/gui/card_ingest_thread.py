@@ -275,4 +275,13 @@ class CardIngestThread(QThread):
             if reconyx is not None:
                 reconyx.close()
             context.release_uncommitted_hashes()
+        try:
+            append_qc_report(
+                self.deployment_folder, "card_ingest", self.device_label,
+                "pass" if result.get("ok") else "error",
+                "Card ingest completed." if result.get("ok") else result.get("error", "Ingest incomplete"),
+            )
+        except Exception as exc:
+            result["ok"] = False
+            result["error"] = f"{result.get('error', 'Ingest stopped')}; could not save ingest report: {exc}"
         self.completed.emit(self.device_label, result)

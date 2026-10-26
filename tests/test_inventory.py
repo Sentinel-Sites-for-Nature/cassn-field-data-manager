@@ -299,7 +299,7 @@ def test_find_sessions_sorts_mixed_timezone_timestamp_styles(tmp_path):
     ]
 
 
-def test_reconcile_device_dir_removes_only_orphans(tmp_path):
+def test_reconcile_device_dir_preserves_unknown_files(tmp_path):
     dev = tmp_path / "p2_ML"
     dev.mkdir()
     # Two files the inventory knows about (from the last persisted save)...
@@ -326,6 +326,8 @@ def test_reconcile_device_dir_removes_only_orphans(tmp_path):
     ]
     survivors = {p.name for p in dev.iterdir()}
     assert survivors == {
+        "UC_S_plot2_ML_20260609_00002_1.jpg",
+        "UC_S_plot2_ML_20260609_00002_2.jpg",
         "UC_S_plot2_ML_20260609_00001_1.jpg",
         "UC_S_plot2_ML_20260609_00001_2.jpg",
         "p2_ML_manifest.json",
@@ -378,3 +380,38 @@ def test_refresh_legacy_manifest_updates_existing_file(tmp_path):
         "sha256": "sha256-value",
         "sha1": "sha1-value",
     }]
+
+
+def test_plain_sequence_recovers_six_digits_without_config_or_burst_suffixes():
+    rows = [
+        {"device_label": "p1_BD", "new_filename": "UC_Test_BD_20260101_100000.wav"},
+        {"device_label": "p1_BD", "new_filename": "UC_Test_BD_20260101_CONFIG_999999.txt"},
+        {"device_label": "p1_BD", "new_filename": "UC_Test_BD_20260101_999999_2.jpg"},
+        {"device_label": "p2_BD", "new_filename": "UC_Test_BD_20260101_200000.wav"},
+    ]
+    assert next_plain_file_sequence(rows, "p1_BD") == 100001
+
+
+def test_unknown_file_in_split_folder_is_preserved(tmp_path):
+    part = tmp_path / "p1_ML" / "p1_ML_1"
+    part.mkdir(parents=True)
+    unknown = part / "unrecorded.jpg"
+    unknown.write_bytes(b"only surviving copy")
+    assert reconcile_device_dir(part.parent, [], "p1_ML") == ["p1_ML_1/unrecorded.jpg"]
+    assert unknown.read_bytes() == b"only surviving copy"
+
+
+@pytest.mark.parametrize("payload,status", [({"schema_version": 99}, "unsupported"),
+                                            ([], "corrupted")])
+def test_invalid_session_is_visible_and_original_is_preserved(tmp_path, payload, status):
+    event = tmp_path / "event"
+    event.mkdir()
+    session = event / "session.json"
+    original = json.dumps(payload)
+    session.write_text(original)
+    found = find_all_sessions(tmp_path)
+    assert len(found) == 1
+    assert found[0]["status"] == status
+    assert found[0]["data"] is None
+    assert found[0]["error_msg"]
+    assert session.read_text() == original

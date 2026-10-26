@@ -228,3 +228,19 @@ def test_active_box_operation_prevents_switch_reset_and_close(monkeypatch):
     FieldDataWizard.closeEvent(context, event)
     event.ignore.assert_called_once()
     event.accept.assert_not_called()
+
+
+def test_ingest_hold_blocks_upload_before_authentication(tmp_path, monkeypatch):
+    from cassn.box import threads
+    from cassn.core.quality_control import append_qc_report
+    append_qc_report(tmp_path, "ingest_safety", "p1_ML", "error", "Original source needs review")
+    authenticate = MagicMock(side_effect=AssertionError("Must stop before Box access"))
+    monkeypatch.setattr(threads, "get_box_client", authenticate)
+    worker = threads.BoxUploadThread(tmp_path, {}, box_config={}, valid_site_names=set())
+    outcomes = []
+    worker.finished.connect(lambda ok, message: outcomes.append((ok, message)))
+    worker.run()
+    authenticate.assert_not_called()
+    assert len(outcomes) == 1
+    assert outcomes[0][0] is False
+    assert "Original source needs review" in outcomes[0][1]

@@ -25,7 +25,7 @@ A Python desktop application for downloading, uploading, and managing wildlife i
 - **Wildlife Insights Image Batching**: At camera ingest completion, folders above 15,000 images are silently organized into verified, burst-preserving numbered parts, ready for direct local upload to WI. Interrupted preparation is resumable.
 - **SoundHub-Ready Audio Metadata**: Projects `audio_file_metadata.csv` into SoundHub deployment and recording CSVs with the required field names and units, including gain, filter cutoff (kHz), recording schedule, and ARU hardware setup.
 - **Wildlife SoundHub Submission**: Bird audio is transcoded to lossless FLAC into a local tree mirroring SoundHub's S3 bucket, with `deployment.csv` and `recording.csv` projected from `audio_file_metadata.csv`, then uploaded and verified. Box keeps the original WAVs untouched. See the Wildlife SoundHub Preparation section.
-- **Session Persistence**: Interrupted downloads resume automatically. Concurrent workers checkpoint through one session writer; previously copied files are skipped and sequence/event numbering continues correctly.
+- **Session Persistence**: Concurrent workers save progress through one session writer. Resume verifies retained source evidence and both source/staged checksums; missing or incomplete known copies can be restored. Unrecognized files and ambiguous acquisitions stop for review and are preserved.
 - **Immutable NDP Source Versioning**: OSDF object paths are never reused. Media
   corrections are versioned per logical file, while deployment inventories and
   manifests advance together and are published only after verified transfer.
@@ -286,6 +286,26 @@ be brought forward through the Python icon in the Dock or Mission Control.
   - **QC Checks** — Box verification, Box↔local hashes, camera timezone checks
   - **Deployment** — open either staging folder, switch deployment, start a new one
 - Start new deployment or exit
+
+Later uploads to the same Box event preserve accumulated metadata from earlier
+batches. Conflicting identities or concurrent edits stop publication for review.
+Existing Box metadata owns earlier rows, corrections, notes, submission history
+and unknown columns. New rows are added; a retry cannot reset an existing row.
+The provenance pass advances only the Box-upload fields for this batch.
+
+Upload attempts retain local source versions, proposed metadata and a journal
+under `qc/box_publications/<attempt-id>/`. Pending or uncertain publication
+blocks completion and cleanup, including forced cleanup. Rerun the normal upload
+to rebuild the merge. A partial write can resume automatically only when its
+journal proves the same batch, verified media and unchanged source/candidate
+versions. Otherwise retain staging and the journal for review; do not delete
+the state marker to bypass the hold. Several Box metadata files are not one
+atomic transaction, and older application versions remain unsafe writers.
+
+New batch evidence is preserved on Box under `qc/box_batches/<attempt-id>/`.
+Verification distinguishes this batch from recorded earlier files. Cleanup
+checks that accumulated Box metadata covers the local batch; it still requires
+successful publication, passing verification and the existing deletion guards.
 
 ### Screenshots
 
@@ -754,9 +774,10 @@ opened or changed to build the summary.
 
 | Check (qc_report key) | Description | When it runs | Where it's reported |
 |---|---|---|---|
-| `hash_verification` | SHA-256 and SHA-1 are computed at the source, then again at the destination after copy. Mismatch aborts the file and removes the destination. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
+| `hash_verification` | SHA-256 and SHA-1 are computed at the source, then again at the destination after copy. Mismatch aborts the file and removes only the current attempt's temporary copy. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
 | `file_size_floor` | Flags copied media files below device-aware floors: images under 500 KB, bird AudioMoth WAVs (`BD`) under 1 GB, and bat AudioMoth WAVs (`BT`) under 500 KB. Config `.txt` files are excluded. | Automatic, every SD card copy (per file) | Log panel + warning summary at device completion; entry per device in `qc_report.json` |
-| `duplicate_detection` | Session-wide set of SHA-256 hashes. New file whose hash matches one already in inventory is deleted and skipped. | Automatic, every SD card copy (per file) | Log panel + per-duplicate entry plus a per-device aggregate in `qc_report.json` |
+| `ingest_safety` | Preserves unrecorded staged files; blocks changed/missing source evidence, destination collisions, and equal-byte acquisitions that cannot be established as a retained-source retry. Equal hashes alone do not establish the same acquisition. | Before and during card ingest | Saved error in `qc_report.json`, card panel and dialog; blocks affected completion, upload and cleanup until reviewed recovery |
+| `card_ingest` | Retains each card attempt's success, cancellation or failure, including its original error. A successful retry clears this attempt error while keeping history; it cannot clear an `ingest_safety` hold. | Card worker completion | Card panel and reopenable QC report |
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
 | `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
@@ -810,7 +831,9 @@ redundant sidecar; existing files are preserved for compatibility.
 
 A few cross-cutting behaviors that aren't single QC checks but support them:
 
-- **Resume mid-deployment.** During copying, inventory checkpoints are saved to local `session.json` about every 30 seconds and at card completion. If the SD card disconnects or the app crashes, "Open Deployment" restores the saved session and resumes by source-relative file path. Already-inventoried files are skipped when their staged copies exist and match the recorded size when available; missing or size-inconsistent copies are restored. This resume check does not re-hash every existing copy.
+- **Resume mid-deployment.** Inventory checkpoints are saved to local `session.json` during copying and at card completion. New rows retain the original source path, filesystem device/inode, size and modification time as retry evidence. Resume compares that evidence and reads both source checksums before reusing a record, then checks the staged bytes too. Missing or truncated known copies can be restored from the verified retained source. Cards must be inactive while reading; timestamps and checksums cannot establish a live snapshot or scientific attribution. Older rows without this evidence, or a source whose mount/path/identity has changed, require reviewed recovery instead of automatic skipping. This is deliberately conservative and increases resume read time.
+- **Ingest review holds.** Files missing from the session are preserved, including files in split folders. Equal-byte files from another source, multiple CONFIGs claiming one name, and burst-name collisions stop the affected acquisition. Keep the source card. The full error is retained in `qc/qc_report.json` and can be reopened through QC Checks. Safety holds remain until a reviewed recovery reconciles the files and records a resolution; retrying or dismissing a dialog does not clear them. Other devices can continue, but the affected event cannot upload or be cleaned up (including forced cleanup). No automatic identity-repair tool is included in this change.
+- **Session compatibility.** Unsupported session versions remain visible in Open Deployment with an explanation; FDM does not open or overwrite them. Interrupted temporary files are preserved unless created and owned by the current copy attempt. Plain filename counters recover all emitted widths, including values above 99,999.
 - **Resume WI preparation.** Each image move is atomic. If preparation is cancelled, completed moves remain in place and their exact nested paths are saved in `session.json`; retrying the card ingest finishes the remaining moves. After a crash, actual image locations are recovered before copying resumes. Older sessions can also resume preparation through the first-upload fallback. Ingest completion and Box upload require successful preparation and saved inventory paths.
 - **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.
 - **Filename collision safety.** File reconciliation and fixity checks key by the complete deployment-relative storage path, not filename alone. This distinguishes both devices and numbered WI split folders. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.

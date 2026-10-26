@@ -5,7 +5,8 @@ at ingest with the SHA-1 values Box computes from stored bytes.  It never
 downloads Box media and never re-hashes local media.  A deployment is eligible
 only after the normal application workflow has completed and written a passing
 ``qc/box_upload_verification.json`` artifact. Explicit force bypasses data
-verification while retaining local deletion boundaries and change detection.
+verification while retaining saved ingest/publication holds, local deletion
+boundaries and change detection. Unreadable hold/publication evidence blocks cleanup.
 """
 
 from __future__ import annotations
@@ -19,8 +20,12 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
-from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box
+from cassn.box.publication import STATE_PATH, batch_remote_path, require_publication_complete
+from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths
+from cassn.box.metadata_merge import CSV_NAMES, merge_csv, merge_event, read_csv, read_object
+from cassn.box.metadata_store import BoxFileStore
 from cassn.config import CONFIG_JSON
 from cassn.core.classification import sanitize_box_folder_name
 from cassn.core.hashing import sha1 as compute_file_sha1
@@ -288,6 +293,12 @@ def inspect_deployment_for_cleanup(
     if not deployment.is_dir():
         plan.reasons.append("deployment target is not a directory")
         return plan
+    try:
+        require_no_ingest_holds(deployment)
+        require_publication_complete(deployment)
+    except ValueError as exc:
+        plan.reasons.append(str(exc))
+        return plan
     if force:
         plan.event_signature, errors = _event_signature(deployment)
         plan.reasons.extend(errors)
@@ -449,17 +460,36 @@ def inspect_deployment_for_cleanup(
         plan.reasons.append(str(exc))
         return plan
 
+    publication_state = deployment / STATE_PATH
+    batch_id = ""
+    if publication_state.exists():
+        state = read_object(publication_state.read_bytes())
+        batch_id = str(state.get("batch_attempt_id") or "")
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}_[0-9a-f]{32}", batch_id):
+            plan.reasons.append("publication record has no valid batch archive identity")
+            return plan
+    def remote_path(relative):
+        return batch_remote_path(Path(relative), batch_id).as_posix() if batch_id else relative
+
     expected_on_box = (local_uploadable | expected_raw) - _LOCAL_ONLY_AFTER_UPLOAD
-    missing_box = sorted(expected_on_box - set(box_hashes))
+    missing_box = sorted(remote_path(p) for p in expected_on_box if remote_path(p) not in box_hashes)
     if missing_box:
         plan.reasons.append(
             f"{len(missing_box)} required file(s) are missing from Box: "
             f"{_path_examples(missing_box)}"
         )
 
+    archive_paths = set()
+    if batch_id:
+        try:
+            archive_paths, archive_issues = recorded_archive_paths(storage, plan.box_folder_id, box_hashes)
+            if archive_issues:
+                plan.reasons.append(f"archive metadata has {len(archive_issues)} unverified row(s)")
+        except Exception as exc:
+            plan.reasons.append(f"cannot verify accumulated metadata: {exc}")
     unexpected_box_raw = sorted(
         path
-        for path in (set(box_hashes) - expected_raw)
+        for path in (set(box_hashes) - expected_raw - archive_paths)
         if path.startswith("raw_data/") and is_orphan_on_box(path)
     )
     if unexpected_box_raw:
@@ -478,7 +508,7 @@ def inspect_deployment_for_cleanup(
             plan.reasons.append(f"Box SHA-1 does not match ingest SHA-1: {relative}")
 
     for relative in sorted(_EXACT_SMALL_SIDECARS & expected_on_box):
-        box_hash = box_hashes.get(relative)
+        box_hash = box_hashes.get(remote_path(relative))
         if box_hash is None:
             continue
         if not box_hash:
@@ -486,6 +516,32 @@ def inspect_deployment_for_cleanup(
             continue
         local_hash = compute_file_sha1(deployment.joinpath(*relative.split("/")))
         if box_hash != local_hash:
+            if batch_id and relative in (*CSV_NAMES, "deployment_event_record.json"):
+                try:
+                    file_id = storage.folder_file_map(plan.box_folder_id)[relative]
+                    store = BoxFileStore(storage.client)
+                    ref = store.snapshot(file_id)
+                    box_bytes = store.read(ref)
+                    local_bytes = deployment.joinpath(relative).read_bytes()
+                    if relative in CSV_NAMES:
+                        remote_fields, remote_rows = read_csv(box_bytes)
+                        if read_csv(merge_csv(box_bytes, local_bytes)) != (remote_fields, remote_rows):
+                            raise ValueError("Box metadata does not cover this batch")
+                        rows_by_key = {(r["deployment_id"], r["filename"]): r for r in remote_rows}
+                        for row in read_csv(local_bytes)[1]:
+                            if not _truthy(rows_by_key[(row["deployment_id"], row["filename"])].get("is_uploaded_to_box")):
+                                raise ValueError("Box row is not stamped uploaded")
+                    else:
+                        record = read_object(box_bytes)
+                        if record.get("file_count") != len(archive_paths):
+                            raise ValueError("event count does not match verified archive metadata")
+                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"])) != record:
+                            raise ValueError("Box event does not cover this batch")
+                    store.assert_unchanged(ref)
+                    continue
+                except Exception as exc:
+                    plan.reasons.append(f"cannot verify accumulated {relative}: {exc}")
+                continue
             if relative == "audio_file_metadata.csv":
                 try:
                     file_id = storage.folder_file_map(plan.box_folder_id)[relative]

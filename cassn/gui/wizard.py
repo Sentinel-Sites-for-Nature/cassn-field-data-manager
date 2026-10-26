@@ -122,6 +122,9 @@ from cassn.core.image_metadata import (
     extract_reconyx_sequence,
 )
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
+from cassn.core.ingest_safety import (
+    hold_ingest, source_evidence, require_no_ingest_holds,
+)
 from cassn.core.file_transfer import (
     FileTransferError,
     copy_file_single_read_verified,
@@ -504,6 +507,8 @@ class FieldDataWizard(QMainWindow):
                 start = meta.get("deployment_event_start_date", "?")
                 end = meta.get("deployment_event_end_date", "?")
                 label = f"✓  {site_name}  |  {start} → {end}  |  {completed}/{total} devices done"
+            elif s["status"] == "unsupported":
+                label = f"⚠  UNSUPPORTED — {s['path'].parent.name} ({s['error_msg']})"
             else:
                 folder_name = s["path"].parent.name
                 label = f"⚠  CORRUPTED — {folder_name}  (truncated file, may be repairable)"
@@ -529,6 +534,10 @@ class FieldDataWizard(QMainWindow):
             return
         chosen = selected.data(Qt.UserRole)
 
+        if chosen["status"] == "unsupported":
+            QMessageBox.warning(self, "Unsupported Session",
+                                f"{chosen['path']}\n\n{chosen['error_msg']}")
+            return
         if chosen["status"] == "corrupted":
             QMessageBox.warning(
                 self,
@@ -2348,15 +2357,14 @@ class FieldDataWizard(QMainWindow):
         hash_mismatch_names: list[str] = []
         duplicate_names: list[str] = []
 
-        # Reconcile disk against the persisted inventory before resuming: a crash
-        # between the 30s session flushes can leave files staged on disk that
-        # aren't in file_inventory. Left in place, their source would be re-copied
-        # under fresh event numbers, stranding the first copies as orphans and
-        # gapping the event sequence. Deleting them makes the inventory
-        # authoritative so the re-copy below stays contiguous.
-        orphans = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
-        if orphans:
-            self.log(f"  Removed {len(orphans)} orphaned file(s) from {device_label} left by a prior interrupted copy.")
+        require_no_ingest_holds(self.current_deployment_folder, device=device_label,
+                                checks={"ingest_safety"})
+        unknown = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
+        if unknown:
+            hold_ingest(self.current_deployment_folder, device_label,
+                        f"{len(unknown)} unrecorded staged file(s) preserved in {dest_dir}. "
+                        f"Examples: {unknown[:10]}. "
+                        "Recover their inventory before retrying; do not erase the source card.")
 
         # Resume support is keyed by source-relative identity. Existing records
         # whose staged file is missing or size-inconsistent are restored to their
@@ -2445,8 +2453,19 @@ class FieldDataWizard(QMainWindow):
                 # a missing/truncated one is restored to the exact path already in
                 # the inventory and verified against its recorded hashes.
                 source_relpath = str(source_path.relative_to(source_dir))
+                evidence = source_evidence(source_path)
                 prior_entry = inventoried_sources.get(source_relpath)
                 if prior_entry is not None:
+                    incoming = hash_file_with_retries(source_path)
+                    if (prior_entry.get("deployment_id") != deployment_id
+                            or prior_entry.get("source_evidence") != evidence
+                            or source_evidence(source_path) != evidence
+                            or incoming.sha256 != prior_entry.get("file_hash_sha256")
+                            or incoming.sha1 != prior_entry.get("file_hash_sha1")):
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Cannot establish a retained-source retry for {source_path}. "
+                                    "Source evidence is missing or changed. Existing staged bytes were preserved; "
+                                    "review this acquisition before retrying.")
                     # Replay the saved burst identity before either resume path
                     # continues, so a new frame can finish the same event.
                     if (
@@ -2464,6 +2483,11 @@ class FieldDataWizard(QMainWindow):
                         and (not expected_size or prior_dest.stat().st_size == expected_size)
                     )
                     if staged_is_complete:
+                        staged_hashes = hash_file_with_retries(prior_dest)
+                        if (staged_hashes.sha256 != incoming.sha256
+                                or staged_hashes.sha1 != incoming.sha1):
+                            hold_ingest(self.current_deployment_folder, device_label,
+                                        f"Staged bytes conflict with inventory at {prior_dest}; preserved for review.")
                         if (
                             file_type == "audio"
                             and refresh_audiomoth_inventory_metadata(
@@ -2573,21 +2597,10 @@ class FieldDataWizard(QMainWindow):
                         source_hash = copy_result.sha256
                         source_sha1 = copy_result.sha1
                         if not copy_result.accepted:
-                            self.log(
-                                f"  Warning: duplicate file skipped — {new_filename} "
-                                "matches an already-inventoried file"
-                            )
-                            duplicate_count += 1
-                            duplicate_names.append(new_filename)
-                            self._append_ingest_qc(
-                                self.current_deployment_folder,
-                                "duplicate_detection",
-                                device_label,
-                                "warning",
-                                f"Duplicate hash: {new_filename} matches an "
-                                "already-inventoried file",
-                            )
-                            continue
+                            hold_ingest(self.current_deployment_folder, device_label,
+                                        f"Equal-byte acquisition requires review: {source_path} "
+                                        f"(SHA-256 {source_hash}). Source retained; this file was not accepted. "
+                                        "Do not erase the card or mark this acquisition complete.")
                         hash_reserved = file_type != "config"
                         if copy_result.attempts > 1:
                             self.log(
@@ -2608,47 +2621,17 @@ class FieldDataWizard(QMainWindow):
                             source_hash, file_type
                         )
                     if prior_at_destination is not None and not hash_reserved:
-                        self.log(
-                            f"  Warning: duplicate file skipped — {new_filename} "
-                            "matches an already-inventoried file"
-                        )
-                        duplicate_count += 1
-                        duplicate_names.append(new_filename)
-                        self._append_ingest_qc(
-                            self.current_deployment_folder,
-                            "duplicate_detection",
-                            device_label,
-                            "warning",
-                            f"Duplicate hash: {new_filename} matches an "
-                            "already-inventoried file",
-                        )
-                        continue
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Equal-byte acquisition requires review: {source_path} "
+                                    f"(SHA-256 {source_hash}); source and existing destination retained.")
 
                     if prior_at_destination is not None:
-                        if prior_at_destination.get("file_hash_sha256") == source_hash:
-                            expected_size = int(
-                                prior_at_destination.get("file_size_bytes", 0) or 0
-                            )
-                            if (
-                                not dest_path.is_file()
-                                or (expected_size and dest_path.stat().st_size != expected_size)
-                            ):
-                                copy_file_verified(
-                                    source_path,
-                                    dest_path,
-                                    expected_sha256=source_hash,
-                                    expected_sha1=source_sha1,
-                                )
-                            self.log(
-                                f"  Already inventoried at {relative_dest}; "
-                                "not creating a duplicate record."
-                            )
-                            self._release_ingest_hash(source_hash, file_type)
-                            continue
-                        raise ValueError(
-                            f"Refusing to overwrite inventory-owned destination: "
-                            f"{relative_dest}"
-                        )
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Destination collision at {relative_dest} for {source_path}; "
+                                    "existing bytes and source preserved. Review CONFIG/burst/source identity.")
+                    if source_evidence(source_path) != evidence:
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Source changed while reading {source_path}; staged copy preserved for review.")
                 except FileTransferError as exc:
                     if hash_reserved:
                         self._release_ingest_hash(source_hash, file_type)
@@ -2746,6 +2729,7 @@ class FieldDataWizard(QMainWindow):
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
+                file_info["source_evidence"] = evidence
                 self.file_inventory.append(file_info)
                 inventoried_sources[source_relpath] = file_info
                 inventoried_storage[file_info["storage_relpath"]] = file_info
@@ -3367,6 +3351,12 @@ class FieldDataWizard(QMainWindow):
         if not self._ensure_camera_dates_reviewed():
             return
 
+        try:
+            require_no_ingest_holds(self.current_deployment_folder)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Ingest Review Required", str(exc))
+            return
+
         # Hold through callbacks between preparation, upload, and verification.
         self._box_operation_token = object()
         self._box_operation_active = True
@@ -3558,10 +3548,11 @@ class FieldDataWizard(QMainWindow):
             self.upload_progress_bar.setValue(100)
             self.upload_status_label.setText(f"✓ {message}")
             self.upload_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.box_upload_complete = True
+            self.box_upload_complete = False  # Provenance publication is still pending.
             # Update provenance in both metadata CSVs
             self._write_upload_provenance()
         else:
+            self.box_upload_complete = False
             self.open_btn.setEnabled(True)
             self.switch_deployment_btn.setEnabled(True)
             self.exit_btn.setEnabled(True)
@@ -3583,6 +3574,7 @@ class FieldDataWizard(QMainWindow):
         observer = self.metadata.get("observer", "")
         upload_dt = datetime.now(timezone.utc).isoformat()
         updated_paths = []
+        from cassn.box.metadata_merge import stamp_box_provenance
 
         for csv_path, fields in [
             (self.current_deployment_folder / "image_file_metadata.csv", IMAGE_FIELDS),
@@ -3591,20 +3583,14 @@ class FieldDataWizard(QMainWindow):
             if not csv_path.exists():
                 continue
             try:
-                with open(csv_path, newline="", encoding="utf-8") as f:
-                    rows = list(csv.DictReader(f))
-                for row in rows:
-                    row["is_uploaded_to_box"] = True
-                    row["box_uploader"] = observer
-                    row["box_upload_datetime"] = upload_dt
-                with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(rows)
+                stamp_box_provenance(csv_path, observer, upload_dt)
                 self.log(f"Updated provenance locally: {csv_path.name}")
                 updated_paths.append(csv_path)
             except Exception as e:
-                self.log(f"Warning: could not update provenance in {csv_path.name}: {e}")
+                self._post_upload_box_summary = "Provenance stamping failed"
+                self._post_upload_box_issues = []
+                self._finish_post_upload_verification(False, f"Could not stamp {csv_path.name}: {e}", [])
+                return
 
         # Re-upload the provenance-stamped CSVs to the same Box folder
         deploy_folder_id = self.upload_thread.deploy_folder_id if self.upload_thread else None
@@ -3615,8 +3601,9 @@ class FieldDataWizard(QMainWindow):
             self.provenance_thread.finished.connect(self._on_provenance_upload_finished)
             FieldDataWizard._start_owned_box_worker(self, self.provenance_thread)
         elif updated_paths:
-            self.log("Warning: deploy_folder_id not available — provenance CSVs updated locally only")
-            self._start_post_upload_verification()
+            self._post_upload_box_summary = "Provenance publication was not run"
+            self._post_upload_box_issues = []
+            self._finish_post_upload_verification(False, "Box destination unavailable for provenance publication", [])
         else:
             self._start_post_upload_verification()
 
@@ -3627,7 +3614,11 @@ class FieldDataWizard(QMainWindow):
         if success:
             self.log(f"✓ {message}")
         else:
-            self.log(f"Warning: {message}")
+            self.box_upload_complete = False
+            self._post_upload_box_summary = "Provenance publication failed"
+            self._post_upload_box_issues = []
+            self._finish_post_upload_verification(False, message, [])
+            return
         self._start_post_upload_verification()
 
     def _start_post_upload_verification(self):
@@ -3756,7 +3747,15 @@ class FieldDataWizard(QMainWindow):
         box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
         box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
         has_box_warning = bool(box_extra)
-        all_ok = hash_ok and not box_missing and not box_extra and not hash_issues
+        all_ok = hash_ok and not self._post_upload_box_issues and not hash_issues
+        if all_ok and self.current_deployment_folder:
+            from cassn.box.publication import require_publication_complete
+            try:
+                require_publication_complete(self.current_deployment_folder)
+            except ValueError as exc:
+                all_ok = hash_ok = False
+                hash_summary = f"Metadata publication remains unresolved: {exc}"
+        self.box_upload_complete = all_ok
 
         # Persist the verification result as an audit artifact (previously this
         # file was referenced by the readiness check but never actually written).
@@ -3771,8 +3770,10 @@ class FieldDataWizard(QMainWindow):
             qc_path_for(self.current_deployment_folder, "box_upload_verification.json").write_text(
                 json.dumps(record, indent=2)
             )
-        except Exception:
-            pass  # never block the UI on writing the audit artifact
+        except Exception as exc:
+            all_ok = False
+            self.box_upload_complete = False
+            hash_summary += f" Verification evidence could not be saved: {exc}"
 
         self.open_btn.setEnabled(True)
         self.switch_deployment_btn.setEnabled(True)
@@ -3826,6 +3827,9 @@ class FieldDataWizard(QMainWindow):
         hash_mismatches = [i for i in hash_issues if i["type"] == "mismatch"]
         hash_missing = [i for i in hash_issues if i["type"] == "missing"]
         hash_unavailable = [i for i in hash_issues if i["type"] == "box_hash_unavailable"]
+        archive_issues = [i for i in self._post_upload_box_issues
+                          if i["type"] == "archive_metadata_unverified"]
+        missing_local = [i for i in hash_issues if i["type"] == "missing_local"]
 
         if box_missing:
             lines.append(f"FILES IN INVENTORY BUT MISSING FROM BOX ({len(box_missing)}):")
@@ -3850,6 +3854,12 @@ class FieldDataWizard(QMainWindow):
                 lines.append("")
             lines.append(f"BOX HASHES UNAVAILABLE ({len(hash_unavailable)}):")
             lines.extend(f"  ✗ {m['filename']}" for m in hash_unavailable[:100])
+        if archive_issues:
+            lines.append("ARCHIVE METADATA NEEDS REVIEW (missing, ambiguous, or changed Box file):")
+            lines.extend(f"  ✗ {m['filename']}" for m in archive_issues[:100])
+        if missing_local:
+            lines.append("INVENTORIED FILES MISSING LOCALLY:")
+            lines.extend(f"  ✗ {m['filename']}" for m in missing_local[:100])
         return "\n".join(lines)
 
     def _run_device_qc_checks(self, device_entries: list, device_label: str):

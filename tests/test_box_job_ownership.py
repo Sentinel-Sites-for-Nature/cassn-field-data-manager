@@ -192,7 +192,7 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
 def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
     app, context, qc = setup
     path = context.current_deployment_folder / 'image_file_metadata.csv'
-    path.write_text('filename\nimage.jpg\n')
+    path.write_text('deployment_id,filename,file_hash_sha256\nd1,image.jpg,' + 'a' * 64 + '\n')
 
     class ProvenanceWorker(Worker):
         def __init__(self, paths, folder_id, **kwargs):
@@ -211,9 +211,11 @@ def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
     assert provenance.started and context._box_operation_active
     assert context.box_verify_thread is None
     provenance.upload.emit(False, 'synthetic provenance upload failure')
-    assert context.box_verify_thread.started and context._box_operation_active
-    context.box_verify_thread.result.emit(False, 'synthetic list check failure', [])
+    assert context.box_verify_thread is None
     assert not context._box_operation_active
+    assert not context.box_upload_complete
+    import json
+    assert json.loads((context.current_deployment_folder / 'qc/box_upload_verification.json').read_text())['verified'] is False
     assert context.fixity_thread is None
     assert all(call.args[0] == context.current_deployment_folder for call in qc.call_args_list)
 

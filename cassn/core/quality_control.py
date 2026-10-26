@@ -216,7 +216,7 @@ def build_box_verification_record(
     """
     box_missing = [i for i in box_issues if i.get("type") == "missing_from_box"]
     box_extra = [i for i in box_issues if i.get("type") == "extra_on_box"]
-    verified = hash_ok and not box_missing and not box_extra and not hash_issues
+    verified = hash_ok and not box_issues and not hash_issues
     return {
         "verified_at": verified_at or datetime.now().isoformat(timespec="seconds"),
         "verified": verified,
@@ -224,6 +224,8 @@ def build_box_verification_record(
             "summary": box_summary,
             "missing_from_box": [i.get("filename", "") for i in box_missing],
             "extra_on_box": [i.get("filename", "") for i in box_extra],
+            "archive_metadata_issues": [i for i in box_issues
+                                        if i.get("type") == "archive_metadata_unverified"],
         },
         "hash_verification": {
             "ok": hash_ok,

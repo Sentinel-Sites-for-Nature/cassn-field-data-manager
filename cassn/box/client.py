@@ -16,9 +16,8 @@ own ``while True: ... offset += 1000`` paginator, and they had already drifted
   reference**, so an upload that adds a file to a folder updates the cache the
   next lookup will see.
 
-The behavior — pagination size, the find-or-create flow, the skip/version/
-upload decision, and which files are uploadable — is identical to the original;
-only the duplication is gone.
+Shared event metadata is deliberately excluded from unconditional sidecar
+replacement. The event publisher merges it and writes conditional versions.
 """
 
 from __future__ import annotations
@@ -155,6 +154,7 @@ class BoxStorage:
         Returns one of ``"skipped"``, ``"versioned"``, or ``"uploaded"``:
 
         * files under ``raw_data/`` are immutable — if already on Box, skip;
+        * shared event metadata must use the event publisher;
         * other (sidecar) files that already exist are re-uploaded as a new
           version, so regenerated CSVs/JSONs refresh on Box;
         * new files use a chunked upload at/above ``chunked_threshold`` bytes,
@@ -166,6 +166,11 @@ class BoxStorage:
                 current_folder_id = self.find_or_create_folder(current_folder_id, folder_name)
 
         file_name = relative_path.name
+        from cassn.box.metadata_merge import SHARED_NAMES, MetadataConflict
+        if relative_path.as_posix() in SHARED_NAMES:
+            raise MetadataConflict(
+                f"{relative_path} requires the event metadata merge/publication workflow"
+            )
         folder_map = self.folder_file_map(current_folder_id)
         existing_id = folder_map.get(file_name)
         is_raw_data = "raw_data" in relative_path.parts
@@ -217,6 +222,8 @@ class BoxStorage:
         sidecars that may still exist in historical ``raw_data/`` folders.
         """
         name = file_path.name
+        if name.startswith("box_publication_state.json") or "box_publications" in file_path.parts:
+            return False  # Local recovery journal; never an input to its own upload.
         if name.startswith(".") or name.startswith("._") or name.startswith("session.json"):
             return False
         if name.endswith("_manifest.json") and "raw_data" in file_path.parts:

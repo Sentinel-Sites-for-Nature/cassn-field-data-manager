@@ -11,6 +11,7 @@ import os
 import hashlib
 import shutil
 import time
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,12 +60,14 @@ def copy_file_single_read_verified(
     source = Path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
     last_error: OSError | None = None
     mismatch = False
 
     for attempt in range(1, max_attempts + 1):
-        partial.unlink(missing_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".partial",
+                                         dir=destination.parent)
+        os.close(fd)
+        partial = Path(temporary)
         reserved = False
         source_sha256 = hashlib.sha256()
         source_sha1 = hashlib.sha1()
@@ -92,6 +95,8 @@ def copy_file_single_read_verified(
                     return VerifiedCopy(
                         sha256_value, sha1_value, attempt, accepted=False
                     )
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(f"Unrecorded destination already exists: {destination}")
             partial.replace(destination)
             return VerifiedCopy(sha256_value, sha1_value, attempt, accepted=True)
         except OSError as exc:
@@ -159,12 +164,14 @@ def copy_file_verified(
     source = Path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
     last_error: OSError | None = None
     mismatch = False
 
     for attempt in range(1, max_attempts + 1):
-        partial.unlink(missing_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".partial",
+                                         dir=destination.parent)
+        os.close(fd)
+        partial = Path(temporary)
         try:
             shutil.copy2(source, partial)
             actual_sha256, actual_sha1 = sha256_sha1(partial)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Permanently clear local deployment events only after live Box verification."""
+"""Clear local events after Box verification, or force without bypassing safety holds."""
 
 from __future__ import annotations
 
@@ -59,7 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="bypass data and Box verification; deletion still requires --apply",
+        help=("bypass data and Box verification, not saved ingest errors, incomplete "
+              "publication or local deletion guards; deletion still requires --apply"),
     )
     parser.add_argument(
         "--apply",

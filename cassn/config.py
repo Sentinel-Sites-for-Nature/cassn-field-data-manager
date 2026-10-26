@@ -234,15 +234,23 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
     "hash_verification": (
         "Per-file hash verification: SHA-256 and SHA-1 are computed before copy, "
         "then again after copy, and both must match. Mismatches abort the copy "
-        "and remove the destination file."
+        "and remove only the current attempt's temporary copy."
     ),
     "file_size_floor": (
         "Warnings are reported for copied files below device-aware size minimums: "
         "images <500 KB, bird AudioMoth WAVs <1 GB, and bat AudioMoth WAVs <500 KB."
     ),
     "duplicate_detection": (
-        "Files whose SHA-256 matches an already-inventoried file in this session are flagged "
-        "and skipped. Indicates the same physical file was copied twice (e.g., re-running a card)."
+        "Historical duplicate-count summary. New ambiguous matching-content files stop "
+        "with an ingest_safety finding; equal bytes alone do not establish the same acquisition."
+    ),
+    "ingest_safety": (
+        "Files or source details need review. Sources and existing staged files are preserved; "
+        "upload and cleanup remain blocked until reviewed recovery records a resolution."
+    ),
+    "card_ingest": (
+        "Saved result of a card copy attempt. A successful retry clears this attempt error "
+        "while retaining its history; unresolved safety findings require separate review."
     ),
     "expected_file_count": (
         "User-supplied expected file count (auto-counted from source) is compared against the "

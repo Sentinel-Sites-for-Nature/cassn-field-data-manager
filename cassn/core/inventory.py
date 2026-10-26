@@ -197,7 +197,7 @@ def next_plain_file_sequence(file_inventory, device_label) -> int:
         if entry.get("device_label") != device_label:
             continue
         stem = Path(str(entry.get("new_filename", ""))).stem
-        match = re.search(r"_(\d{5})$", stem)
+        match = re.search(r"(?<!_CONFIG)_(\d{5,})$", stem)
         if match:
             greatest = max(greatest, int(match.group(1)))
     return greatest + 1
@@ -261,49 +261,31 @@ def already_copied_relpaths(file_inventory, device_label) -> set:
 
 
 def reconcile_device_dir(device_dir, file_inventory, device_label) -> list[str]:
-    """Delete staged files not backed by an inventory record, before a resume.
+    """Return unrecorded staged paths without modifying any files.
 
-    ``session.json`` is only flushed on a wall-clock interval, so a crash or
-    quit can leave files physically copied into ``device_dir`` that never made
-    it into the persisted ``file_inventory``. On the next resume those files
-    are unrecognized: the copy loop re-copies their source under fresh event
-    numbers and strands the first copies as orphans (duplicate content, and
-    gaps in the app-assigned event sequence).
-
-    Reconciling makes the inventory authoritative: any file in ``device_dir``
-    whose name is not a ``new_filename`` recorded for ``device_label`` is an
-    orphan and is removed. The un-recorded source files are then re-copied
-    cleanly by the caller, so numbering stays contiguous. Retired legacy device
-    manifest sidecars and dotfiles are always exempt.
-
-    Returns the list of removed filenames (empty when nothing was orphaned).
+    Missing session entries may be the only remaining copies. Split device
+    folders are checked too; dotfiles and retired manifests remain untouched.
     """
     device_dir = Path(device_dir)
     if not device_dir.is_dir():
         return []
-
-    expected = {
-        entry["new_filename"]
-        for entry in file_inventory
-        if entry.get("device_label") == device_label and entry.get("new_filename")
-    }
-    manifest_name = f"{device_label}_manifest.json"
-
-    removed: list[str] = []
-    for path in sorted(device_dir.iterdir()):
-        if not path.is_file():
+    prefix = f"raw_data/{device_label}/"
+    expected = set()
+    for entry in file_inventory:
+        if entry.get("device_label") == device_label:
+            relative = inventory_storage_relpath(entry)
+            if relative.startswith(prefix):
+                expected.add(relative[len(prefix):])
+    unknown = []
+    for path in sorted(device_dir.rglob("*")):
+        relative = path.relative_to(device_dir)
+        if any(part.startswith(".") for part in relative.parts):
             continue
-        name = path.name
-        if name.startswith(".") or name == manifest_name or name in expected:
+        if path.name == f"{device_label}_manifest.json":
             continue
-        try:
-            path.unlink()
-            removed.append(name)
-        except OSError:
-            # A file we can't delete is left in place rather than aborting the
-            # resume; the post-copy count check will still surface a mismatch.
-            pass
-    return removed
+        if path.is_symlink() or (path.is_file() and relative.as_posix() not in expected):
+            unknown.append(relative.as_posix())
+    return unknown
 
 
 # ---------------------------------------------------------------------------
@@ -727,8 +709,8 @@ def find_all_sessions(staging_root: Path) -> list:
     """Scan ``staging_root`` for all ``session.json`` files.
 
     Returns a list of ``{path, data, status, saved_at, error_msg}`` dicts, where
-    ``status`` is ``"ok"`` or ``"corrupted"``, sorted newest first (by
-    ``saved_at`` for parseable files, by file mtime for corrupted ones).
+    ``status`` is ``"ok"``, ``"corrupted"``, or ``"unsupported"``, sorted
+    newest first (by ``saved_at`` for supported files, otherwise file mtime).
     Corrupted sessions are also recorded in that deployment's
     ``qc_report.json`` so the audit trail captures them.
     """
@@ -747,7 +729,14 @@ def find_all_sessions(staging_root: Path) -> list:
         try:
             with open(session_file, "r") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("session.json must contain an object")
             if data.get("schema_version") != SESSION_SCHEMA_VERSION:
+                sessions.append({"path": session_file, "data": None,
+                                 "status": "unsupported",
+                                 "saved_at": datetime.fromtimestamp(session_file.stat().st_mtime),
+                                 "error_msg": f"Unsupported session schema {data.get('schema_version')!r}; "
+                                              "use a compatible application or reviewed recovery."})
                 continue
             folder = Path(data.get("deployment_folder", ""))
             if not folder.exists():
@@ -757,7 +746,7 @@ def find_all_sessions(staging_root: Path) -> list:
             )
             sessions.append({"path": session_file, "data": data, "status": "ok",
                              "saved_at": saved_at, "error_msg": ""})
-        except json.JSONDecodeError as e:
+        except (ValueError, TypeError) as e:
             mtime = datetime.fromtimestamp(session_file.stat().st_mtime)
             sessions.append({"path": session_file, "data": None, "status": "corrupted",
                              "saved_at": mtime, "error_msg": str(e)})

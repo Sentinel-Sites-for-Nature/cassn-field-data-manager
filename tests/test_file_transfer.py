@@ -113,3 +113,30 @@ def test_source_hash_retries_transient_io_error(tmp_path, monkeypatch):
 
     assert result.attempts == 2
     assert calls == 2
+
+
+@pytest.mark.parametrize("single_read", [True, False])
+def test_copy_never_deletes_a_previous_attempt_temporary(tmp_path, single_read):
+    import os
+    source = tmp_path / "source.wav"
+    destination = tmp_path / "staged.wav"
+    source.write_bytes(b"captured")
+    previous = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
+    previous.write_bytes(b"unrecorded evidence")
+    if single_read:
+        copy_file_single_read_verified(source, destination)
+    else:
+        sha256, sha1 = sha256_sha1(source)
+        copy_file_verified(source, destination, expected_sha256=sha256, expected_sha1=sha1)
+    assert previous.read_bytes() == b"unrecorded evidence"
+    assert destination.read_bytes() == b"captured"
+
+
+def test_new_file_copy_refuses_existing_unrecorded_destination(tmp_path):
+    source = tmp_path / "source.wav"
+    destination = tmp_path / "staged.wav"
+    source.write_bytes(b"incoming")
+    destination.write_bytes(b"unrecorded original")
+    with pytest.raises(FileTransferError, match="Unrecorded destination"):
+        copy_file_single_read_verified(source, destination, retry_delay=0)
+    assert destination.read_bytes() == b"unrecorded original"

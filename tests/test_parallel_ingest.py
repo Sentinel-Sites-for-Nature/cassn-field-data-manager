@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from cassn.core.ingest_safety import IngestSafetyError, source_evidence, require_no_ingest_holds
 from cassn.core.quality_control import append_qc_report
 from cassn.core.image_metadata import _parse_reconyx_tags
 from cassn.core.wi_split import event_key
@@ -176,6 +177,15 @@ def test_burst_resume_matches_uninterrupted_ingest(
         row["file_hash_sha256"] for row in saved_rows
     ))
     context.file_inventory = json.loads(session.read_text())
+    if staged_state == "orphan_tail":
+        before = {p: p.read_bytes() for p in (deployment / "raw_data").rglob("*.jpg")}
+        with pytest.raises(IngestSafetyError, match="unrecorded staged"):
+            _ingest_camera(context, source, reconyx)
+        assert all(p.read_bytes() == data for p, data in before.items())
+        assert context.file_inventory == saved_rows
+        with pytest.raises(IngestSafetyError):
+            require_no_ingest_holds(deployment)
+        return
     _ingest_camera(context, source, reconyx)
     assert context.file_inventory[:saved_count] == saved_rows
     _assert_camera_inventory_matches(
@@ -655,8 +665,10 @@ def test_resume_repairs_audio_metadata_from_staged_destination(tmp_path, monkeyp
         "source_relpath": source_file.name,
         "file_type": "audio",
         "file_size_bytes": staged.stat().st_size,
-        "file_hash_sha256": "sha256",
-        "file_hash_sha1": "sha1",
+        "file_hash_sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(),
+        "file_hash_sha1": hashlib.sha1(source_file.read_bytes()).hexdigest(),
+        "source_evidence": source_evidence(source_file),
+        "deployment_id": "UC_Test_plot1_BD_20260101",
         "recording_duration_sec": "",
     }
     repaired_paths = []
@@ -688,7 +700,7 @@ def test_resume_repairs_audio_metadata_from_staged_destination(tmp_path, monkeyp
     assert existing["recording_duration_sec"] == 32400
 
 
-def test_concurrent_cards_deduplicate_identical_media_across_devices(
+def test_concurrent_equal_byte_cards_hold_instead_of_silent_success(
     tmp_path, monkeypatch
 ):
     import cassn.gui.wizard as wizard_module
@@ -707,22 +719,30 @@ def test_concurrent_cards_deduplicate_identical_media_across_devices(
         destination.mkdir(parents=True)
         context = _ProcessContext(event, registry)
         barrier.wait()
-        result = FieldDataWizard.process_sd_card_files(
-            context,
-            source,
-            destination,
-            plot,
-            f"Plot {plot}",
-            "ML",
-            f"p{plot}_ML",
-            _DummyReconyx(),
-        )
+        try:
+            result = FieldDataWizard.process_sd_card_files(
+                context,
+                source,
+                destination,
+                plot,
+                f"Plot {plot}",
+                "ML",
+                f"p{plot}_ML",
+                _DummyReconyx(),
+            )
+        except IngestSafetyError:
+            result = "held"
         return result, context.file_inventory
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outputs = list(pool.map(run_device, (1, 2)))
 
-    assert sorted(result for result, _rows in outputs) == [(0, 1, 0), (1, 0, 0)]
+    assert sum(result == "held" for result, _rows in outputs) == 1
+    assert sum(result == (1, 0, 0) for result, _rows in outputs) == 1
+    assert all((tmp_path / f"card{plot}" / f"image{plot}.jpg").read_bytes() == b"identical-image"
+               for plot in (1, 2))
+    with pytest.raises(IngestSafetyError, match="Equal-byte"):
+        require_no_ingest_holds(event)
     assert sum(len(rows) for _result, rows in outputs) == 1
     assert len(list((event / "raw_data").rglob("*.jpg"))) == 1
 
@@ -787,6 +807,8 @@ def test_ingest_recovers_crash_paths_before_missing_file_restoration(tmp_path, m
     inventory = [{
         "device_label": "p1_ML", "new_filename": name, "file_type": "image",
         "source_relpath": "one.jpg", "file_size_bytes": 5,
+        "source_evidence": source_evidence(source / "one.jpg"),
+        "deployment_id": "UC_Test_plot1_ML_20260101",
         "file_hash_sha256": hashes.sha256, "file_hash_sha1": hashes.sha1,
         "storage_relpath": f"raw_data/p1_ML/{name}",
     }]
@@ -1035,3 +1057,59 @@ def test_small_file_evidence_survives_noop_resume(tmp_path, monkeypatch):
     for finding in current["findings"]:
         assert finding["files"][0]["filename"]
         assert "bytes" in finding["message"]
+
+
+@pytest.mark.parametrize("change", ["new_bytes", "other_card", "missing_evidence", "staged_corruption", "deployment_changed"])
+def test_resume_requires_source_evidence_and_matching_bytes(tmp_path, monkeypatch, change):
+    import cassn.gui.wizard as wizard_module
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir()
+    incoming = source / "one.jpg"
+    incoming.write_bytes(b"original")
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    assert _ingest_camera(context, source, _DummyReconyx()) == (1, 0, 0)
+    row = context.file_inventory[0]
+    staged = context.current_deployment_folder / row["storage_relpath"]
+    if change == "new_bytes":
+        incoming.write_bytes(b"different"[:8])
+    elif change == "other_card":
+        source = tmp_path / "other-card"
+        source.mkdir()
+        (source / "one.jpg").write_bytes(b"original")
+    elif change == "missing_evidence":
+        row.pop("source_evidence")
+    elif change == "deployment_changed":
+        row["deployment_id"] = "other-deployment"
+    else:
+        staged.write_bytes(b"corrupt!")
+    before = staged.read_bytes()
+    with pytest.raises(IngestSafetyError):
+        _ingest_camera(context, source, _DummyReconyx())
+    assert staged.read_bytes() == before
+    assert len(context.file_inventory) == 1
+    with pytest.raises(IngestSafetyError):
+        require_no_ingest_holds(context.current_deployment_folder)
+    # A retry cannot erase an unresolved safety finding, even with original bytes.
+    incoming.write_bytes(b"original")
+    with pytest.raises(IngestSafetyError):
+        _ingest_camera(context, incoming.parent, _DummyReconyx())
+
+
+def test_repeated_config_destination_preserves_both_sources_and_staged_copy(tmp_path, monkeypatch):
+    import cassn.gui.wizard as wizard_module
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir()
+    (source / "CONFIG1.TXT").write_bytes(b"config one")
+    (source / "CONFIG2.TXT").write_bytes(b"config two")
+    event = tmp_path / "event"
+    dest = event / "raw_data/p1_BD"
+    dest.mkdir(parents=True)
+    context = _ProcessContext(event, IngestHashRegistry(), _AudioLookups())
+    with pytest.raises(IngestSafetyError, match="Destination collision"):
+        FieldDataWizard.process_sd_card_files(context, source, dest, 1, "Plot 1", "BD", "p1_BD", _DummyReconyx())
+    assert (source / "CONFIG1.TXT").read_bytes() == b"config one"
+    assert (source / "CONFIG2.TXT").read_bytes() == b"config two"
+    assert len(context.file_inventory) == 1
+    assert next(dest.glob("*.txt")).read_bytes() == b"config one"

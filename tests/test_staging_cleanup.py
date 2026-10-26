@@ -348,3 +348,14 @@ def test_normal_cleanup_only_accepts_forward_soundhub_updates(tmp_path, monkeypa
     assert plan.clearable is accepted
     if not accepted:
         assert any('metadata differ' in reason for reason in plan.reasons)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_ingest_hold_blocks_cleanup_even_with_complete_session(tmp_path, force):
+    from cassn.core.quality_control import append_qc_report
+    staging, event, storage = _build_event(tmp_path)
+    append_qc_report(event, "ingest_safety", "p1_ML", "error", "Unrecorded source needs review")
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root", force=force)
+    assert not plan.clearable
+    assert any("Unresolved ingest failure" in reason for reason in plan.reasons)
+    assert (event / "raw_data/p1_ML/image.jpg").read_bytes() == b"captured image"
