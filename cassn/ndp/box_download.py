@@ -99,6 +99,12 @@ def download_box_file(
             raise NdpTransferError(
                 f"{source.filename}: downloaded SHA-256 does not match metadata"
             )
+        operation = "verify_written_copy"
+        if (partial.stat().st_size != source.size
+                or _sha256(partial, chunk_size=chunk_size) != source.sha256):
+            raise NdpTransferError(
+                f"{source.filename}: written copy does not match downloaded original"
+            )
         operation = "publish"
         os.replace(partial, destination)
         return DownloadResult(destination, written, False)

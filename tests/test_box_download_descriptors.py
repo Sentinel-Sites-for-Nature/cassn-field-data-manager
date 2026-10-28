@@ -90,3 +90,15 @@ def test_fdopen_failure_closes_descriptor_before_ownership_transfer(tmp_path, mo
     with pytest.raises(OSError):
         os.fstat(descriptors[0])
     assert not list(tmp_path.glob('*.partial'))
+
+
+def test_changed_written_bytes_are_never_published(tmp_path, monkeypatch):
+    fsync = os.fsync
+    def corrupt_output(fd):
+        os.pwrite(fd, b'xyz', 0)
+        fsync(fd)
+    monkeypatch.setattr(box_download.os, 'fsync', corrupt_output)
+    with pytest.raises(box_download.NdpTransferError, match='written copy'):
+        box_download.download_box_file(client(), source(), tmp_path / 'one.jpg')
+    assert not (tmp_path / 'one.jpg').exists()
+    assert not list(tmp_path.glob('*.partial'))
