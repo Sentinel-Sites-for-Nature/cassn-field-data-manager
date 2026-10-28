@@ -13,6 +13,10 @@ class SourceBatchFailed(Exception):
         super().__init__("Source workers stopped; see safe failure detail")
 
 
+class SourceWorkersStillAlive(Exception):
+    """Do not start another source scope until these owned children have exited."""
+
+
 def _worker(function, tasks, results, stop):
     while not stop.is_set():
         try:
@@ -141,6 +145,10 @@ def run_bounded(function, files, *, workers=3, file_timeout=120, drain_timeout=1
         for channel in (tasks, results):
             channel.cancel_join_thread()
             channel.close()
+        survivors = [child.pid for child in children
+                     if child.pid is not None and child.is_alive()]
+        if survivors:
+            raise SourceWorkersStillAlive(survivors)
 
 
 _box_client = None
