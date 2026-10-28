@@ -102,3 +102,27 @@ def test_changed_written_bytes_are_never_published(tmp_path, monkeypatch):
         box_download.download_box_file(client(), source(), tmp_path / 'one.jpg')
     assert not (tmp_path / 'one.jpg').exists()
     assert not list(tmp_path.glob('*.partial'))
+
+
+def test_completed_download_cannot_redirect_another_workers_bytes(tmp_path, monkeypatch):
+    """Model A closing, B reusing its fd, then C opening before B writes."""
+    replace = os.replace
+    handles = []
+    def start_next_worker(src, dest):
+        handles.append(os.open(tmp_path / 'worker-B', os.O_CREAT | os.O_RDWR, 0o600))
+        replace(src, dest)
+    monkeypatch.setattr(box_download.os, 'replace', start_next_worker)
+    try:
+        box_download.download_box_file(client(), source(), tmp_path / 'one.jpg')
+        handles.append(os.open(tmp_path / 'worker-C', os.O_CREAT | os.O_RDWR, 0o600))
+        # With the original double-close, C reused B's accidentally closed fd,
+        # and B's next write landed in C's file despite B hashing its own bytes.
+        os.write(handles[0], b'xyz')
+        assert (tmp_path / 'worker-B').read_bytes() == b'xyz'
+        assert (tmp_path / 'worker-C').read_bytes() == b''
+    finally:
+        for fd in set(handles):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
