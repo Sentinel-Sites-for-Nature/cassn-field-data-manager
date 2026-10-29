@@ -846,6 +846,87 @@ opened or changed to build the summary.
 | `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, successful current-batch hash and Box file-list evidence, and no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
 | (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `qc/deployment_summary.txt` in deployment folder |
 
+### Local camera-clock correction before upload
+
+For a card that has **not been ingested**, use standalone preparation. This
+mode does not use a deployment session or FDM's locks, so another deployment
+can continue uploading. It reads the card and writes only to a new, dedicated
+local output package:
+
+```bash
+.venv/bin/python utils/fix_camera_clock.py prepare \
+  --source /Volumes/LMC-3-SA \
+  --output /absolute/path/LMC-3-SA_minus4days \
+  --days 4 --subtract --dry-run
+```
+
+After reviewing the preview, repeat without `--dry-run`. The package retains
+verified originals, per-file SHA-256 receipts, and corrected copies. Select only
+its **`ready/`** directory as the source in FDM after the command reports complete.
+The ready directory appears only after every file verifies. The preparation
+checks all extracted EXIF/Reconyx date fields against the requested shift and
+preserves the reported offsets and serial number. It does not alter visible
+date stamps, the SD card, or another running FDM job. Nonhidden support files
+are copied unchanged; hidden operating-system files are excluded.
+An unreadable source folder stops preparation before it can report a complete
+package; reconnect the card or resolve access before retrying.
+
+After an interruption, retain the whole package and repeat the exact command.
+Saved receipts prevent applying the offset twice, including after an interrupted
+file installation or final directory rename. Changes to source membership,
+checksums, correction arguments, or output evidence stop for review. Do not use
+the incomplete `working/` directory for ingest. Preparation supports fixed
+day/hour/minute/second shifts; year/month shifts and selected-year corrections
+remain part of the staged-deployment mode below.
+
+`utils/fix_camera_clock.py` corrects staged JPEG camera timestamps. Close every
+FDM window using that deployment first. It shares FDM's deployment lock and
+refuses existing Box upload history; correcting published Box copies needs the
+separate original/correction and versioning design. This utility does not make
+remote changes or add a guided UI.
+
+Preview the exact inventoried files, including WI split subfolders:
+
+```bash
+.venv/bin/python utils/fix_camera_clock.py \
+  --deployment "/absolute/path/to/staged-event" --devices p1_ML p1_SA \
+  --hours 1 --subtract --dry-run
+```
+
+Remove `--dry-run` to apply after reviewing the list. The example subtracts one
+hour from camera clock values; it does **not** change timezone-offset tags.
+Timezone interpretation is checked separately. `--only-year 2025` restricts
+source EXIF years; it is not protection against applying the offset twice.
+A zero-match selection, unreadable EXIF, missing/untracked images, duplicate or
+unsafe paths, checksum disagreement, or an ExifTool error stops the operation.
+The preview lists exact membership, original clock values and the offset; apply
+revalidates them, and the preview is not a saved approval of future file changes.
+
+On interruption or failure, retain the deployment and journal, resolve the
+reported problem, then repeat the **same command**. Prepared corrected copies
+and checksums identify replacements that already succeeded, including a crash
+between replacement and saving progress. Already completed commands report
+completion without shifting images again. An unfinished correction blocks upload
+and cleanup through the existing ingest-safety hold until the tool finishes
+session, metadata and any existing legacy manifests. Do not delete the hold to
+bypass recovery. Keep FDM closed until recovery finishes. Unrecognized external
+changes stop for review instead of guessing or automatically rolling back.
+
+Original media, the original session, corrected evidence and per-file progress
+are retained beside the deployment under
+`.cassn-clock-corrections/<deployment-path-hash>/<operation-id>/`, outside the
+upload tree. Keep this directory with the deployment; do not delete or relocate
+it during recovery. Allow space for retained original and corrected copies of
+all selected images plus working copies. `--scratch /absolute/fast-directory`
+puts temporary per-image work on that directory; it never deletes an existing
+scratch folder, and durable recovery evidence stays beside the deployment.
+Use `--new-operation unique-name` only for a deliberate additional correction
+after the previous operation completed; reuse that name on retries. A previously
+used name cannot start another operation. Earlier journals and originals remain.
+No new legacy manifests are created. Corrected hashes, sizes, timestamps and
+metadata are saved only for the recorded targets; unchanged file history is
+preserved, and conflicting upload/submission history stops before media writes.
+
 ### Per-device check coverage
 
 Not every check applies to every file type:

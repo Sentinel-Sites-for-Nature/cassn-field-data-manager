@@ -237,7 +237,12 @@ def test_clock_repair_rejects_existing_history_before_changing_images(deployment
         'metadata': {'deployment_event_id': 'event', 'site_short_name': 'Test'},
         'file_inventory': inventory, 'devices': [],
     }))
+    inventory[0]['file_hash_sha256'] = __import__('hashlib').sha256(image.read_bytes()).hexdigest()
+    saved_session = json.loads(session.read_text())
+    saved_session['file_inventory'] = inventory
+    session.write_text(json.dumps(saved_session))
     before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    monkeypatch.setattr(fix_camera_clock, 'extract_exif_data', lambda _: ({'DateTimeOriginal': '2026:01:01 11:00:00'}, {}))
     monkeypatch.setattr(fix_camera_clock.LookupTables, 'load', lambda _: lookups)
     monkeypatch.setattr(fix_camera_clock, 'exiftool_shift', lambda *_: pytest.fail('Image rewrite was attempted'))
     monkeypatch.setattr('sys.argv', ['fix_camera_clock.py', '--deployment', str(root),
@@ -263,13 +268,18 @@ def test_clock_repair_without_history_regenerates_consistent_metadata(deployment
     }))
     monkeypatch.setattr(fix_camera_clock.LookupTables, 'load', lambda _: lookups)
 
-    def shift(*_):
-        image.write_bytes(b'corrected test image')
+    inventory[0]['file_hash_sha256'] = hashlib.sha256(image.read_bytes()).hexdigest()
+    saved_session = json.loads(session.read_text())
+    saved_session['file_inventory'] = inventory
+    session.write_text(json.dumps(saved_session))
+
+    def shift(path, *_):
+        path.write_bytes(b'corrected test image')
         return 1
 
     monkeypatch.setattr(fix_camera_clock, 'exiftool_shift', shift)
-    monkeypatch.setattr(fix_camera_clock, 'extract_exif_data', lambda _: (
-        {'DateTimeOriginal': '2026:01:01 12:00:00', 'OffsetTimeOriginal': '-08:00'}, {}))
+    monkeypatch.setattr(fix_camera_clock, 'extract_exif_data', lambda path: (
+        {'DateTimeOriginal': '2026:01:01 12:00:00' if path.read_bytes() == b'corrected test image' else '2026:01:01 11:00:00', 'OffsetTimeOriginal': '-08:00'}, {}))
     monkeypatch.setattr('sys.argv', ['fix_camera_clock.py', '--deployment', str(root),
                                     '--devices', 'p1_ML', '--hours', '1'])
     assert fix_camera_clock.main() == 0

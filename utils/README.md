@@ -363,6 +363,15 @@ Per device, it:
 4. Patches the deployment's `session.json` file inventory.
 5. Refreshes an existing legacy device manifest, if present, and regenerates
    the metadata CSVs. It never creates a new per-device manifest.
+6. Reruns the camera date-window and temporal-plausibility checks for the
+   selected devices, appending current results while retaining earlier QC
+   history. Remaining discrepancies stay flagged; missing deployment dates
+   cannot produce a passing date-window result.
+
+Repeating the exact apply command after a completed correction also refreshes
+these date checks without shifting images again. This can clear stale date
+findings left by an earlier version of the utility. Close the app first;
+`--dry-run` never updates QC results.
 
 The offset is fully general — any combination of
 years/months/days/hours/minutes/seconds, added or subtracted — for a verified
