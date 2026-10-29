@@ -174,43 +174,19 @@ def validate_deployment_lookups(
             + ", ".join(unknown_identifier_policies)
         )
 
-    id_collision_counts: dict[tuple[str, int, str, str], int] = {}
-    for row in deployments:
-        if not row.get("deployment_end_date"):
-            continue
-        key = (
-            row["site_short_name"],
-            int(row["plot_number"]),
-            row["device_type"],
-            row["deployment_end_date"],
-        )
-        id_collision_counts[key] = id_collision_counts.get(key, 0) + 1
-
     noncanonical_ids = [
         row["deployment_id"]
         for row in deployments
         if row.get("deployment_end_date")
         and row.get("identifier_policy", "") != "filed_legacy"
-        and not deployment_id_matches_contract(
-            row,
-            sequence_suffix_required=(
-                int(row["deployment_sequence"]) > 0
-                and id_collision_counts[
-                    (
-                        row["site_short_name"],
-                        int(row["plot_number"]),
-                        row["device_type"],
-                        row["deployment_end_date"],
-                    )
-                ] > 1
-            ),
-        )
+        and not deployment_id_matches_contract(row)
     ]
     if noncanonical_ids:
         examples = ", ".join(noncanonical_ids[:5])
         raise LookupSchemaError(
             f"deployments.csv has {len(noncanonical_ids)} deployment_id value(s) "
-            f"that do not match the prospective naming contract; examples: {examples}"
+            f"that do not match the prospective naming contract "
+            f"(positive deployment_sequence requires -seqNN); examples: {examples}"
         )
 
     event_sites: dict[str, set[str]] = {}

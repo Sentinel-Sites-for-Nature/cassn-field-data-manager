@@ -408,25 +408,34 @@ def load_device_deployments(csv_path: Path) -> list[dict]:
     return rows
 
 
-def deployment_id_matches_contract(
-    row: dict,
-    *,
-    sequence_suffix_required: bool = False,
-) -> bool:
+def build_deployment_id(row: dict, *, organization_prefix: str) -> str:
+    """Build a new closed deployment ID from its saved sequence and end date.
+
+    Never use this to rewrite an already-assigned ID. Sequence zero has no
+    suffix; every positive sequence has one, independently of other rows.
+    """
+    prefix = organization_prefix.strip()
+    sequence = int(row["deployment_sequence"])
+    if not prefix or sequence < 0:
+        raise ValueError("A nonempty organization prefix and nonnegative sequence are required")
+    end_token = date.fromisoformat(row["deployment_end_date"]).strftime("%Y%m%d")
+    suffix = f"-seq{sequence:02d}" if sequence > 0 else ""
+    return (
+        f"{prefix}_{row['site_short_name']}_plot{int(row['plot_number'])}_"
+        f"{row['device_type']}_{end_token}{suffix}"
+    )
+
+
+def deployment_id_matches_contract(row: dict) -> bool:
     """Whether a closed prospective row follows the canonical ID formula."""
     if not row.get("deployment_id") or not row.get("deployment_end_date"):
         return False
     try:
-        plot_number = int(row["plot_number"])
-        sequence = int(row["deployment_sequence"])
-        end_token = date.fromisoformat(row["deployment_end_date"]).strftime("%Y%m%d")
+        # Prefix ownership is configured separately; retain the existing check
+        # that it is nonempty, while sharing the rest with ID construction.
+        expected_tail = build_deployment_id(row, organization_prefix="_")[1:]
     except (KeyError, TypeError, ValueError):
         return False
-    suffix = f"-seq{sequence:02d}" if sequence_suffix_required else ""
-    expected_tail = (
-        f"_{row['site_short_name']}_plot{plot_number}_{row['device_type']}_"
-        f"{end_token}{suffix}"
-    )
     deployment_id = row["deployment_id"]
     return deployment_id.endswith(expected_tail) and bool(
         deployment_id[: -len(expected_tail)]

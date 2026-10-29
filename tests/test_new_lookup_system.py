@@ -18,6 +18,8 @@ from cassn.lookups import (
     LookupTables,
     Site,
     build_deployment_rounds,
+    build_deployment_id,
+    deployment_id_matches_contract,
     deployment_storage_label,
     load_deployment_events,
     load_device_deployments,
@@ -887,3 +889,14 @@ def test_aru_identity_schema_separates_serial_from_asset_tag(tmp_path):
     write_csv(path, FIELDS, [row])
     with pytest.raises(LookupSchemaError, match="asset_tag to a camera"):
         load_device_deployments(path)
+
+
+@pytest.mark.parametrize("sequence,suffix", [("0", ""), ("1", "-seq01"), ("2", "-seq02"), ("100", "-seq100")])
+def test_new_deployment_id_uses_saved_sequence(sequence, suffix):
+    row = {"site_short_name": "TestSite", "plot_number": "1", "device_type": "BD",
+           "deployment_end_date": "2026-08-26", "deployment_sequence": sequence}
+    generated = build_deployment_id(row, organization_prefix="UC")
+    assert generated == f"UC_TestSite_plot1_BD_20260826{suffix}"
+    assert deployment_id_matches_contract({**row, "deployment_id": generated})
+    assert not deployment_id_matches_contract({**row, "deployment_id": generated + "-seq99"})
+    assert "deployment_id" not in row

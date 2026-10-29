@@ -243,6 +243,24 @@ and deployment interval ordering. It never
 copies, installs, or publishes files. Distribution to Box remains a deliberate
 manual operation.
 
+### Deployment sequence naming
+
+For newly assigned deployment IDs, `deployment_sequence=0` has no suffix;
+**every positive sequence** adds `-seqNN`, even when retrieval dates differ.
+For example, sequence 1 produces `UC_YoungerLagoon_plot1_BD_20260826-seq01`.
+Use `cassn.lookups.build_deployment_id(row, organization_prefix="UC")` when
+preparing a new closed row in `deployments.csv`. The saved sequence is never
+recalculated from a download selection. Ingest copies the saved deployment ID
+into media and CONFIG filenames; raw folders keep their existing `_seqNN` rule.
+
+Preserve already-assigned IDs and filenames. An explicitly reviewed existing
+row can use `identifier_policy=filed_legacy` to retain its earlier ID; this does
+not exempt it from duplicate-ID or duplicate-sequence checks. Do not mark new
+rows legacy to bypass the suffix rule. Before activating this stricter validator,
+update the authoritative Box configuration to mark reviewed historical exceptions;
+otherwise both the Box snapshot and an older cache can fail validation. Never
+rename a staged deployment merely by changing its configuration row.
+
 ### 3. Workflow
 
 #### Parallel deployment windows
