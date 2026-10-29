@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cassn-csu-box-auth",
+  "account_id": "5280ed2001addb49c501a07757806bc0",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-22",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {"enabled": false},
+  "vars": {
+    "PUBLIC_ORIGIN": "https://cassn-csu-box-auth.tiny-band-cf20.workers.dev",
+    "BOX_CLIENT_ID": "q14sh0pmbaqpqdml783967b9wg4vhy4e",
+    "ALLOWED_BOX_USER_IDS": "45181112727",
+    "DATA_FOLDER_ID": "430058250915",
+    "CONFIG_FOLDER_ID": "430057609739"
+  },
+  "durable_objects": {"bindings": [{"name": "AUTH", "class_name": "AuthStore"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["AuthStore"]}]
+}

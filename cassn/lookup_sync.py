@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -13,6 +14,7 @@ from typing import Callable
 
 from cassn.box.auth import BoxConfig, get_box_client
 from cassn.box.client import BoxStorage
+from cassn.core.wi_features import validate_wi_feature_type
 from cassn.lookups import (
     AUDIO_DEVICE_TYPES,
     BOX_MANAGED_FILENAMES,
@@ -45,6 +47,11 @@ LAST_SYNC_FILENAME = ".last_synced"
 class LookupBootstrapError(RuntimeError):
     """No valid Box snapshot or offline cache is available."""
 
+    def __init__(self, message, *, reason="unavailable", missing_files=()):
+        super().__init__(message)
+        self.reason = reason
+        self.missing_files = tuple(missing_files)
+
 
 @dataclass(frozen=True)
 class LookupValidation:
@@ -76,6 +83,16 @@ def validate_deployment_lookups(
     """Validate deployments and events as one relational runtime snapshot."""
     deployments = load_device_deployments(deployments_path)
     deployment_events = load_deployment_events(deployment_events_path)
+
+    for row in deployments:
+        if row["device_type"] in {"ML", "SA"}:
+            try:
+                validate_wi_feature_type(row.get("feature_type", ""))
+            except ValueError as exc:
+                raise LookupSchemaError(
+                    f"deployments.csv {row['site_short_name']} plot "
+                    f"{row['plot_number']} {row['device_type']}: {exc}"
+                ) from exc
 
     closed_without_ids = [
         row
@@ -157,43 +174,19 @@ def validate_deployment_lookups(
             + ", ".join(unknown_identifier_policies)
         )
 
-    id_collision_counts: dict[tuple[str, int, str, str], int] = {}
-    for row in deployments:
-        if not row.get("deployment_end_date"):
-            continue
-        key = (
-            row["site_short_name"],
-            int(row["plot_number"]),
-            row["device_type"],
-            row["deployment_end_date"],
-        )
-        id_collision_counts[key] = id_collision_counts.get(key, 0) + 1
-
     noncanonical_ids = [
         row["deployment_id"]
         for row in deployments
         if row.get("deployment_end_date")
         and row.get("identifier_policy", "") != "filed_legacy"
-        and not deployment_id_matches_contract(
-            row,
-            sequence_suffix_required=(
-                int(row["deployment_sequence"]) > 0
-                and id_collision_counts[
-                    (
-                        row["site_short_name"],
-                        int(row["plot_number"]),
-                        row["device_type"],
-                        row["deployment_end_date"],
-                    )
-                ] > 1
-            ),
-        )
+        and not deployment_id_matches_contract(row)
     ]
     if noncanonical_ids:
         examples = ", ".join(noncanonical_ids[:5])
         raise LookupSchemaError(
             f"deployments.csv has {len(noncanonical_ids)} deployment_id value(s) "
-            f"that do not match the prospective naming contract; examples: {examples}"
+            f"that do not match the prospective naming contract "
+            f"(positive deployment_sequence requires -seqNN); examples: {examples}"
         )
 
     event_sites: dict[str, set[str]] = {}
@@ -395,7 +388,20 @@ def _replace_cache_from_staging(staging_dir: Path, cache_dir: Path, names: list[
         raise
 
 
-def sync_box_lookup_cache(client, folder_id: str, cache_dir: Path) -> tuple[LookupTables, tuple[str, ...]]:
+def _validate_hosted_program(directory):
+    try:
+        program = json.loads((directory / "program_config.json").read_text())
+        for key in ("organizations", "observers"):
+            values = program[key]
+            if not isinstance(values, list) or not values or not all(isinstance(v, str) and v.strip() for v in values):
+                raise ValueError()
+        if program.get("default_downloader") not in program["observers"]:
+            raise ValueError()
+    except Exception:
+        raise LookupBootstrapError("Project program_config.json needs organizations, observers and a matching default_downloader.", reason="invalid_files") from None
+
+
+def sync_box_lookup_cache(client, folder_id: str, cache_dir: Path, *, identity=None) -> tuple[LookupTables, tuple[str, ...]]:
     """Download, validate, and transactionally install the Box configuration."""
     cache_dir = cache_dir.resolve()
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -407,19 +413,45 @@ def sync_box_lookup_cache(client, folder_id: str, cache_dir: Path) -> tuple[Look
             for item in storage.iter_folder_items(folder_id)
             if item.type == "file" and item.name in BOX_MANAGED_FILENAMES
         }
-        missing = sorted(REQUIRED_RUNTIME_FILENAMES - set(box_files))
+        required = REQUIRED_RUNTIME_FILENAMES
+        if identity is not None and identity["profile"] != "uc":
+            required = required | {"program_config.json"}
+        missing = sorted(required - set(box_files))
         if missing:
             raise LookupBootstrapError(
-                "Box app_config is missing required files: " + ", ".join(missing)
+                "Box app_config is missing required files: " + ", ".join(missing),
+                reason="missing_files", missing_files=missing,
             )
 
         for name, file_id in box_files.items():
             _download_file(client, file_id, staging_dir / name)
 
-        validate_lookup_directory(staging_dir)
+        try:
+            validate_lookup_directory(staging_dir)
+        except LookupSchemaError:
+            if identity is None:
+                raise
+            raise LookupBootstrapError(
+                "Downloaded project settings did not pass validation.", reason="invalid_files"
+            ) from None
+        if identity is not None:
+            # UC already has authoritative shipped defaults. CSU must provide
+            # its own program settings; never substitute UC people or labels.
+            if identity["profile"] == "uc" and not (staging_dir / "program_config.json").exists():
+                from cassn.config import ORGANIZATIONS, DOWNLOADERS, DEFAULT_DOWNLOADER
+                (staging_dir / "program_config.json").write_text(json.dumps({
+                    "organizations": ORGANIZATIONS, "observers": DOWNLOADERS,
+                    "default_downloader": DEFAULT_DOWNLOADER}), encoding="utf-8")
+            _validate_hosted_program(staging_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         names = sorted(box_files)
-        _replace_cache_from_staging(staging_dir, cache_dir, names)
+        install_names = list(names)
+        if identity is not None:
+            (staging_dir / ".project.json").write_text(json.dumps(identity), encoding="utf-8")
+            install_names.append(".project.json")
+            if "program_config.json" not in install_names:
+                install_names.append("program_config.json")
+        _replace_cache_from_staging(staging_dir, cache_dir, install_names)
         for name in RETIRED_LOOKUP_FILENAMES:
             retired = cache_dir / name
             if retired.is_symlink() or (retired.exists() and not retired.is_file()):
@@ -442,6 +474,9 @@ def bootstrap_lookup_tables(
 ) -> LookupBootstrapResult:
     """Prefer Box, fall back only to a fully valid offline cache."""
     box_error = ""
+    box_issue = None
+    identity = ({"profile": box_config.profile, "service": box_config.service_url,
+                 "folder": box_config.app_config_folder_id} if box_config.provider == "hosted" else None)
     if not box_config.app_config_folder_id:
         box_error = "Box app_config_folder_id is not configured"
     else:
@@ -450,7 +485,7 @@ def bootstrap_lookup_tables(
             if client is None:
                 raise LookupBootstrapError("Box authentication is unavailable")
             lookups, synced = sync_box_lookup_cache(
-                client, box_config.app_config_folder_id, cache_dir
+                client, box_config.app_config_folder_id, cache_dir, **({"identity": identity} if identity else {})
             )
             return LookupBootstrapResult(
                 lookups=lookups,
@@ -458,15 +493,27 @@ def bootstrap_lookup_tables(
                 synced_files=synced,
             )
         except Exception as exc:
-            box_error = str(exc)
+            if isinstance(exc, LookupBootstrapError):
+                box_issue = exc
+            if identity:
+                from cassn.box.hosted import HostedError
+                box_error = str(exc) if isinstance(exc, HostedError) else "Project configuration is unavailable."
+            else:
+                box_error = str(exc)
 
     try:
+        if identity is not None:
+            _validate_hosted_program(cache_dir)
+            if json.loads((cache_dir / ".project.json").read_text()) != identity:
+                raise LookupBootstrapError("Cached configuration belongs to a different project")
         lookups, _pair = validate_lookup_directory(cache_dir)
     except Exception as cache_exc:
         raise LookupBootstrapError(
             "Could not load a valid lookup snapshot from Box or the local cache. "
             "Connect to Box or repair the curated lookup files, then relaunch. "
-            f"Box: {box_error}. Cache: {cache_exc}."
+            f"Box: {box_error}. Cache: {cache_exc}.",
+            reason=box_issue.reason if box_issue else "unavailable",
+            missing_files=box_issue.missing_files if box_issue else (),
         ) from cache_exc
 
     return LookupBootstrapResult(

@@ -62,24 +62,33 @@ def download_box_file(
     digest = hashlib.sha256()
     written = 0
     stream = None
+    operation = "open_temporary"
     try:
-        stream = client.downloads.download_file(source.file_id)
-        if stream is None:
-            raise NdpTransferError(f"Box did not return content for {source.filename}")
-        with os.fdopen(fd, "wb") as output:
+        # fdopen takes ownership. Clear our raw descriptor immediately, before
+        # any operation that can fail or let another thread reuse its number.
+        output = os.fdopen(fd, "wb")
+        fd = None
+        with output:
+            operation = "download"
+            stream = client.downloads.download_file(source.file_id)
+            if stream is None:
+                raise NdpTransferError(f"Box did not return content for {source.filename}")
             while True:
                 if is_cancelled and is_cancelled():
                     raise TransferCancelled(
                         f"cancelled while downloading {source.filename}"
                     )
+                operation = "read"
                 chunk = stream.read(chunk_size)
                 if not chunk:
                     break
+                operation = "write_temporary"
                 output.write(chunk)
                 digest.update(chunk)
                 written += len(chunk)
                 if progress:
                     progress(source.filename, written, source.size)
+            operation = "flush_temporary"
             output.flush()
             os.fsync(output.fileno())
         if written != source.size:
@@ -90,16 +99,34 @@ def download_box_file(
             raise NdpTransferError(
                 f"{source.filename}: downloaded SHA-256 does not match metadata"
             )
+        operation = "verify_written_copy"
+        if (partial.stat().st_size != source.size
+                or _sha256(partial, chunk_size=chunk_size) != source.sha256):
+            raise NdpTransferError(
+                f"{source.filename}: written copy does not match downloaded original"
+            )
+        operation = "publish"
         os.replace(partial, destination)
         return DownloadResult(destination, written, False)
+    except OSError as error:
+        # Exception text from a remote SDK can contain signed capabilities.
+        # Retain only the local filename, operation and OS's standard message.
+        error.box_download_context = dict(
+            filename=Path(source.filename).name, operation=operation,
+            error_type=type(error).__name__, errno=error.errno,
+            message=os.strerror(error.errno) if isinstance(error.errno, int)
+            and error.errno > 0 else "OS error; remote message omitted",
+        )
+        raise
     finally:
         if stream is not None:
             try:
                 stream.close()
             except AttributeError:
                 pass
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         partial.unlink(missing_ok=True)

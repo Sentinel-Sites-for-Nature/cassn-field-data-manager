@@ -23,15 +23,25 @@ from __future__ import annotations
 
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from cassn.box.auth import BoxConfig, get_box_client
+from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
-from cassn.box.verification import is_orphan_on_box, verify_box_hashes
+from cassn.box.scheduling import upload_results
+from cassn.box.transfer import (
+    UploadCancelled, UploadRuntime, error_response, prepare_upload_client, retry_after,
+)
+from cassn.box.upload_state import STATE_DIRECTORY, require_uploads_complete
+from cassn.config import CHUNKED_UPLOAD_THRESHOLD
+from cassn.box.metadata_merge import SHARED_NAMES
+from cassn.box.publication import EventPublication, batch_remote_path
+from cassn.box.verification import (
+    collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths, verify_box_hashes,
+)
 from cassn.core.classification import sanitize_box_folder_name
 from cassn.core.inventory import index_inventory_by_storage_relpath
 from cassn.core.quality_control import append_qc_report, qc_path_for
@@ -39,6 +49,16 @@ from cassn.core.quality_control import append_qc_report, qc_path_for
 # Box API field projection for the verify/fixity walks: enough to navigate and
 # to read each file's server-side SHA-1 without pulling full item payloads.
 _SHA1_FIELDS = ["id", "type", "name", "sha1"]
+
+
+def _publication_error(publication, exc):
+    message = str(exc)
+    if publication is not None:
+        try:
+            publication.fail(exc)
+        except Exception as journal_error:
+            message += f"; recovery record could not be updated: {journal_error}. Retain local staging for review."
+    return message
 
 def _box_retry_delay(exc, attempt: int, *, base: float = 1.0, cap: float = 30.0) -> float:
     """Seconds to wait before the next upload retry.
@@ -48,20 +68,11 @@ def _box_retry_delay(exc, attempt: int, *, base: float = 1.0, cap: float = 30.0)
     ``cap``. Best-effort — the Box SDK's exception shape varies, so status/header
     extraction is defensive and never raises.
     """
-    try:
-        info = getattr(exc, "response_info", None) or getattr(exc, "response", None)
-        status = (
-            getattr(info, "status_code", None)
-            or getattr(exc, "status_code", None)
-            or getattr(exc, "status", None)
-        )
-        if status == 429:
-            headers = getattr(info, "headers", None) or getattr(exc, "headers", None) or {}
-            for k, v in dict(headers).items():
-                if str(k).lower() == "retry-after":
-                    return min(float(v), cap)
-    except Exception:
-        pass
+    status, headers = error_response(exc)
+    if status == 429:
+        server_wait = retry_after(headers)
+        if server_wait is not None:
+            return server_wait
     return min(base * (2 ** (attempt - 1)), cap)
 
 
@@ -94,6 +105,7 @@ class BoxUploadThread(QThread):
 
     progress = Signal(int, int, str)  # current, total, message
     finished = Signal(bool, str)  # success, message
+    metrics_updated = Signal(dict)  # aggregate payload/rate/wait/stage counters
 
     UPLOAD_WORKERS = 8  # parallel upload workers
 
@@ -105,6 +117,8 @@ class BoxUploadThread(QThread):
         *,
         box_config: BoxConfig,
         valid_site_names: set[str],
+        upload_workers: int = UPLOAD_WORKERS,
+        part_workers: int = 2,
     ):
         super().__init__()
         self.deployment_folder = deployment_folder
@@ -117,6 +131,10 @@ class BoxUploadThread(QThread):
         # Cooperative cancellation flag — set from the GUI thread via cancel()
         self._cancel_event = threading.Event()
         self._state_lock = threading.Lock()  # protects shared upload counters
+        self.upload_workers = upload_workers
+        self.upload_runtime = UploadRuntime(cancel=self._cancel_event, transfers=upload_workers,
+                                            part_workers=part_workers)
+        self.upload_runtime.metrics.callback = self.metrics_updated.emit
 
     def cancel(self):
         """Request cooperative cancellation. In-flight uploads finish; no new ones start."""
@@ -128,13 +146,22 @@ class BoxUploadThread(QThread):
 
     def run(self):
         """Upload deployment folder to Box."""
+        publication = None
+        network = None
+        metrics = self.upload_runtime.metrics
+        outcome = 'failed'
         try:
+            require_no_ingest_holds(self.deployment_folder)
+            metrics.output_path = self.deployment_folder / 'qc' / STATE_DIRECTORY / 'metrics.json'
+            metrics.set_stage('preparing')
             self.client = get_box_client(self.box_config)
             if not self.client:
                 self.finished.emit(False, "Could not authenticate with Box")
                 return
 
-            storage = BoxStorage(self.client)
+            self.client, network = prepare_upload_client(self.client, self.upload_runtime)
+            storage = BoxStorage(self.client, upload_runtime=self.upload_runtime,
+                                 journal_dir=self.deployment_folder / 'qc' / STATE_DIRECTORY)
 
             # Validate reserve name against canonical list before building path
             site_name = self.metadata.get("site_name", "")
@@ -156,6 +183,16 @@ class BoxUploadThread(QThread):
             deploy_id = storage.find_or_create_folder(reserve_id, deploy_name)
             self.deploy_folder_id = deploy_id  # saved for provenance re-upload
 
+            append_qc_report(self.deployment_folder, "box_publication", "", "info",
+                             "Preparing a batch upload; completion requires metadata publication and verification.")
+            publication = EventPublication(storage, deploy_id, self.deployment_folder)
+            publication.prepare()  # Reject unsafe merges before sending media.
+            publication.validate_batch_inventory(self.file_inventory)
+
+            def remote_path(path):
+                relative = path.relative_to(self.deployment_folder)
+                return batch_remote_path(relative, publication.attempt_id)
+
             uploadable_files = [
                 path
                 for path in self.deployment_folder.rglob("*")
@@ -170,8 +207,9 @@ class BoxUploadThread(QThread):
             # Write pre-upload manifest
             manifest_entries = []
             for fp in uploadable_files:
-                relative_path = fp.relative_to(self.deployment_folder).as_posix()
-                entry = inventory_entry_by_path.get(relative_path, {})
+                local_relative = fp.relative_to(self.deployment_folder).as_posix()
+                relative_path = remote_path(fp).as_posix()
+                entry = inventory_entry_by_path.get(local_relative, {})
                 manifest_entries.append({
                     "relative_path": relative_path,
                     "filename": fp.name,
@@ -179,6 +217,8 @@ class BoxUploadThread(QThread):
                     "sha1": entry.get("file_hash_sha1", ""),
                 })
             manifest_data = {
+                "scope": "local_batch",
+                "attempt_id": publication.attempt_id,
                 "generated": datetime.now().isoformat(),
                 "deployment": self.deployment_folder.name,
                 "file_count": len(manifest_entries),
@@ -194,6 +234,8 @@ class BoxUploadThread(QThread):
             # collected and unintentionally left it local-only.
             if manifest_path not in uploadable_files:
                 uploadable_files.append(manifest_path)
+            uploadable_files = [fp for fp in uploadable_files
+                                if fp.relative_to(self.deployment_folder).as_posix() not in SHARED_NAMES]
             total_files = len(uploadable_files)
             completed = 0
             uploaded = 0
@@ -206,7 +248,7 @@ class BoxUploadThread(QThread):
             # small and the network is the bottleneck.
             unique_parent_paths = sorted(
                 {
-                    tuple(fp.relative_to(self.deployment_folder).parts[:-1])
+                    tuple(remote_path(fp).parts[:-1])
                     for fp in uploadable_files
                 }
             )
@@ -236,76 +278,58 @@ class BoxUploadThread(QThread):
             cancelled_count = 0
 
             def _upload_one(file_path):
-                """Worker: upload one file with up to 3 attempts and backoff.
-
-                Retries are spaced by exponential backoff (honoring a Box 429
-                Retry-After when present) instead of hammering the API instantly —
-                important on long multi-GB uploads that can trip rate limiting. The
-                backoff wait wakes immediately if the user cancels.
-                """
+                """One file job; request/chunk layers own retry and recovery."""
+                rel_path = remote_path(file_path)
                 if self._cancel_event.is_set():
-                    return (
-                        "cancelled",
-                        file_path.relative_to(self.deployment_folder).as_posix(),
-                        None,
-                    )
-                rel_path = file_path.relative_to(self.deployment_folder)
-                last_err = None
-                max_attempts = 3
-                for attempt in range(1, max_attempts + 1):
-                    if self._cancel_event.is_set():
-                        return ("cancelled", rel_path.as_posix(), None)
-                    try:
-                        action = storage.upload_file_with_path(file_path, deploy_id, rel_path)
-                        return ("ok", rel_path.as_posix(), f"{action}: {rel_path}")
-                    except Exception as e:
-                        # A 409 "already exists" means the file is on Box — typically a
-                        # prior attempt landed it but its ack was lost. Treat as success
-                        # (the post-upload SHA-1 check verifies the bytes), not a failure.
-                        if _is_already_exists(e):
-                            return ("ok", rel_path.as_posix(), f"uploaded: {rel_path}")
-                        last_err = e
-                        if attempt < max_attempts:
-                            # Event.wait() doubles as an interruptible sleep.
-                            if self._cancel_event.wait(_box_retry_delay(e, attempt)):
-                                return ("cancelled", rel_path.as_posix(), None)
-                return (
-                    "fail",
-                    rel_path.as_posix(),
-                    str(last_err)[:200] if last_err else "unknown error",
-                )
+                    return ("cancelled", rel_path.as_posix(), None)
+                try:
+                    action = storage.upload_file_with_path(file_path, deploy_id, rel_path)
+                    metrics.add(**{f'{action}_files': 1})
+                    return ("ok", rel_path.as_posix(), f"{action}: {rel_path}")
+                except UploadCancelled:
+                    return ("cancelled", rel_path.as_posix(), None)
+                except Exception as exc:
+                    # Preserve the existing final hash check for raw-file races;
+                    # no whole-file retry can restart a chunk session here.
+                    if _is_already_exists(exc) and "raw_data" in rel_path.parts:
+                        metrics.add(skipped_files=1)
+                        return ("ok", rel_path.as_posix(), f"skipped: {rel_path}")
+                    metrics.add(failed_files=1)
+                    return ("fail", rel_path.as_posix(), str(exc)[:200])
 
-            with ThreadPoolExecutor(max_workers=self.UPLOAD_WORKERS) as ex:
-                futures = {ex.submit(_upload_one, fp): fp for fp in uploadable_files}
-                for fut in as_completed(futures):
-                    try:
-                        status, rel_path, payload = fut.result()
-                    except Exception as e:
-                        # Defensive: shouldn't happen since _upload_one catches its own
-                        rel_path = futures[fut].relative_to(
-                            self.deployment_folder
-                        ).as_posix()
-                        status, payload = "fail", str(e)[:200]
+            metrics.set_stage('transferring')
+            for file_path, fut in upload_results(
+                uploadable_files, _upload_one, cancel=self._cancel_event,
+                is_large=lambda fp: fp.stat().st_size >= CHUNKED_UPLOAD_THRESHOLD,
+                workers=self.upload_workers, pending_limit=max(32, self.upload_workers), metrics=metrics,
+            ):
+                try:
+                    status, rel_path, payload = fut.result()
+                except Exception as exc:
+                    rel_path = file_path.relative_to(self.deployment_folder).as_posix()
+                    status, payload = "fail", str(exc)[:200]
 
-                    with self._state_lock:
-                        if status == "ok":
-                            completed += 1
-                            if payload and payload.startswith("skipped:"):
-                                skipped += 1
-                            elif payload and payload.startswith("versioned:"):
-                                versioned += 1
-                            else:
-                                uploaded += 1
-                            self.progress.emit(completed, total_files, payload or "")
-                        elif status == "cancelled":
-                            cancelled_count += 1
+                with self._state_lock:
+                    if status == "ok":
+                        completed += 1
+                        if payload and payload.startswith("skipped:"):
+                            skipped += 1
+                        elif payload and payload.startswith("versioned:"):
+                            versioned += 1
                         else:
-                            failed_uploads.append((rel_path, payload or ""))
-                            # Still bump the progress so the UI doesn't appear stuck
-                            completed += 1
-                            self.progress.emit(completed, total_files, f"failed: {rel_path}")
+                            uploaded += 1
+                        self.progress.emit(completed, total_files, payload or "")
+                    elif status == "cancelled":
+                        cancelled_count += 1
+                    else:
+                        failed_uploads.append((rel_path, payload or ""))
+                        completed += 1
+                        self.progress.emit(completed, total_files, f"failed: {rel_path}")
 
             if self._cancel_event.is_set():
+                outcome = 'cancelled'
+                cancelled_count = total_files - completed
+                publication.fail("Upload cancelled before metadata publication")
                 # User-requested cancellation — exit before verification.
                 append_qc_report(
                     self.deployment_folder,
@@ -323,6 +347,25 @@ class BoxUploadThread(QThread):
                 )
                 return
 
+            if failed_uploads:
+                raise RuntimeError(f"{len(failed_uploads)} file upload(s) failed: {failed_uploads[:10]}")
+
+            # Only publish accumulated metadata after the batch's media is
+            # verified. Earlier archive rows never become local inventory rows.
+            require_uploads_complete(self.deployment_folder)
+            metrics.set_stage('verifying_media')
+            ok, summary, issues = verify_box_hashes(
+                storage, deploy_id, deploy_name, self.file_inventory,
+                self.deployment_folder, hash_retry=2,
+            )
+            if not ok:
+                raise RuntimeError(f"Batch media verification failed before publication: {summary}; {issues[:10]}")
+            if self._cancel_event.is_set():
+                raise RuntimeError("Upload cancelled before metadata publication")
+            publication.mark_media_verified()
+            metrics.set_stage('publishing_metadata')
+            publication.publish()
+
             # Post-upload presence check: recursively list the Box folder and confirm
             # every expected file arrived. Presence-only and non-fatal — the GUI then
             # runs the full automatic hash + orphan verification
@@ -331,12 +374,14 @@ class BoxUploadThread(QThread):
             # without this, large device folders (>1000 files) were undercounted,
             # causing huge false-positive "missing from Box" reports.
             try:
+                metrics.set_stage('checking_presence')
                 box_paths = storage.collect_file_paths(deploy_id)
 
                 expected_paths = {e["relative_path"] for e in manifest_entries}
                 missing = expected_paths - box_paths
                 if missing:
                     missing_str = ", ".join(sorted(missing)[:10])
+                    publication.fail(f"Required upload paths missing: {missing_str}")
                     append_qc_report(
                         self.deployment_folder,
                         "box_upload",
@@ -345,7 +390,7 @@ class BoxUploadThread(QThread):
                         f"{len(missing)} file(s) uploaded but missing from Box: {missing_str}",
                     )
                     self.finished.emit(
-                        failed_uploads == [],
+                        False,
                         f"Completed {completed} of {total_files} files "
                         f"({uploaded} uploaded, {versioned} metadata versioned, {skipped} skipped). "
                         f"{len(missing)} appear missing from Box after verification: {missing_str}. "
@@ -360,36 +405,23 @@ class BoxUploadThread(QThread):
                     "pass",
                     f"All {uploaded} file(s) uploaded and verified on Box",
                 )
-            except Exception:
-                pass  # verification failure is non-fatal; upload succeeded
+            except Exception as exc:
+                raise RuntimeError(f"Post-publication presence check failed: {exc}") from exc
 
-            if failed_uploads:
-                # Surface per-file failures even if Box-side reconciliation passed
-                fail_lines = "\n".join(f"  • {p}: {err}" for p, err in failed_uploads[:10])
-                more = f"\n... +{len(failed_uploads) - 10} more" if len(failed_uploads) > 10 else ""
-                append_qc_report(
-                    self.deployment_folder,
-                    "box_upload",
-                    "",
-                    "warning",
-                    f"{len(failed_uploads)} file(s) failed to upload after retries",
-                )
-                self.finished.emit(
-                    False,
-                    f"Completed {completed} of {total_files} files "
-                    f"({uploaded} uploaded, {versioned} metadata versioned, {skipped} skipped). "
-                    f"{len(failed_uploads)} file(s) failed after 3 retries each:\n{fail_lines}{more}\n\n"
-                    "Re-run the upload — successfully uploaded files will be skipped, only failed ones retry.",
-                )
-                return
-
+            outcome = 'complete'
             self.finished.emit(
                 True,
-                f"Box upload verified: {uploaded} uploaded, {versioned} metadata file(s) versioned, "
+                f"Batch media verified and event metadata merged: {uploaded} uploaded, "
+                f"{len(publication.candidates)} shared sidecar(s) verified, "
                 f"{skipped} existing raw file(s) skipped.",
             )
         except Exception as e:
-            self.finished.emit(False, f"Upload error: {str(e)}")
+            outcome = 'cancelled' if self._cancel_event.is_set() else 'failed'
+            self.finished.emit(False, f"Upload error: {_publication_error(publication, e)}")
+        finally:
+            metrics.set_stage(outcome)
+            if network is not None:
+                network.close()
 
 
 class BoxVerifyThread(QThread):
@@ -449,22 +481,28 @@ class BoxVerifyThread(QThread):
                 self.finished.emit(False, f"Deployment folder '{deploy_name}' not found on Box", [])
                 return
 
-            box_paths = storage.collect_file_paths(deploy_id, fields=_SHA1_FIELDS)
+            box_hashes = collect_box_file_hashes(storage, deploy_id)
+            box_paths = set(box_hashes)
+            archive_paths, archive_issues = recorded_archive_paths(storage, deploy_id, box_hashes)
 
             local_paths = set(index_inventory_by_storage_relpath(self.file_inventory))
             missing = local_paths - box_paths
             # Orphan ("extra on Box") detection, after the metadata-sidecar allowlist
             # shared with the automatic post-upload verify.
-            extra = {path for path in (box_paths - local_paths) if is_orphan_on_box(path)}
+            extra = {path for path in (box_paths - local_paths - archive_paths) if is_orphan_on_box(path)}
 
             issues = [
                 {"type": "missing_from_box", "filename": n} for n in sorted(missing)
-            ] + [{"type": "extra_on_box", "filename": n} for n in sorted(extra)]
-            ok = not missing
-            if not missing and not extra:
-                summary = "All files are present on Box."
+            ] + [{"type": "extra_on_box", "filename": n} for n in sorted(extra)] + archive_issues
+            ok = bool(local_paths) and not missing and not archive_issues
+            if not local_paths:
+                summary = "No valid expected inventory to verify."
+            elif not missing and not extra:
+                summary = "All batch files are present on Box."
             else:
                 summary = f"Box verify: {len(missing)} missing from Box, {len(extra)} unexpected."
+            summary += (f" Archive metadata: {len(archive_paths)} recorded raw path(s) matched; "
+                        f"{len(archive_issues)} unverified row(s). Batch presence and archive coverage are separate checks.")
             self.finished.emit(ok, summary, issues)
         except Exception as e:
             self.finished.emit(False, f"Box verify error: {e}", [])
@@ -482,40 +520,38 @@ class ProvenanceUploadThread(QThread):
         self.box_config = box_config
 
     def run(self):
+        publication = None
+        network = None
+        runtime = UploadRuntime()
         try:
             client = get_box_client(self.box_config)
             if not client:
                 self.finished.emit(False, "Could not authenticate with Box for provenance upload")
                 return
 
-            for csv_path in self.csv_paths:
-                if not csv_path.exists():
-                    continue
-                # Check if file already exists in the folder; if so, upload new version
-                items = client.folders.get_folder_items(self.deploy_folder_id).entries
-                existing = next(
-                    (item for item in items if item.type == "file" and item.name == csv_path.name),
-                    None,
-                )
-                with open(csv_path, "rb") as f:
-                    if existing:
-                        from box_sdk_gen import UploadFileVersionAttributes
-
-                        client.uploads.upload_file_version(
-                            existing.id,
-                            attributes=UploadFileVersionAttributes(name=csv_path.name),
-                            file=f,
-                        )
-                    else:
-                        client.uploads.upload_file(
-                            attributes={"name": csv_path.name, "parent": {"id": self.deploy_folder_id}},
-                            file=f,
-                        )
+            if not self.csv_paths or any(not path.is_file() for path in self.csv_paths):
+                raise ValueError("Expected provenance CSV is missing")
+            folder = self.csv_paths[0].parent
+            if any(path.parent != folder for path in self.csv_paths):
+                raise ValueError("Provenance files belong to different local events")
+            require_uploads_complete(folder)
+            runtime.metrics.output_path = folder / 'qc' / STATE_DIRECTORY / 'diagnostics' / 'provenance.json'
+            runtime.metrics.set_stage('publishing_provenance')
+            client, network = prepare_upload_client(client, runtime)
+            publication = EventPublication(BoxStorage(client), self.deploy_folder_id,
+                                           folder, provenance=True, csv_paths=self.csv_paths)
+            publication.prepare()
+            publication.publish()
+            runtime.metrics.set_stage('complete')
 
             self.finished.emit(True, "Provenance CSVs uploaded to Box")
         except Exception as e:
-            self.finished.emit(False, f"Provenance upload error: {e}")
+            runtime.metrics.set_stage('failed')
+            self.finished.emit(False, f"Provenance upload error: {_publication_error(publication, e)}")
 
+        finally:
+            if network is not None:
+                network.close()
 
 class FixityCheckThread(QThread):
     """End-to-end file-hash verification against Box.

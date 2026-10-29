@@ -764,10 +764,31 @@ def test_interrupted_upload_resumes_media_and_refreshes_manifests(
     uploaded: list[str] = []
 
     class FakeClient:
-        def upload_file(self, path, bucket, key, ExtraArgs):
-            uploaded.append(key)
+        pass
+
+    class FakeCopy:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    def fake_copy(command, stdout, stderr):
+        assert command[1:3] == ["s3", "cp"]
+        assert "--recursive" in command
+        assert "sync" not in command
+        source = Path(command[3])
+        for path in source.rglob("*"):
+            if path.is_file():
+                assert path.is_symlink()
+                relative = path.relative_to(source).as_posix()
+                uploaded.append(f"upload/{SOUNDHUB_PROJECT_SHORT_NAME}/{relative}")
+                stdout.write(f"upload: {path} to {command[4]}{relative}\n".encode())
+        stdout.flush()
+        return FakeCopy()
 
     monkeypatch.setattr("cassn.soundhub.upload._client", lambda settings: FakeClient())
+    monkeypatch.setattr("cassn.soundhub.upload.shutil.which", lambda name: "/test/aws")
+    monkeypatch.setattr("cassn.soundhub.upload.subprocess.Popen", fake_copy)
     monkeypatch.setattr(
         "cassn.soundhub.upload._existing_sizes",
         lambda client, settings: {
@@ -805,12 +826,52 @@ def test_brian_ingest_schema_is_explicit():
     recording = build_recording_rows([source])[0]
     assert {"feature_type", "aru_status"} <= deployment.keys()
     assert "ARU_status" not in deployment
-    assert deployment["aru_status"] == "functioning"
+    assert deployment["aru_status"] == "Functioning"
     assert deployment["mounted_on"] == "pole"
     assert source["mounted_on"] == "metal_pole"
-    assert list(recording) == ["path", "deployment_id", "start", "end", "sample_rate"]
+    assert deployment["recording_schedule"] == "daily"
+    assert deployment["recording_duration"] == "12:59"
+    assert "frequency" not in deployment and "duration" not in deployment
+    assert source["frequency"] == "daily" and source["duration"] == "12:59"
+    assert list(recording) == ["deployment_id", "path", "start", "end", "sample_rate", "notes"]
+    assert recording["notes"] == ""
     assert recording["path"] == "UC_QuailRidge_plot1_BD_20260118/UC_QuailRidge_plot1_BD_20260118_00001.flac"
     assert recording["sample_rate"] == "48000"
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("", "Functioning"), (" LOW   Voltage ", "Unknown Failure"),
+])
+def test_soundhub_status_uses_template_labels_without_changing_source(reason, expected):
+    source = audio_row("UC_QuailRidge_plot1_BD_20260118", "00001",
+                       recording_stop_reason=reason, ARU_status="low voltage")
+    before = dict(source)
+    assert build_deployment_rows([source])[0]["aru_status"] == expected
+    assert source == before
+
+
+def test_deployment_fragments_with_old_schedule_headers_require_restaging(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    write_deployment_fragments(staging, read_bd_audio_rows(deployment))
+    refresh_project_csvs(staging)
+    cumulative = project_root(staging) / "deployment.csv"
+    before = cumulative.read_bytes()
+    fragment = next(fragments_root(staging).glob("*/deployment.csv"))
+    fragment.write_text(fragment.read_text().replace("recording_schedule", "frequency")
+                        .replace("recording_duration", "duration"))
+    with pytest.raises(SoundHubStagingError, match="header does not match"):
+        refresh_project_csvs(staging)
+    assert cumulative.read_bytes() == before
+
+
+def test_staging_rejects_non_template_status_even_when_fragments_agree(deployment, tmp_path):
+    staging = tmp_path / "staging"
+    write_deployment_fragments(staging, read_bd_audio_rows(deployment))
+    for fragment in fragments_root(staging).glob("*/deployment.csv"):
+        fragment.write_text(fragment.read_text().replace("Functioning", "low voltage"))
+    refresh_project_csvs(staging)
+    with pytest.raises(SoundHubStagingError, match="documented SoundHub status"):
+        validate_staging_manifests(staging)
 
 
 @pytest.mark.parametrize("sample_rate", ["", "0", "-48000", "unknown", "48.0"])
@@ -876,11 +937,26 @@ def test_excluded_low_voltage_failure_marks_only_its_deployment(deployment):
     assert all(r["ARU_status"] == "functioning" for r in selected)
     statuses = {r["deployment_id"]: r["aru_status"]
                 for r in build_deployment_rows(selected)}
-    assert statuses == {"UC_StrathearnRanch_plot1_BD_20260714": "low voltage",
-                        "UC_StrathearnRanch_plot2_BD_20260713": "functioning"}
+    assert statuses == {"UC_StrathearnRanch_plot1_BD_20260714": "Unknown Failure",
+                        "UC_StrathearnRanch_plot2_BD_20260713": "Functioning"}
 
 
 @pytest.mark.parametrize("feature,expected", [("", "None"), ("  ", "None"), (None, "None"), ("Water source", "Water source")])
 def test_deployment_feature_type_uses_template_none(feature, expected):
     row = audio_row("UC_QuailRidge_plot1_BD_20260118", "00001", feature_type=feature)
     assert build_deployment_rows([row])[0]["feature_type"] == expected
+
+
+@pytest.mark.parametrize("installed", ["/opt/homebrew/bin/flac", "/usr/local/bin/flac"])
+def test_flac_lookup_without_homebrew_on_path(monkeypatch, installed):
+    from cassn.soundhub import staging
+    monkeypatch.setattr(staging.sys, "platform", "darwin")
+    monkeypatch.setattr(staging.shutil, "which", lambda name: installed if name == installed else None)
+    assert staging.flac_available()
+    assert staging.flac_executable() == installed
+
+
+def test_flac_lookup_respects_existing_path(monkeypatch):
+    from cassn.soundhub import staging
+    monkeypatch.setattr(staging.shutil, "which", lambda name: "/custom/flac" if name == "flac" else None)
+    assert staging.flac_executable() == "/custom/flac"

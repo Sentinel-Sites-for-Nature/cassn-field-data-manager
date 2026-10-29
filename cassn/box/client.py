@@ -16,9 +16,8 @@ own ``while True: ... offset += 1000`` paginator, and they had already drifted
   reference**, so an upload that adds a file to a folder updates the cache the
   next lookup will see.
 
-The behavior — pagination size, the find-or-create flow, the skip/version/
-upload decision, and which files are uploadable — is identical to the original;
-only the duplication is gone.
+Shared event metadata is deliberately excluded from unconditional sidecar
+replacement. The event publisher merges it and writes conditional versions.
 """
 
 from __future__ import annotations
@@ -39,8 +38,10 @@ class BoxStorage:
 
     PAGE_LIMIT = 1000  # Box's max page size for folder listings
 
-    def __init__(self, client):
+    def __init__(self, client, *, upload_runtime=None, journal_dir=None):
         self.client = client
+        self.upload_runtime = upload_runtime
+        self.journal_dir = journal_dir
         self._resolved_folders: dict[tuple, str] = {}
         self._folder_files: dict[str, dict[str, str]] = {}
 
@@ -155,6 +156,7 @@ class BoxStorage:
         Returns one of ``"skipped"``, ``"versioned"``, or ``"uploaded"``:
 
         * files under ``raw_data/`` are immutable — if already on Box, skip;
+        * shared event metadata must use the event publisher;
         * other (sidecar) files that already exist are re-uploaded as a new
           version, so regenerated CSVs/JSONs refresh on Box;
         * new files use a chunked upload at/above ``chunked_threshold`` bytes,
@@ -166,44 +168,96 @@ class BoxStorage:
                 current_folder_id = self.find_or_create_folder(current_folder_id, folder_name)
 
         file_name = relative_path.name
+        from cassn.box.metadata_merge import SHARED_NAMES, MetadataConflict
+        if relative_path.as_posix() in SHARED_NAMES:
+            raise MetadataConflict(
+                f"{relative_path} requires the event metadata merge/publication workflow"
+            )
         folder_map = self.folder_file_map(current_folder_id)
         existing_id = folder_map.get(file_name)
         is_raw_data = "raw_data" in relative_path.parts
 
         if existing_id and is_raw_data:
+            # Reconcile a lost commit reply before leaving its local journal pending.
+            if self.upload_runtime is not None and self.journal_dir is not None:
+                from cassn.box.chunked import ChunkUploader, SDKChunkBackend
+                uploader = ChunkUploader(SDKChunkBackend(self.client), self.upload_runtime, self.journal_dir)
+                if uploader.needs_resume(local_path, current_folder_id, file_name):
+                    uploader.upload(local_path, current_folder_id, file_name)
             return "skipped"
 
         file_size = local_path.stat().st_size
 
         with open(local_path, "rb") as file_stream:
             if existing_id and not is_raw_data:
-                from box_sdk_gen import UploadFileVersionAttributes
-
-                self.client.uploads.upload_file_version(
-                    existing_id,
-                    attributes=UploadFileVersionAttributes(name=file_name),
-                    file=file_stream,
-                )
+                self._upload_direct(local_path, current_folder_id, file_name, file_stream,
+                                    existing_id=existing_id)
                 return "versioned"
             elif file_size >= chunked_threshold:
-                self.client.chunked_uploads.upload_big_file(
-                    file=file_stream,
-                    file_name=file_name,
-                    file_size=file_size,
-                    parent_folder_id=current_folder_id,
-                )
-                folder_map.setdefault(file_name, "")
-                return "uploaded"
-            else:
-                result = self.client.uploads.upload_file(
-                    attributes={"name": file_name, "parent": {"id": current_folder_id}},
-                    file=file_stream,
-                )
-                try:
-                    folder_map[file_name] = result.entries[0].id  # type: ignore[attr-defined]
-                except Exception:
+                if self.upload_runtime is not None:
+                    if self.journal_dir is None:
+                        raise RuntimeError("Resumable upload requires a local recovery directory")
+                    from cassn.box.chunked import ChunkUploader, SDKChunkBackend
+                    file_id = ChunkUploader(SDKChunkBackend(self.client), self.upload_runtime,
+                                            self.journal_dir).upload(
+                                                local_path, current_folder_id, file_name)
+                    folder_map[file_name] = file_id
+                else:
+                    self.client.chunked_uploads.upload_big_file(
+                        file=file_stream, file_name=file_name, file_size=file_size,
+                        parent_folder_id=current_folder_id,
+                    )
                     folder_map.setdefault(file_name, "")
                 return "uploaded"
+            else:
+                file_id = self._upload_direct(local_path, current_folder_id, file_name, file_stream)
+                folder_map[file_name] = file_id
+                return "uploaded"
+
+    def _upload_direct(self, path, parent, name, stream, *, existing_id=None):
+        """Reconcile lost replies before retrying a uniquely named file create.
+
+        An uncertain version upload is checked once, never blindly repeated.
+        The upload transport already owns all 429/401 retries.
+        """
+        from box_sdk_gen import UploadFileVersionAttributes
+        from cassn.box.chunked import SDKChunkBackend
+        from cassn.box.transfer import uncertain_request
+        import hashlib
+
+        start = stream.tell()
+        before = path.stat()
+        fingerprint = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        for attempt in range(3):
+            try:
+                if existing_id:
+                    self.client.uploads.upload_file_version(
+                        existing_id, attributes=UploadFileVersionAttributes(name=name), file=stream)
+                    return existing_id
+                result = self.client.uploads.upload_file(
+                    attributes={"name": name, "parent": {"id": parent}}, file=stream)
+                return result.entries[0].id
+            except Exception as exc:
+                if self.upload_runtime is None or not uncertain_request(exc):
+                    raise
+                self.upload_runtime.check_cancelled()
+                current = path.stat()
+                if (current.st_size, current.st_mtime_ns, current.st_ctime_ns) != fingerprint:
+                    raise RuntimeError("Source changed during upload; retain staging for review") from exc
+                sha1 = hashlib.sha1()
+                with path.open('rb') as source:
+                    while block := source.read(1024 * 1024):
+                        self.upload_runtime.check_cancelled()
+                        sha1.update(block)
+                backend = SDKChunkBackend(self.client)
+                found = backend.find_file(parent, name, before.st_size, sha1.hexdigest())
+                if found:
+                    self.upload_runtime.metrics.add(acknowledged_bytes=before.st_size)
+                    return found
+                if existing_id or attempt == 2:
+                    raise  # Keep version/unknown outcomes for review; no extra version.
+                self.upload_runtime.sleep(2 ** attempt)
+                stream.seek(start)
 
     # -- classification ----------------------------------------------------
 
@@ -217,6 +271,10 @@ class BoxStorage:
         sidecars that may still exist in historical ``raw_data/`` folders.
         """
         name = file_path.name
+        if (name.startswith("box_publication_state.json")
+                or "box_publications" in file_path.parts
+                or "box_upload_sessions" in file_path.parts):
+            return False  # Local recovery journal; never an input to its own upload.
         if name.startswith(".") or name.startswith("._") or name.startswith("session.json"):
             return False
         if name.endswith("_manifest.json") and "raw_data" in file_path.parts:

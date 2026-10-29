@@ -11,6 +11,7 @@ import os
 import hashlib
 import shutil
 import time
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,12 +60,14 @@ def copy_file_single_read_verified(
     source = Path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
     last_error: OSError | None = None
     mismatch = False
 
     for attempt in range(1, max_attempts + 1):
-        partial.unlink(missing_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".partial",
+                                         dir=destination.parent)
+        os.close(fd)
+        partial = Path(temporary)
         reserved = False
         source_sha256 = hashlib.sha256()
         source_sha1 = hashlib.sha1()
@@ -92,6 +95,8 @@ def copy_file_single_read_verified(
                     return VerifiedCopy(
                         sha256_value, sha1_value, attempt, accepted=False
                     )
+            if destination.exists() or destination.is_symlink():
+                raise FileExistsError(f"Unrecorded destination already exists: {destination}")
             partial.replace(destination)
             return VerifiedCopy(sha256_value, sha1_value, attempt, accepted=True)
         except OSError as exc:
@@ -122,14 +127,18 @@ def hash_file_with_retries(
     *,
     max_attempts: int = 3,
     retry_delay: float = 0.5,
+    progress=None,
 ) -> FileHashes:
     """Hash ``path``, retrying transient OS-level read failures."""
     path = Path(path)
     last_error: OSError | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            sha256, sha1 = sha256_sha1(path)
+            sha256, sha1 = (sha256_sha1(path) if progress is None
+                            else sha256_sha1(path, progress=progress))
             return FileHashes(sha256, sha1, attempt)
+        except InterruptedError:
+            raise
         except OSError as exc:
             last_error = exc
             if attempt < max_attempts and retry_delay:
@@ -159,12 +168,14 @@ def copy_file_verified(
     source = Path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
     last_error: OSError | None = None
     mismatch = False
 
     for attempt in range(1, max_attempts + 1):
-        partial.unlink(missing_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".partial",
+                                         dir=destination.parent)
+        os.close(fd)
+        partial = Path(temporary)
         try:
             shutil.copy2(source, partial)
             actual_sha256, actual_sha1 = sha256_sha1(partial)

@@ -1,7 +1,7 @@
 """CA-SSN status convention: any observed low-voltage interruption wins.
 
 Functioning is a default, not a certification of complete schedule coverage.
-SoundHub's accepted vocabulary remains subject to confirmation with Brian.
+SoundHub maps these internal values to its accepted labels at export.
 """
 
 FUNCTIONING = "functioning"

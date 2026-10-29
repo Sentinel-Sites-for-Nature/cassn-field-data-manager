@@ -24,6 +24,7 @@ path helpers; none of them import Qt or Box.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -46,7 +47,22 @@ from cassn.lookups import BOX_MANAGED_FILENAMES
 _QC_REPORT_LOCK = threading.RLock()
 
 
-def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
+def qc_file_reference(entry: dict) -> dict:
+    """Stable file identity; physical split paths are resolved from inventory in the UI."""
+    return {
+        "device_label": entry.get("device_label", ""),
+        "filename": entry.get("new_filename") or entry.get("original_filename") or entry.get("filename") or "",
+    }
+
+
+def qc_issue(code, severity, title, message, action, *, files=(), count=None, unit="files") -> dict:
+    files = list(files)
+    return {"code": code, "severity": severity, "title": title, "message": message,
+            "action": action, "files": files, "count": len(files) if count is None else count,
+            "unit": unit}
+
+
+def check_camera_timezones(entries: list[dict], *, findings: list | None = None) -> tuple[str, str]:
     """One device-level result, retaining errors even alongside warnings.
 
     Historical inventories without original EXIF evidence are unverified, not
@@ -56,6 +72,7 @@ def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
     groups = {}
     images = [entry for entry in entries if entry.get("file_type") == "image"]
     for entry in images:
+        status = "unverified_camera_time"
         if "camera_datetime_original" not in entry:
             severity, message = "warning", "Original camera EXIF not retained in this inventory; timezone cannot be verified"
         else:
@@ -64,23 +81,77 @@ def check_camera_timezones(entries: list[dict]) -> tuple[str, str]:
                 "OffsetTimeOriginal": entry.get("camera_offset_time_original"),
             })
             severity, message = result.check.severity, result.check.message
+            status = result.status
+            base_status = status.split(";")[0]
+            pacific_time = "Pacific daylight time" if result.effective_offset == "-07:00" else "Pacific standard time"
+            offset_messages = {
+                "offset_mismatch_corrected": (
+                    f"Timezone tag says UTC{result.check.reported_offset}; "
+                    f"expected UTC{result.effective_offset} ({pacific_time})"
+                ),
+                "offset_missing": "Timezone tag is missing",
+                "offset_invalid": "Timezone tag is invalid",
+            }
+            if base_status in offset_messages:
+                message = offset_messages[base_status]
             if (entry.get("camera_timestamp_source") != CAMERA_TIMESTAMP_SOURCE
-                    and result.status.split(";")[0] in {"offset_mismatch_corrected", "offset_invalid"}):
+                    and base_status in {"offset_mismatch_corrected", "offset_invalid"}):
                 # A QC rerun must not imply that legacy stored times were fixed.
                 severity = "error"
-                message = message.replace("; resolved using local civil time", "")
-                message += "; historical timestamp has not been recalculated"
+                status = "historical_camera_time"
+                message += ". Stored timestamps still need correction; this check did not change them"
+            elif base_status in offset_messages:
+                message += f". Camera clock reading unchanged; interpreted as {pacific_time}"
+                if ";datetime_fallback" in status:
+                    message += "; original capture time was missing, so the EXIF DateTime field was used"
+                else:
+                    message += ". No timezone action needed"
         counts[severity] += 1
         if severity != "pass":
-            group = groups.setdefault((severity, message), {"count": 0, "examples": []})
+            resolved = severity == "warning" and status in {
+                "offset_mismatch_corrected", "offset_missing", "offset_invalid",
+            }
+            group = groups.setdefault((severity, message), {
+                "count": 0, "examples": [], "files": [], "status": status,
+                "resolved": resolved,
+            })
             group["count"] += 1
+            if findings is not None and not resolved:
+                group["files"].append(qc_file_reference(entry))
             if len(group["examples"]) < 3:
                 group["examples"].append(entry.get("new_filename") or entry.get("original_filename") or "unnamed image")
     severity = "error" if counts["error"] else "warning" if counts["warning"] else "pass"
-    summary = f"Camera timezone QC: {len(images)} image(s); {counts['pass']} passed, {counts['error']} errors, {counts['warning']} warnings."
-    for (_, message), group in groups.items():
-        summary += f"\n{group['count']} image(s): {message}. Examples: {', '.join(group['examples'])}"
-    return severity, summary
+    lines = []
+    if not images:
+        lines.append("No camera photos to check.")
+    elif counts["pass"]:
+        noun = "photo" if counts["pass"] == 1 else "photos"
+        lines.append(f"{counts['pass']:,} {noun}: timezone tags match.")
+    for (level, message), group in groups.items():
+        noun = "photo" if group["count"] == 1 else "photos"
+        line = f"{group['count']:,} {noun}: {message}."
+        if not group["resolved"]:
+            line += f" Examples: {', '.join(group['examples'])}"
+        lines.append(line)
+        if findings is not None:
+            resolved = group["resolved"]
+            title = {
+                "invalid_capture_time": "Missing or invalid capture time",
+                "ambiguous_capture_time": "Ambiguous capture time",
+                "nonexistent_capture_time": "Invalid daylight-saving capture time",
+                "historical_camera_time": "Historical timestamp needs correction",
+                "unverified_camera_time": "Camera time cannot be verified",
+            }.get(group["status"], "Camera timestamp needs review")
+            findings.append(qc_issue(
+                "resolved_camera_offset" if resolved else group["status"],
+                "info" if resolved else level,
+                "Camera timezone handled during processing" if resolved else title,
+                message,
+                ("No offset action needed. Camera clock accuracy has not been verified."
+                 if resolved else "Inspect the original image metadata and field records; do not guess a replacement time."),
+                files=group["files"], count=group["count"], unit="photos",
+            ))
+    return severity, "Camera timezone QC: " + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +216,7 @@ def build_box_verification_record(
     """
     box_missing = [i for i in box_issues if i.get("type") == "missing_from_box"]
     box_extra = [i for i in box_issues if i.get("type") == "extra_on_box"]
-    verified = hash_ok and not box_missing and not box_extra and not hash_issues
+    verified = hash_ok and not box_issues and not hash_issues
     return {
         "verified_at": verified_at or datetime.now().isoformat(timespec="seconds"),
         "verified": verified,
@@ -153,6 +224,8 @@ def build_box_verification_record(
             "summary": box_summary,
             "missing_from_box": [i.get("filename", "") for i in box_missing],
             "extra_on_box": [i.get("filename", "") for i in box_extra],
+            "archive_metadata_issues": [i for i in box_issues
+                                        if i.get("type") == "archive_metadata_unverified"],
         },
         "hash_verification": {
             "ok": hash_ok,
@@ -300,7 +373,7 @@ def _compute_qc_current_state(history_session: list, history_devices: dict) -> l
     return current
 
 
-def append_qc_report(deployment_folder: Path, check: str, device: str, severity: str, message: str) -> None:
+def append_qc_report(deployment_folder: Path, check: str, device: str, severity: str, message: str, findings: list | None = None) -> None:
     """Append one finding to ``qc_report.json`` in the deployment folder.
 
     Structure::
@@ -315,10 +388,12 @@ def append_qc_report(deployment_folder: Path, check: str, device: str, severity:
         }
 
     History is append-only; ``current_state`` is rebuilt on every call.
+    Optional structured ``findings`` retain unusual-file identities and evidence.
+    Resolved offset notices carry aggregate counts without per-file lists.
     """
     with _QC_REPORT_LOCK:
         _append_qc_report_locked(
-            deployment_folder, check, device, severity, message
+            deployment_folder, check, device, severity, message, findings=findings
         )
 
 
@@ -328,6 +403,7 @@ def _append_qc_report_locked(
     device: str,
     severity: str,
     message: str,
+    *, findings: list | None = None,
 ) -> None:
     """Read-modify-write implementation guarded by ``_QC_REPORT_LOCK``."""
     report_path = qc_path_for(deployment_folder, "qc_report.json")
@@ -358,6 +434,9 @@ def _append_qc_report_locked(
         "timestamp": datetime.now().isoformat(),
     }
 
+    if findings is not None:
+        entry["findings"] = findings
+
     if device:
         history["devices"].setdefault(device, []).append(entry)
     else:
@@ -378,7 +457,7 @@ def _append_qc_report_locked(
 # Checks
 # ---------------------------------------------------------------------------
 
-def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
+def check_sequence_integrity(entries: list, device_label: str, *, findings: list | None = None) -> list[str]:
     """Check Reconyx sequence/event grouping integrity for one device's entries.
 
     Returns a list of warning strings (empty = all clear). Verifies, per
@@ -390,6 +469,15 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
       (d) ``sequence_event_num`` is contiguous across the device.
     """
     warnings = []
+
+    def warn(message, files=()):
+        warnings.append(message)
+        if findings is not None:
+            findings.append(qc_issue(
+                "sequence_gap", "warning", "Burst sequence needs review", message,
+                "Compare the source card and copy records. Missing expected frames do not prove a copy failure.",
+                files=[qc_file_reference(e) for e in files], count=1, unit="burst findings",
+            ))
     image_entries = [e for e in entries if e.get('file_type') == 'image' and e.get('sequence_event_num') not in ('', None)]
     if not image_entries:
         return warnings
@@ -413,9 +501,10 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
                 expected = int(next(iter(totals)))
                 actual = len(files)
                 if actual != expected:
-                    warnings.append(
+                    warn(
                         f"Burst #{event_num}: expected {expected} frames, found {actual} "
-                        f"(missing {expected - actual})"
+                        f"(missing {expected - actual})",
+                        files=files,
                     )
             except (ValueError, TypeError):
                 expected = None
@@ -430,19 +519,22 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
         if positioned:
             positions = sorted(pos for pos, _ in positioned)
             if len(set(positions)) != len(positions):
-                warnings.append(
-                    f"Burst #{event_num}: duplicate sequence positions {positions}"
+                warn(
+                    f"Burst #{event_num}: duplicate sequence positions {positions}",
+                    files=files,
                 )
             observed_sequence = list(range(min(positions), max(positions) + 1))
             if positions != observed_sequence:
-                warnings.append(
+                warn(
                     f"Burst #{event_num}: non-sequential observed positions {positions}; "
-                    f"observed positions should not skip within an app-assigned event"
+                    f"observed positions should not skip within an app-assigned event",
+                    files=files,
                 )
             if min(positions) != 1:
-                warnings.append(
+                warn(
                     f"Burst #{event_num}: first observed sequence position is {min(positions)}; "
-                    "expected position 1 to start the event"
+                    "expected position 1 to start the event",
+                    files=files,
                 )
 
         timed = []
@@ -464,23 +556,26 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
             for (pos1, dt1, _), (pos2, dt2, _) in zip(timed, timed[1:]):
                 gap_seconds = (dt2 - dt1).total_seconds()
                 if gap_seconds <= 0:
-                    warnings.append(
+                    warn(
                         f"Burst #{event_num}: timestamps are not increasing between "
-                        f"positions {pos1} and {pos2}"
+                        f"positions {pos1} and {pos2}",
+                        files=files,
                     )
                 elif gap_seconds > 2:
-                    warnings.append(
+                    warn(
                         f"Burst #{event_num}: positions {pos1} and {pos2} are "
-                        f"{gap_seconds:g}s apart; expected 1s, tolerating up to 2s"
+                        f"{gap_seconds:g}s apart; expected 1s, tolerating up to 2s",
+                        files=files,
                     )
 
             span_seconds = (timed[-1][1] - timed[0][1]).total_seconds()
             span_limit = expected if expected is not None else max(1, len(timed) - 1)
             if span_seconds > span_limit:
-                warnings.append(
+                warn(
                     f"Burst #{event_num}: timestamp span is {span_seconds:g}s across "
                     f"{len(timed)} frame(s); expected about {max(0, len(timed) - 1)}s "
-                    f"and tolerating up to {span_limit}s"
+                    f"and tolerating up to {span_limit}s",
+                    files=files,
                 )
 
     # (d) check for gaps in event_num sequence
@@ -489,7 +584,7 @@ def check_sequence_integrity(entries: list, device_label: str) -> list[str]:
         if event_nums[i] != event_nums[i - 1] + 1:
             gap_start = event_nums[i - 1] + 1
             gap_end = event_nums[i] - 1
-            warnings.append(
+            warn(
                 f"Gap in event sequence: events {gap_start}–{gap_end} missing "
                 f"(jumped from {event_nums[i-1]} to {event_nums[i]})"
             )
@@ -554,6 +649,55 @@ def validate_datetimes(entries: list, deployment_start: str, collection_date: st
     return warnings
 
 
+def camera_date_discrepancies(
+    entries: list[dict], deployment_start: str, collection_date: str,
+) -> list[dict]:
+    """Return camera groups with captures outside the inclusive field-date window.
+
+    The result is evidence for an operator decision, never a timestamp correction.
+    A fingerprint changes when the bounds or any offending file changes, so an
+    earlier review cannot silently clear a new discrepancy.
+    """
+    try:
+        start = datetime.strptime(deployment_start, "%Y-%m-%d")
+        end = datetime.strptime(collection_date, "%Y-%m-%d") + timedelta(days=1)
+    except (TypeError, ValueError):
+        return []
+
+    groups: dict[str, list[tuple[str, str, datetime, str]]] = defaultdict(list)
+    for entry in entries:
+        if entry.get("file_type") != "image":
+            continue
+        recorded = str(entry.get("recorded_datetime") or "")
+        try:
+            wall = datetime.fromisoformat(recorded).replace(tzinfo=None)
+        except ValueError:
+            continue
+        if start <= wall < end:
+            continue
+        label = str(entry.get("device_label") or entry.get("deployment_id") or "Unknown camera")
+        name = str(entry.get("new_filename") or entry.get("filename") or entry.get("original_filename") or "")
+        groups[label].append((name, recorded, wall, "before" if wall < start else "after"))
+
+    findings = []
+    for label, files in sorted(groups.items()):
+        identity = sorted((name, recorded) for name, recorded, _, _ in files)
+        fingerprint = hashlib.sha256(json.dumps(
+            [deployment_start, collection_date, label, identity],
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        findings.append({
+            "device_label": label,
+            "fingerprint": fingerprint,
+            "before_count": sum(kind == "before" for _, _, _, kind in files),
+            "after_count": sum(kind == "after" for _, _, _, kind in files),
+            "earliest": min(wall for _, _, wall, _ in files).isoformat(),
+            "latest": max(wall for _, _, wall, _ in files).isoformat(),
+            "examples": [name for name, _, _, _ in sorted(files, key=lambda item: item[2])[:3]],
+        })
+    return findings
+
+
 def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
     """Flag audio recordings that ended for a concerning reason.
 
@@ -575,7 +719,7 @@ def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
     return [f"{n} recording(s) stopped due to: {reason}" for reason, n in counts.items()]
 
 
-def check_camera_serial(entries: list, device_label: str) -> list[str]:
+def check_camera_serial(entries: list, device_label: str, *, findings: list | None = None) -> list[str]:
     """Summarize identity and verification gaps across all inventoried images.
 
     Compare full serials exactly, allowing legacy eight-digit numeric camera IDs
@@ -583,7 +727,16 @@ def check_camera_serial(entries: list, device_label: str) -> list[str]:
     Return one device-level warning for mixed cameras, mismatches, or missing
     evidence. Empty and audio-only inventories are outside this check.
     """
+    def matches(serial: str, cam_id: str) -> bool:
+        return serial == cam_id or (
+            len(cam_id) == 8 and cam_id.isascii() and cam_id.isdigit()
+            and serial.endswith(cam_id)
+        )
+
     groups = Counter()
+    missing_files = []
+    expected_files = []
+    mismatched_files = defaultdict(list)
     examples = {}
     missing_serial = 0
     missing_expected = 0
@@ -594,43 +747,58 @@ def check_camera_serial(entries: list, device_label: str) -> list[str]:
         serial = str(entry.get("camera_serial_exif") or "").strip().upper()
         if not cam_id:
             missing_expected += 1
+            if findings is not None:
+                expected_files.append(qc_file_reference(entry))
         if not serial:
             missing_serial += 1
+            if findings is not None:
+                missing_files.append(qc_file_reference(entry))
             continue
+        if findings is not None and cam_id and not matches(serial, cam_id):
+            mismatched_files[(serial, cam_id)].append(qc_file_reference(entry))
         key = (serial, cam_id)
         groups[key] += 1
         examples.setdefault(key, entry.get("original_filename") or entry.get("filename") or "unknown filename")
 
-    def matches(serial: str, cam_id: str) -> bool:
-        return serial == cam_id or (
-            len(cam_id) == 8 and cam_id.isascii() and cam_id.isdigit()
-            and serial.endswith(cam_id)
-        )
-
-    findings = []
+    messages = []
     if len({serial for serial, _ in groups}) > 1:
-        findings.append("Mixed-camera card: multiple camera serials found")
+        messages.append("Mixed-camera card: multiple camera serials found")
     if any(cam_id and not matches(serial, cam_id) for serial, cam_id in groups):
-        findings.append("Camera serial mismatch with deployments.csv device_id")
-    if findings:
+        messages.append("Camera serial mismatch with deployments.csv device_id")
+    if messages:
         for (serial, cam_id), count in sorted(groups.items()):
             status = (
                 f"matches expected camera {cam_id}" if cam_id and matches(serial, cam_id)
                 else f"differs from expected camera {cam_id}" if cam_id
                 else "expected camera ID missing"
             )
-            findings.append(
+            messages.append(
                 f"{serial}: {count} image(s), {status} "
                 f"(example: {examples[(serial, cam_id)]})"
             )
     if missing_serial:
         prefix = "Unable to verify camera identity: " if not groups else ""
-        findings.append(f"{prefix}{missing_serial} image(s) have no readable camera serial")
+        messages.append(f"{prefix}{missing_serial} image(s) have no readable camera serial")
     if missing_expected:
-        findings.append(
+        messages.append(
             f"Unable to compare {missing_expected} image(s): expected camera ID missing"
         )
-    return [f"{device_label}: " + "; ".join(findings)] if findings else []
+    if findings is not None:
+        action = "Inspect this image's metadata and compare the camera assignment with field records."
+        if missing_files:
+            findings.append(qc_issue("missing_camera_serial", "warning", "Unreadable camera serial",
+                "Camera identity cannot be verified from this image's metadata.", action, files=missing_files))
+        if expected_files:
+            findings.append(qc_issue("missing_expected_camera", "warning", "Expected camera ID missing",
+                "There is no expected camera ID to compare with the image metadata.", action, files=expected_files))
+        for (serial, cam_id), files in mismatched_files.items():
+            findings.append(qc_issue("camera_serial_mismatch", "warning", "Camera serial mismatch",
+                f"Image serial: {serial}; expected camera ID: {cam_id}.", action, files=files))
+        if len({serial for serial, _ in groups}) > 1:
+            findings.append(qc_issue("mixed_camera_card", "warning", "Multiple cameras on one card",
+                "; ".join(messages), "Check which camera produced each group before changing assignments.",
+                count=len(groups), unit="serial / camera groups"))
+    return [f"{device_label}: " + "; ".join(messages)] if messages else []
 
 
 def _elevation_warnings(plot: str, elev_raw, elev_min: float, elev_max: float) -> list[str]:

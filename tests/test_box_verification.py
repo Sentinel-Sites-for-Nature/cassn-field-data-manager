@@ -183,3 +183,45 @@ def test_box_orphan_allowlist_uses_basename_at_any_depth():
     assert not is_orphan_on_box("raw_data/p1_ML/p1_ML_manifest.json")
     assert not is_orphan_on_box("qc/wildlife_insights_images.csv")
     assert is_orphan_on_box("raw_data/p1_ML/p1_ML_1/unexpected.jpg")
+
+
+def test_no_expected_or_local_files_is_not_a_success(tmp_path):
+    (tmp_path / 'raw_data').mkdir()
+    ok, summary, issues = verify_box_hashes(FakeStorage({}), 'deploy', 'deployment', [], tmp_path)
+    assert not ok
+    assert 'No files' in summary
+
+
+def test_cancellation_at_final_progress_cannot_pass(tmp_path):
+    local = tmp_path / 'raw_data/p1_ML/image.jpg'
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b'fake image')
+    digest = sha1(local)
+    storage = FakeStorage({'deploy': [_folder('raw_data', 'raw')],
+                           'raw': [_folder('p1_ML', 'device')],
+                           'device': [_file('image.jpg', digest)]})
+    inventory = [{'device_label': 'p1_ML', 'new_filename': 'image.jpg', 'file_hash_sha1': digest}]
+    cancelled = False
+    def progress(checked, total, filename):
+        nonlocal cancelled
+        if checked == total == 1 and filename == '':
+            cancelled = True
+    ok, summary, issues = verify_box_hashes(storage, 'deploy', 'deployment', inventory, tmp_path,
+                                           progress=progress, is_cancelled=lambda: cancelled)
+    assert not ok
+    assert 'cancelled' in summary
+
+
+def test_untracked_local_file_cannot_satisfy_expected_set(tmp_path):
+    local = tmp_path / 'raw_data/p1_ML/image.jpg'
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b'image')
+    extra = local.with_name('extra.jpg')
+    extra.write_bytes(b'extra')
+    storage = FakeStorage({'deploy': [_folder('raw_data', 'raw')],
+                           'raw': [_folder('p1_ML', 'device')],
+                           'device': [_file('image.jpg', sha1(local)), _file('extra.jpg', sha1(extra))]})
+    inventory = [{'device_label': 'p1_ML', 'new_filename': 'image.jpg', 'file_hash_sha1': sha1(local)}]
+    ok, summary, issues = verify_box_hashes(storage, 'deploy', 'deployment', inventory, tmp_path)
+    assert not ok
+    assert {'type': 'untracked_local', 'filename': 'raw_data/p1_ML/extra.jpg'} in issues

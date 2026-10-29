@@ -1,6 +1,7 @@
 """Real queued Qt signals must not change another deployment's state."""
 
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QObject, Qt, Signal
@@ -14,6 +15,7 @@ class Worker(QObject):
     upload = Signal(bool, str)
     prepared = Signal(bool, bool, str)
     progress = Signal(int, int, str)
+    metrics_updated = Signal(dict)
 
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -35,7 +37,7 @@ class Harness(QObject):
     # QObject-bound slots preserve the same dispatch and sender semantics as the GUI.
     for name in (
         '_box_callback_is_current', '_on_wi_split_progress', '_on_wi_split_completed',
-        'on_upload_progress', 'on_upload_finished', '_write_upload_provenance',
+        'on_upload_progress', 'on_upload_metrics', 'on_upload_finished', '_write_upload_provenance',
         '_on_provenance_upload_finished', '_start_post_upload_verification',
         '_on_auto_box_verify_finished', '_on_auto_fixity_progress',
         '_on_auto_fixity_finished', '_finish_post_upload_verification',
@@ -48,10 +50,11 @@ class Harness(QObject):
     def __init__(self, folder):
         super().__init__()
         self.current_deployment_folder = folder
-        self.file_inventory = [{'new_filename': 'image.jpg'}]
+        self.file_inventory = [{'device_label': 'p1_ML', 'new_filename': 'image.jpg',
+                                'file_hash_sha256': 'a' * 64, 'file_size_bytes': 7}]
         self.metadata = {'observer': 'Test'}
         self.devices = []
-        self.box_config = {}
+        self.box_config = SimpleNamespace(field_data_folder_id='test-root', profile='uc')
         self.box_authenticated = True
         self._box_operation_active = True
         self.box_upload_complete = False
@@ -65,7 +68,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
-                     'upload_progress_bar', 'upload_status_label', 'hash_group',
+                     'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',
                      '_format_post_upload_issues', 'show_pre_departure_checklist',
@@ -96,6 +99,7 @@ CALLBACKS = [
     ('wi_split_thread', '_on_wi_split_progress', 'progress', (1, 2, 'file')),
     ('wi_split_thread', '_on_wi_split_completed', 'prepared', (True, False, 'prepared')),
     ('upload_thread', 'on_upload_progress', 'progress', (1, 2, 'file')),
+    ('upload_thread', 'on_upload_metrics', 'metrics_updated', ({'stage':'transferring','acknowledged_MB_per_second':2.5},)),
     ('upload_thread', 'on_upload_finished', 'upload', (True, 'uploaded')),
     ('provenance_thread', '_on_provenance_upload_finished', 'upload', (True, 'stamped')),
     ('box_verify_thread', '_on_auto_box_verify_finished', 'result', (True, 'verified', [])),
@@ -129,6 +133,7 @@ def test_queued_stale_callback_has_no_effect(setup, attribute, callback, signal,
     context._start_box_upload_thread.assert_not_called()
     context.hash_progress_bar.setValue.assert_not_called()
     context.upload_progress_bar.setValue.assert_not_called()
+    context.upload_metrics_label.setText.assert_not_called()
     assert context._box_operation_active
     assert not context.fixity_check_run
     assert not context.box_upload_complete
@@ -192,7 +197,7 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
 def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
     app, context, qc = setup
     path = context.current_deployment_folder / 'image_file_metadata.csv'
-    path.write_text('filename\nimage.jpg\n')
+    path.write_text('deployment_id,filename,file_hash_sha256\nd1,image.jpg,' + 'a' * 64 + '\n')
 
     class ProvenanceWorker(Worker):
         def __init__(self, paths, folder_id, **kwargs):
@@ -211,9 +216,11 @@ def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
     assert provenance.started and context._box_operation_active
     assert context.box_verify_thread is None
     provenance.upload.emit(False, 'synthetic provenance upload failure')
-    assert context.box_verify_thread.started and context._box_operation_active
-    context.box_verify_thread.result.emit(False, 'synthetic list check failure', [])
+    assert context.box_verify_thread is None
     assert not context._box_operation_active
+    assert not context.box_upload_complete
+    import json
+    assert json.loads((context.current_deployment_folder / 'qc/box_upload_verification.json').read_text())['verified'] is False
     assert context.fixity_thread is None
     assert all(call.args[0] == context.current_deployment_folder for call in qc.call_args_list)
 
@@ -249,3 +256,111 @@ def test_manual_check_waits_for_card_jobs(setup, method):
     getattr(context, method)()
     assert not context._box_operation_active
     assert context.fixity_thread is None and context.box_verify_thread is None
+
+
+@pytest.mark.parametrize('method,attribute', [('run_box_verify', 'box_verify_thread'),
+                                           ('run_fixity_check', 'fixity_thread')])
+def test_failure_without_issues_never_shows_passed(setup, method, attribute):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._box_operation_active = False
+    getattr(context, method)()
+    getattr(context, attribute).result.emit(False, 'Could not authenticate', [])
+    w.QMessageBox.information.assert_not_called()
+    assert not readiness(context.current_deployment_folder, context.file_inventory,
+                         context.metadata, context.box_config)[1]
+    assert 'Could not authenticate' in w.QMessageBox.return_value.setText.call_args.args[0]
+    assert not context._box_operation_active
+
+
+def test_inventory_changed_while_worker_ran_cannot_pass(setup):
+    _, context, qc = setup
+    context._box_operation_active = False
+    context.run_fixity_check()
+    context.file_inventory[0]['file_hash_sha256'] = 'c' * 64
+    context.fixity_thread.result.emit(True, 'Checked old batch', [])
+    assert qc.call_args.args[3] == 'error'
+    w.QMessageBox.information.assert_not_called()
+    assert not context.box_upload_complete
+    assert not context._box_operation_active
+
+
+def test_successful_manual_pair_persists_reopenable_current_proof(setup):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._box_operation_active = False
+    context.run_box_verify()
+    context.box_verify_thread.result.emit(True, 'Box list matches', [])
+    context.run_fixity_check()
+    context.fixity_thread.result.emit(True, 'Hashes match', [])
+    args = (context.current_deployment_folder, context.file_inventory, context.metadata, context.box_config)
+    assert readiness(*args) == (True, True)
+    assert context.box_upload_complete
+    context.run_fixity_check()
+    assert readiness(*args) == (False, False)
+    context.fixity_thread.result.emit(False, 'Verification cancelled', [])
+    assert readiness(*args) == (False, False)
+
+
+def test_evidence_write_failure_prevents_worker_start_and_releases_controls(setup, monkeypatch):
+    _, context, _ = setup
+    context._box_operation_active = False
+    monkeypatch.setattr(w, 'write_result', MagicMock(side_effect=OSError('synthetic full disk')))
+    context.run_fixity_check()
+    assert not context.fixity_thread.started
+    assert not context._box_operation_active
+    w.QMessageBox.warning.assert_called_once()
+
+
+def test_extras_remain_warning_without_recording_completion(setup):
+    _, context, qc = setup
+    context._box_operation_active = False
+    context.run_box_verify()
+    context.box_verify_thread.result.emit(True, 'Unexpected Box file', [
+        {'type': 'extra_on_box', 'filename': 'raw_data/p1_ML/other.jpg'}])
+    assert qc.call_args.args[3] == 'warning'
+    w.QMessageBox.information.assert_not_called()
+    assert not context.box_upload_complete
+
+
+@pytest.mark.parametrize('failed_stage', ['box', 'hash'])
+def test_automatic_failure_without_issues_never_records_completion(setup, failed_stage):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._start_post_upload_verification()
+    context.box_verify_thread.result.emit(failed_stage != 'box', 'Box result', [])
+    if failed_stage == 'hash':
+        context.fixity_thread.result.emit(False, 'Hash check cancelled', [])
+    assert not context._box_operation_active
+    assert not context.box_upload_complete
+    assert readiness(context.current_deployment_folder, context.file_inventory,
+                     context.metadata, context.box_config) == (False, False)
+    w.QMessageBox.information.assert_not_called()
+
+
+def test_auto_box_extras_keep_actual_hash_result_without_claiming_completion(setup):
+    import json
+    _, context, _ = setup
+    context._start_post_upload_verification()
+    context.box_verify_thread.result.emit(True, 'Box extra', [
+        {'type': 'extra_on_box', 'filename': 'raw_data/p1_ML/other.jpg'}])
+    context.fixity_thread.result.emit(True, 'Hashes match', [])
+    record = json.loads((context.current_deployment_folder / 'qc/box_upload_verification.json').read_text())
+    assert record['verified'] is False
+    assert record['hash_verification']['ok'] is True
+    assert not context.box_upload_complete
+
+
+def test_current_upload_metrics_show_waits_and_rates(setup):
+    app,context,qc=setup
+    worker=Worker()
+    context.upload_thread=worker
+    w.FieldDataWizard._start_owned_box_worker(context,worker)
+    worker.metrics_updated.connect(context.on_upload_metrics,Qt.QueuedConnection)
+    worker.metrics_updated.emit({'stage':'transferring','waiting':1,
+                                 'acknowledged_MB_per_second':2.5,'files_per_second':3,
+                                 'status_429':2})
+    app.processEvents()
+    text=context.upload_metrics_label.setText.call_args.args[0]
+    assert 'Waiting for Box' in text and '2.50 MB/s' in text
+    assert '3.00 files/s' in text and '2 rate-limit responses' in text

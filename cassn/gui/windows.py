@@ -13,7 +13,8 @@ from PySide6.QtCore import QIODevice, QLockFile, QSaveFile, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QDialog
 
-from cassn.config import CONFIG_JSON
+from cassn.config import CONFIG_JSON, LOCK_DIR, APP_TITLE
+from cassn.profile import HOSTED
 from cassn.gui.wizard import FieldDataWizard
 from cassn.gui.dialogs import WindowMessageBox as QMessageBox
 from cassn.lookups import normalize_deployment_event_metadata
@@ -77,7 +78,7 @@ class DeploymentWindows:
     def __init__(self, *, lookups, box_config, lock_directory=None):
         self.lookups = deepcopy(lookups)
         self.box_config = box_config
-        self.lock_directory = Path(lock_directory or CONFIG_JSON.parent / "window-locks")
+        self.lock_directory = Path(lock_directory or (LOCK_DIR if HOSTED else CONFIG_JSON.parent / "window-locks"))
         self.windows = []
         self.box_authenticated = None
 
@@ -166,6 +167,26 @@ class DeploymentWindow(FieldDataWizard):
             self.manager.box_authenticated = super().check_box_auth()
         return self.manager.box_authenticated
 
+    def _publish_connection(self, connected):
+        self.manager.box_config = self.box_config
+        self.manager.box_authenticated = connected
+        for window in self.manager.windows:
+            window.box_config = self.box_config
+            window.set_box_connection_state(connected)
+
+    def connect_to_box(self):
+        # Hold the same cross-process lease as uploads and verification.
+        def connect():
+            if super(DeploymentWindow, self).connect_to_box():
+                self._publish_connection(True)
+        self._run_cloud_operation(connect)
+
+    def disconnect_from_box(self):
+        def disconnect():
+            if super(DeploymentWindow, self).disconnect_from_box():
+                self._publish_connection(False)
+        self._run_cloud_operation(disconnect)
+
     def find_all_sessions(self):
         return [] if self._initializing else super().find_all_sessions()
 
@@ -177,7 +198,7 @@ class DeploymentWindow(FieldDataWizard):
     def _refresh_workspace_context(self, *_args):
         super()._refresh_workspace_context()
         event = self.metadata.get("deployment_event_id") if self.current_deployment_folder else None
-        self.setWindowTitle(f"{event or 'New deployment'} — CA-SSN Field Data Manager")
+        self.setWindowTitle(f"{event or 'New deployment'} — {APP_TITLE}")
 
     def _navigate_workspace(self, index):
         if index != self.tabs.currentIndex() and self._work_running():
@@ -232,6 +253,10 @@ class DeploymentWindow(FieldDataWizard):
                 self._release_deployment()
 
     def restore_session(self, session_data):
+        from cassn.profile import session_matches
+        if not session_matches(session_data, self.box_config):
+            QMessageBox.warning(self, "Different Project", "This deployment belongs to a different project. Open it in its original application.")
+            return
         folder = Path(session_data["deployment_folder"])
         metadata = normalize_deployment_event_metadata(session_data.get("metadata", {}))
         if self._claim_deployment(folder, metadata.get("deployment_event_id") or folder.name):

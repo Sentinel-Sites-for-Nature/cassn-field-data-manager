@@ -4,7 +4,9 @@ The workflow is intentionally metadata-only: it compares SHA-1 values captured
 at ingest with the SHA-1 values Box computes from stored bytes.  It never
 downloads Box media and never re-hashes local media.  A deployment is eligible
 only after the normal application workflow has completed and written a passing
-``qc/box_upload_verification.json`` artifact.
+``qc/box_upload_verification.json`` artifact. Explicit force bypasses data
+verification while retaining saved ingest/publication holds, local deletion
+boundaries and change detection. Unreadable hold/publication evidence blocks cleanup.
 """
 
 from __future__ import annotations
@@ -18,8 +20,13 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
-from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box
+from cassn.box.upload_state import require_uploads_complete
+from cassn.box.publication import STATE_PATH, batch_remote_path, require_publication_complete
+from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths
+from cassn.box.metadata_merge import CSV_NAMES, merge_csv, merge_event, read_csv, read_object
+from cassn.box.metadata_store import BoxFileStore
 from cassn.config import CONFIG_JSON
 from cassn.core.classification import sanitize_box_folder_name
 from cassn.core.hashing import sha1 as compute_file_sha1
@@ -39,6 +46,8 @@ _LOCAL_ONLY_AFTER_UPLOAD = {
     # so historical events may legitimately retain both QC proofs only locally.
     "qc/box_upload_manifest.json",
     "qc/box_upload_verification.json",
+    "qc/file_hash_verification.json",
+    "qc/box_file_list_verification.json",
 }
 _EXACT_SMALL_SIDECARS = {
     "image_file_metadata.csv",
@@ -63,10 +72,11 @@ class StagingCleanupPlan:
     file_count: int = 0
     local_bytes: int = 0
     event_signature: str = ""
+    force: bool = False
 
     @property
     def clearable(self) -> bool:
-        return not self.reasons and bool(self.box_folder_id and self.event_signature)
+        return not self.reasons and bool(self.event_signature and (self.force or self.box_folder_id))
 
 
 @dataclass(frozen=True)
@@ -182,7 +192,7 @@ def _provenance_errors(deployment_folder: Path) -> list[str]:
 
 
 def _resolve_box_deployment(
-    storage: BoxStorage,
+    storage: BoxStorage | None,
     field_data_folder_id: str,
     *,
     year: str,
@@ -209,16 +219,63 @@ def _resolve_box_deployment(
     return str(event_id), box_path
 
 
+def _soundhub_submission_updates_only(local_bytes: bytes, box_bytes: bytes) -> bool:
+    """Accept only forward submission bookkeeping changes on identical CSV rows."""
+    import io
+    from datetime import datetime
+
+    fields = {"is_submitted_to_soundhub", "soundhub_submitter", "soundhub_submission_datetime"}
+    try:
+        local = csv.DictReader(io.StringIO(local_bytes.decode("utf-8-sig")))
+        remote = csv.DictReader(io.StringIO(box_bytes.decode("utf-8-sig")))
+        headers = local.fieldnames
+        if (not headers or headers != remote.fieldnames
+                or len(headers) != len(set(headers))
+                or not (fields | {"filename", "deployment_id"}) <= set(headers)):
+            return False
+        def indexed(reader):
+            rows = {}
+            for row in reader:
+                key = (row["deployment_id"], row["filename"])
+                if not all(key) or key in rows or None in row or any(v is None for v in row.values()):
+                    raise ValueError("invalid or duplicate CSV row")
+                rows[key] = row
+            return rows
+        before, after = indexed(local), indexed(remote)
+        if not before or before.keys() != after.keys():
+            return False
+        for key, old in before.items():
+            new = after[key]
+            if old == new:
+                continue
+            if any(old[f] != new[f] for f in set(headers) - fields):
+                return False
+            if (old["is_submitted_to_soundhub"].strip().lower() not in {"", "false", "0"}
+                    or old["soundhub_submitter"].strip()
+                    or old["soundhub_submission_datetime"].strip()
+                    or new["is_submitted_to_soundhub"].strip().lower() not in {"true", "1"}
+                    or not new["soundhub_submitter"].strip()):
+                return False
+            stamp = datetime.fromisoformat(new["soundhub_submission_datetime"].replace("Z", "+00:00"))
+            if stamp.utcoffset() is None:
+                return False
+        return True
+    except (UnicodeError, ValueError, KeyError, TypeError, csv.Error):
+        return False
+
+
 def inspect_deployment_for_cleanup(
     deployment_folder: Path,
     staging_root: Path,
     storage: BoxStorage,
     field_data_folder_id: str,
+    *,
+    force: bool = False,
 ) -> StagingCleanupPlan:
-    """Build a live, fail-closed cleanup plan for one staged deployment."""
+    """Verify an event, or explicitly bypass data verification with force."""
     root = Path(staging_root).expanduser().resolve()
     deployment = Path(deployment_folder).expanduser()
-    plan = StagingCleanupPlan(root, deployment, deployment.name)
+    plan = StagingCleanupPlan(root, deployment, deployment.name, force=force)
 
     if Path(staging_root).expanduser().is_symlink():
         plan.reasons.append(f"staging root is a symlink: {staging_root}")
@@ -234,6 +291,25 @@ def inspect_deployment_for_cleanup(
     plan.deployment_folder = deployment
     if deployment == root or deployment.parent != root:
         plan.reasons.append("deployment is not a direct child of the staging root")
+        return plan
+
+    if not deployment.is_dir():
+        plan.reasons.append("deployment target is not a directory")
+        return plan
+    try:
+        require_no_ingest_holds(deployment)
+        require_publication_complete(deployment)
+        require_uploads_complete(deployment)
+    except ValueError as exc:
+        plan.reasons.append(str(exc))
+        return plan
+    if force:
+        plan.event_signature, errors = _event_signature(deployment)
+        plan.reasons.extend(errors)
+        for path in deployment.rglob("*"):
+            if not path.is_symlink() and path.is_file():
+                plan.file_count += 1
+                plan.local_bytes += path.stat().st_size
         return plan
 
     session_path = deployment / "session.json"
@@ -286,6 +362,21 @@ def inspect_deployment_for_cleanup(
     verification_path = _verification_artifact(deployment)
     try:
         verification = _read_json(verification_path)
+        if "evidence_version" in verification and verification["evidence_version"] != 1:
+            plan.reasons.append("unsupported Box verification evidence version")
+        if verification.get("evidence_version") == 1:
+            from types import SimpleNamespace
+            from cassn.core.verification_evidence import readiness
+            # Cleanup receives the selected data root, not a GUI profile. Read
+            # the recorded profile only to reconstruct the non-secret binding.
+            destination = verification.get("destination", {})
+            if not isinstance(destination, dict):
+                raise ValueError("invalid verification destination")
+            config = SimpleNamespace(field_data_folder_id=str(field_data_folder_id),
+                                     profile=destination.get("profile", "legacy"))
+            _, current = readiness(deployment, session.get("file_inventory"), metadata, config)
+            if not current:
+                plan.reasons.append("Box verification evidence is stale or incomplete")
         if verification.get("verified") is not True:
             plan.reasons.append("latest Box upload verification did not pass")
     except (OSError, ValueError) as exc:
@@ -348,7 +439,7 @@ def inspect_deployment_for_cleanup(
         if size != recorded_size:
             plan.reasons.append(f"local file size changed after ingest: {relative}")
 
-    plan.file_count = len(expected_raw)
+    plan.file_count = len(expected_raw & local_raw)
     plan.local_bytes = sum(
         deployment.joinpath(*relative.split("/")).stat().st_size
         for relative in expected_raw
@@ -388,17 +479,36 @@ def inspect_deployment_for_cleanup(
         plan.reasons.append(str(exc))
         return plan
 
-    expected_on_box = local_uploadable - _LOCAL_ONLY_AFTER_UPLOAD
-    missing_box = sorted(expected_on_box - set(box_hashes))
+    publication_state = deployment / STATE_PATH
+    batch_id = ""
+    if publication_state.exists():
+        state = read_object(publication_state.read_bytes())
+        batch_id = str(state.get("batch_attempt_id") or "")
+        if not re.fullmatch(r"[0-9]{8}T[0-9]{6}_[0-9a-f]{32}", batch_id):
+            plan.reasons.append("publication record has no valid batch archive identity")
+            return plan
+    def remote_path(relative):
+        return batch_remote_path(Path(relative), batch_id).as_posix() if batch_id else relative
+
+    expected_on_box = (local_uploadable | expected_raw) - _LOCAL_ONLY_AFTER_UPLOAD
+    missing_box = sorted(remote_path(p) for p in expected_on_box if remote_path(p) not in box_hashes)
     if missing_box:
         plan.reasons.append(
-            f"{len(missing_box)} local uploadable file(s) are missing from Box: "
+            f"{len(missing_box)} required file(s) are missing from Box: "
             f"{_path_examples(missing_box)}"
         )
 
+    archive_paths = set()
+    if batch_id:
+        try:
+            archive_paths, archive_issues = recorded_archive_paths(storage, plan.box_folder_id, box_hashes)
+            if archive_issues:
+                plan.reasons.append(f"archive metadata has {len(archive_issues)} unverified row(s)")
+        except Exception as exc:
+            plan.reasons.append(f"cannot verify accumulated metadata: {exc}")
     unexpected_box_raw = sorted(
         path
-        for path in (set(box_hashes) - expected_raw)
+        for path in (set(box_hashes) - expected_raw - archive_paths)
         if path.startswith("raw_data/") and is_orphan_on_box(path)
     )
     if unexpected_box_raw:
@@ -417,7 +527,7 @@ def inspect_deployment_for_cleanup(
             plan.reasons.append(f"Box SHA-1 does not match ingest SHA-1: {relative}")
 
     for relative in sorted(_EXACT_SMALL_SIDECARS & expected_on_box):
-        box_hash = box_hashes.get(relative)
+        box_hash = box_hashes.get(remote_path(relative))
         if box_hash is None:
             continue
         if not box_hash:
@@ -425,7 +535,45 @@ def inspect_deployment_for_cleanup(
             continue
         local_hash = compute_file_sha1(deployment.joinpath(*relative.split("/")))
         if box_hash != local_hash:
-            plan.reasons.append(f"Box copy is not current: {relative}")
+            if batch_id and relative in (*CSV_NAMES, "deployment_event_record.json"):
+                try:
+                    file_id = storage.folder_file_map(plan.box_folder_id)[relative]
+                    store = BoxFileStore(storage.client)
+                    ref = store.snapshot(file_id)
+                    box_bytes = store.read(ref)
+                    local_bytes = deployment.joinpath(relative).read_bytes()
+                    if relative in CSV_NAMES:
+                        remote_fields, remote_rows = read_csv(box_bytes)
+                        if read_csv(merge_csv(box_bytes, local_bytes)) != (remote_fields, remote_rows):
+                            raise ValueError("Box metadata does not cover this batch")
+                        rows_by_key = {(r["deployment_id"], r["filename"]): r for r in remote_rows}
+                        for row in read_csv(local_bytes)[1]:
+                            if not _truthy(rows_by_key[(row["deployment_id"], row["filename"])].get("is_uploaded_to_box")):
+                                raise ValueError("Box row is not stamped uploaded")
+                    else:
+                        record = read_object(box_bytes)
+                        if record.get("file_count") != len(archive_paths):
+                            raise ValueError("event count does not match verified archive metadata")
+                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"])) != record:
+                            raise ValueError("Box event does not cover this batch")
+                    store.assert_unchanged(ref)
+                    continue
+                except Exception as exc:
+                    plan.reasons.append(f"cannot verify accumulated {relative}: {exc}")
+                continue
+            if relative == "audio_file_metadata.csv":
+                try:
+                    file_id = storage.folder_file_map(plan.box_folder_id)[relative]
+                    from cassn.soundhub.box_metadata import BoxMetadataStore
+                    store = BoxMetadataStore(storage.client, field_data_folder_id)
+                    box_bytes = store.read(store.snapshot(file_id))
+                    if _soundhub_submission_updates_only(
+                        deployment.joinpath(relative).read_bytes(), box_bytes
+                    ):
+                        continue
+                except Exception as exc:
+                    plan.reasons.append(f"could not compare Box audio metadata: {exc}")
+            plan.reasons.append(f"local and Box metadata differ: {relative}")
 
     return plan
 
@@ -435,6 +583,8 @@ def clear_verified_deployment(plan: StagingCleanupPlan) -> StagingCleanupResult:
     if not plan.clearable:
         raise StagingCleanupError("deployment did not pass cleanup preflight")
 
+    if plan.staging_root.is_symlink():
+        raise StagingCleanupError("staging root became a symlink after preflight")
     root = plan.staging_root.resolve()
     deployment = plan.deployment_folder
     if deployment.is_symlink():

@@ -10,18 +10,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from cassn.box.auth import BoxConfig
+from cassn.box.auth import BoxConfig, hosted_config
 from cassn.gui.wizard import FieldDataWizard
 from cassn.lookups import LookupTables
 
 
 @pytest.fixture
-def workspace_window(monkeypatch):
+def workspace_window(monkeypatch, request):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: None)
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
-    window = FieldDataWizard(lookups=LookupTables(), box_config=BoxConfig())
+    window = FieldDataWizard(lookups=LookupTables(), box_config=getattr(request, "param", BoxConfig()))
     window._card_ejection_timer.stop()
     yield app, window
     window.card_ingest_threads.clear()
@@ -29,6 +29,55 @@ def workspace_window(monkeypatch):
     window.current_deployment_folder = None
     window.close()
     app.processEvents()
+
+
+@pytest.mark.parametrize("workspace_window", [hosted_config("uc"), hosted_config("csu"), BoxConfig()], indirect=True)
+def test_review_exposes_uc_staging_without_soundhub_upload(workspace_window):
+    from PySide6.QtWidgets import QToolButton
+
+    _app, window = workspace_window
+    uc = window.box_config.profile != "csu"
+    assert window.soundhub_stage_btn.isVisible() == uc
+    assert window.open_soundhub_btn.isVisible() == uc
+    buttons = [button for button in window.tabs.widget(2).findChildren(QToolButton) if button.menu()]
+    # Qt requires && to render a literal ampersand instead of a mnemonic.
+    prepare = next(button for button in buttons if button.text() == "Prepare && Upload ▾")
+    assert window.upload_now_btn in prepare.menu().actions()
+    assert window.soundhub_stage_btn in prepare.menu().actions()
+    menus = [button.menu() for button in buttons]
+    visible = [action for menu in menus for action in menu.actions() if action.isVisible()]
+    assert (window.soundhub_stage_btn in visible) == uc
+    assert (window.open_soundhub_btn in visible) == uc
+    assert not any("Upload Bird Data to SoundHub" in action.text() or "SoundHub Landing Zone" in action.text()
+                   for action in visible)
+
+
+@pytest.mark.parametrize("workspace_window", [hosted_config("uc")], indirect=True)
+def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path / "event"
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    monkeypatch.setattr(wizard.QMessageBox, "question", lambda *args: wizard.QMessageBox.Yes)
+    worker = MagicMock()
+    stage = MagicMock(return_value=worker)
+    upload = MagicMock(side_effect=AssertionError("Staging must not start an upload"))
+    monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
+    monkeypatch.setattr(wizard, "SoundHubUploadThread", upload)
+    notice = MagicMock()
+    monkeypatch.setattr(wizard.QMessageBox, "information", notice)
+    window.soundhub_stage_btn.trigger()
+    stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups)
+    worker.start.assert_called_once()
+    assert not window.soundhub_stage_btn.isEnabled()
+    window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
+    assert window.soundhub_stage_btn.isEnabled()
+    assert "nothing was uploaded" in notice.call_args.args[2]
+    assert "Upload Bird Data to SoundHub" not in notice.call_args.args[2]
+    upload.assert_not_called()
+    window.soundhub_stage_thread = None
 
 
 def test_sidebar_cannot_bypass_missing_deployment(workspace_window, monkeypatch):
@@ -55,6 +104,73 @@ def test_sidebar_review_respects_validation_refusal(workspace_window, tmp_path, 
     assert window.tabs.currentIndex() == 1
     assert window.workspace.navigation[1].isChecked()
     validate.assert_called_once()
+
+
+@pytest.mark.parametrize("accept", [False, True])
+@pytest.mark.parametrize("sidebar", [False, True])
+def test_collection_checks_require_explicit_continue(
+    workspace_window, tmp_path, monkeypatch, accept, sidebar
+):
+    from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
+    from cassn.core.quality_control import append_qc_report
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    window.tabs.setCurrentIndex(1)
+    window.devices = [(1, "One", "ML", "p1_ML")]
+    window.populate_collection_list()
+    append_qc_report(tmp_path, "copy", "p1_ML", "error", "Old copy failure")
+    append_qc_report(tmp_path, "copy", "p1_ML", "pass", "Copy recovered")
+    append_qc_report(tmp_path, "file_size_floor", "p1_ML", "warning", "Small image")
+    append_qc_report(tmp_path, "camera_timezone", "p1_ML", "error", "Invalid offset")
+    monkeypatch.setattr(window, "_ensure_camera_dates_reviewed", lambda: True)
+    monkeypatch.setattr(wizard, "validate_coordinates", lambda rows: ["Missing latitude", "Missing elevation"])
+    export = MagicMock()
+    upload = MagicMock()
+    monkeypatch.setattr(window, "generate_metadata_files", export)
+    monkeypatch.setattr(window, "update_review_tab", MagicMock())
+    monkeypatch.setattr(window, "upload_to_box", upload)
+    dialogs = []
+
+    def respond(dialog):
+        dialogs.append(dialog.windowTitle())
+        tree = dialog.findChild(QTreeWidget)
+        findings = [tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(tree.topLevelItemCount())]
+        text = "\n".join(finding["message"] for finding in findings)
+        assert "Old copy failure" not in text
+        for expected in ("p1_ML", "Small image", "Invalid offset", "Pending", "Missing latitude", "Missing elevation"):
+            assert expected in text
+        buttons = dialog.findChild(QDialogButtonBox)
+        target = "Continue to review" if accept else "Back to card ingest"
+        next(button for button in buttons.buttons() if button.text() == target).click()
+        return dialog.result()
+
+    monkeypatch.setattr(wizard.QDialog, "exec", respond)
+    if sidebar:
+        window.workspace.navigation[2].click()
+    else:
+        window.validate_and_next_collection()
+    assert dialogs == ["Card ingest checks"]
+    assert window.tabs.currentIndex() == (2 if accept else 1)
+    assert export.call_count == int(accept)
+    upload.assert_not_called()
+
+
+def test_clean_collection_still_shows_checks(workspace_window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel, QTextEdit
+    from cassn.gui import wizard
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+
+    def respond(dialog):
+        assert "Card ingest checks passed" in [label.text() for label in dialog.findChildren(QLabel)]
+        assert dialog.findChild(QTextEdit).toPlainText() == "No findings to address."
+        return wizard.QDialog.Accepted
+
+    monkeypatch.setattr(wizard.QDialog, "exec", respond)
+    assert window._confirm_collection_review([])
 
 
 @pytest.mark.parametrize("operation", ["card", "box"])
@@ -186,3 +302,52 @@ def test_deployment_page_fits_desktop_and_stacks_on_laptop(monkeypatch, connecte
     finally:
         window.close()
         app.processEvents()
+
+
+@pytest.mark.parametrize("contents", ["not json", '[]', '{"current_state": [null]}',
+                                     '{"current_state": [{"check": [], "severity": "error"}]}'])
+def test_unreadable_collection_qc_report_remains_visible(workspace_window, tmp_path, contents):
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    (tmp_path / "qc").mkdir()
+    (tmp_path / "qc/qc_report.json").write_text(contents)
+    findings = window._collection_review_findings([])
+    assert any(f["severity"] == "error" and f["title"] == "QC report could not be read" for f in findings)
+
+
+def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import soundhub_thread, wizard
+    from cassn.soundhub.staging import project_root
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path / "event"
+    staging = tmp_path / "soundhub"
+    root = project_root(staging)
+    root.mkdir(parents=True)
+    (root / "deployment.csv").write_text("deployment_id\nfirst\nsecond\n")
+    (root / "recording.csv").write_text("path\nfirst/a.flac\nsecond/b.flac\nsecond/c.flac\n")
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: staging)
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    validate = MagicMock(side_effect=AssertionError("Validation must run in the worker"))
+    check_box = MagicMock(side_effect=AssertionError("Box checks must run in the worker"))
+    monkeypatch.setattr(soundhub_thread, "validate_staging_manifests", validate)
+    monkeypatch.setattr(soundhub_thread, "plan_completed_batch_cleanup", check_box)
+    worker = MagicMock()
+    stage = MagicMock(return_value=worker)
+    monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
+    question = MagicMock(return_value=wizard.QMessageBox.No)
+    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+
+    window.stage_for_soundhub()
+    assert "2 SoundHub deployment(s), 3 recording(s)" in question.call_args.args[2]
+    validate.assert_not_called()
+    check_box.assert_not_called()
+    stage.assert_not_called()
+
+    question.return_value = wizard.QMessageBox.Yes
+    window.stage_for_soundhub()
+    worker.start.assert_called_once()
+    assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
+    validate.assert_not_called()
+    check_box.assert_not_called()
+    window.soundhub_stage_thread = None

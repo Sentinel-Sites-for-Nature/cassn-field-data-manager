@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 
 from cassn.soundhub.export import validate_staging_manifests
@@ -9,7 +10,6 @@ from cassn.soundhub.export import validate_staging_manifests
 from cassn.soundhub.provenance import (
     DEFAULT_SUBMITTER,
     ProvenancePlan,
-    SoundHubProvenanceError,
     apply_submission_provenance,
     plan_submission_provenance,
     write_submission_report,
@@ -22,6 +22,7 @@ from cassn.soundhub.upload import (
     verify_project,
 )
 from cassn.soundhub.staging import SoundHubStagingError
+from cassn.soundhub.transfers import TransferArchive
 
 
 class SoundHubSubmissionError(Exception):
@@ -145,6 +146,34 @@ def execute_soundhub_submission(
             phase="preflight",
         )
 
+    try:
+        # A verified transfer must be repaired, never sent again just because
+        # its Box flags could not be saved. The S3 landing zone may be drained.
+        for journal in (plan.staging_root.parent / "transfers").glob("*/transfer.json"):
+            try:
+                prior = json.loads(journal.read_text())
+            except (OSError, ValueError) as exc:
+                raise SoundHubSubmissionError(
+                    f"Cannot check previous transfer record; upload not started: {journal}: {exc}",
+                    phase="preflight") from exc
+            signature = tuple(sorted((item["key"], item["size"])
+                                     for item in prior.get("planned", {}).get("objects", [])))
+            if ((prior.get("verification") or {}).get("ok")
+                    and prior.get("status") != "complete"
+                    and prior.get("destination") == (
+                        f"s3://{plan.settings['bucket']}/{plan.settings['upload_prefix']}/"
+                        f"{plan.settings['project_short_name']}/")
+                    and signature == plan.object_signature):
+                raise SoundHubSubmissionError(
+                    f"This batch already passed S3 verification. Repair the Box record "
+                    f"instead of uploading again: {journal.parent}", phase="preflight")
+        archive = TransferArchive.begin(plan, submitter)
+    except OSError as exc:
+        raise SoundHubSubmissionError(
+            f"Could not save the local transfer record; upload not started: {exc}",
+            phase="local_record",
+        ) from exc
+
     result = {
         "success": False,
         "cancelled": False,
@@ -153,6 +182,7 @@ def execute_soundhub_submission(
         "verification": None,
         "provenance": None,
         "reports": [],
+        "transfer_directory": archive.directory,
     }
     try:
         upload = upload_project(
@@ -161,36 +191,40 @@ def execute_soundhub_submission(
             progress=progress,
             is_cancelled=is_cancelled,
             deployment_ids=plan.provenance.pending_deployment_ids,
+            log_path=archive.directory / "upload.log",
         )
-    except SoundHubUploadError as exc:
-        raise SoundHubSubmissionError(
-            str(exc), phase="upload", result=result
-        ) from exc
-    result["upload"] = upload
-    if upload["cancelled"]:
-        result["cancelled"] = True
-        return result
+        result["upload"] = upload
+        archive.update(upload=upload)
+        if upload["cancelled"]:
+            result["cancelled"] = True
+            archive.finish("cancelled", phase="upload")
+            return result
 
-    result["phase"] = "verification"
-    try:
+        result["phase"] = "verification"
+        archive.update(phase="verification")
         verification = verify_project(
             plan.staging_root,
             settings=plan.settings,
             deployment_ids=plan.provenance.pending_deployment_ids,
         )
-    except SoundHubUploadError as exc:
-        raise SoundHubSubmissionError(
-            str(exc), phase="verification", result=result
-        ) from exc
-    result["verification"] = verification
-    if not verification["ok"]:
-        return result
+        result["verification"] = verification
+        # Preserve S3 success before any Box write; the landing zone is drained
+        # after ingestion and cannot serve as the durable submission record.
+        archive.update(verification=verification)
+        if not verification["ok"]:
+            archive.finish("failed", phase="verification",
+                           error="S3 objects are missing or differ in size")
+            return result
 
-    result["phase"] = "box_provenance"
-    try:
+        result["phase"] = "box_provenance"
+        archive.update(phase="box_provenance")
+        if plan.provenance.box_store is not None:
+            plan.provenance.box_store.reconnect()
         provenance = apply_submission_provenance(
             plan.provenance, submitter=submitter
         )
+        result["provenance"] = provenance
+        archive.update(provenance=provenance)
         reports = write_submission_report(
             plan.provenance,
             settings=plan.settings,
@@ -198,16 +232,21 @@ def execute_soundhub_submission(
             verification=verification,
             provenance_result=provenance,
             planned_objects=plan.objects,
+            local_report_path=archive.directory / "submission_report.md",
         )
-    except SoundHubProvenanceError as exc:
+        archive.finish("complete", phase="complete", reports=reports)
+        result.update(success=True, phase="complete", reports=reports)
+    except KeyboardInterrupt:
+        archive.finish("interrupted", phase=result["phase"], error="KeyboardInterrupt")
+        raise
+    except Exception as exc:
+        message = str(exc)
+        try:
+            archive.finish("failed", phase=result["phase"],
+                           error=f"{type(exc).__name__}: {exc}")
+        except OSError as record_error:
+            message += f"; could not update transfer record at {archive.directory}: {record_error}"
         raise SoundHubSubmissionError(
-            str(exc), phase="box_provenance", result=result
+            message, phase=result["phase"], result=result
         ) from exc
-
-    result.update(
-        success=True,
-        phase="complete",
-        provenance=provenance,
-        reports=reports,
-    )
     return result

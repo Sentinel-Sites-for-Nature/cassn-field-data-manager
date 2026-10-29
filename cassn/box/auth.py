@@ -1,28 +1,19 @@
-"""
-Box authentication and credential loading.
+"""Box configuration and OAuth storage shared by the GUI and maintenance tools.
 
-Mirrors the original exactly:
-
-* credentials come from ``~/.cassn_config/config.json`` under the ``box`` key
-  (``client_id``, ``client_secret``, ``field_data_folder_id``, optional
-  ``app_config_folder_id``);
-* OAuth tokens are persisted to ``~/.cassn_config/box_tokens.json`` through a
-  minimal token-storage shim the Box SDK calls on every refresh.
-
-``BOX_AVAILABLE`` reflects whether ``box_sdk_gen`` imported; when False every
-Box code path degrades exactly as the original did. Unlike the original, this
-module performs no work at import time beyond the optional-dependency probe —
-:func:`load_box_config` is called explicitly from the entry point.
+Non-secret settings live in config.json. New connections store secrets in the
+OS credential store; legacy JSON credentials remain readable until sign-in
+migrates them. Importing this module does not access the credential store.
 """
 
 from __future__ import annotations
 
 import json
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 from cassn.config import BOX_TOKEN_FILE, CONFIG_JSON
+from cassn.profile import HOSTED, PROFILE, PROJECTS, HOSTED_CLIENT_ID
+from cassn.box.secrets import KeychainTokenStorage, read
 
 try:
     from box_sdk_gen import AccessToken, BoxClient, BoxOAuth, OAuthConfig
@@ -47,10 +38,30 @@ class BoxConfig:
     field_data_folder_id: str | None = None
     app_config_folder_id: str | None = None
 
+    provider: str = "local"
+    service_url: str | None = None
+    profile: str = "legacy"
+
     @property
     def is_complete(self) -> bool:
         """True when the three credentials required to reach Box are present."""
+        if self.provider == "hosted":
+            project = PROJECTS.get(self.profile)
+            return bool(project and self.service_url == project["origin"]
+                        and self.client_id == HOSTED_CLIENT_ID and self.client_secret is None
+                        and self.field_data_folder_id == project["data"]
+                        and self.app_config_folder_id == project["config"])
         return bool(self.client_id and self.client_secret and self.field_data_folder_id)
+
+
+def hosted_config(profile: str) -> BoxConfig:
+    project = PROJECTS[profile]
+    return BoxConfig(HOSTED_CLIENT_ID, None, project["data"], project["config"],
+                     provider="hosted", service_url=project["origin"], profile=profile)
+
+
+def csu_config() -> BoxConfig:
+    return hosted_config("csu")
 
 
 class SimpleTokenStorage:
@@ -95,6 +106,8 @@ def load_box_config(config_path: Path = CONFIG_JSON) -> BoxConfig:
     Raises ``FileNotFoundError`` when config.json is absent, with the same
     guidance message as the original startup path.
     """
+    if HOSTED:
+        return hosted_config(PROFILE)
     if not config_path.exists():
         raise FileNotFoundError(
             f"Config file not found: {config_path}\n"
@@ -102,11 +115,19 @@ def load_box_config(config_path: Path = CONFIG_JSON) -> BoxConfig:
         )
     with open(config_path, "r") as f:
         config = json.load(f)
-    box = config["box"]
+    box = config.get("box", {})
+    secret = box.get("client_secret")
+    if not secret and box.get("client_id"):
+        try:
+            secret = read(f"{box['client_id']}:client_secret")
+        except Exception:
+            # Keep ordinary settings available for validated offline operation
+            # when the system store is locked or temporarily unavailable.
+            secret = None
     return BoxConfig(
-        client_id=box["client_id"],
-        client_secret=box["client_secret"],
-        field_data_folder_id=box["field_data_folder_id"],
+        client_id=box.get("client_id"),
+        client_secret=secret,
+        field_data_folder_id=box.get("field_data_folder_id"),
         app_config_folder_id=box.get("app_config_folder_id"),
     )
 
@@ -114,22 +135,28 @@ def load_box_config(config_path: Path = CONFIG_JSON) -> BoxConfig:
 def get_box_client(box_config: BoxConfig, *, token_file: Path = BOX_TOKEN_FILE):
     """Return an authenticated :class:`BoxClient`, or ``None``.
 
-    Returns ``None`` when no saved token file exists. Any failure constructing
+    Returns ``None`` when no saved tokens exist. Any failure constructing
     the OAuth client (including ``box_sdk_gen`` being unavailable) is caught,
-    logged with a traceback, and reported as ``None`` — exactly the original's
-    "not connected to Box" behavior. The SDK auto-refreshes the access token
-    via :class:`SimpleTokenStorage`.
+    reported as ``None``. The SDK refreshes tokens through the selected storage;
+    legacy files remain in use until the connection dialog migrates them.
     """
-    if not token_file.exists():
+    if not BOX_AVAILABLE or not box_config.is_complete:
         return None
+    if box_config.provider == "hosted":
+        from cassn.box.hosted import HostedAuthentication, manager_for
+        return BoxClient(HostedAuthentication(manager_for(box_config)))
     try:
+        storage = SimpleTokenStorage(token_file)
+        if token_file == BOX_TOKEN_FILE and not token_file.exists():
+            storage = KeychainTokenStorage(box_config.client_id)
+        if storage.get() is None:
+            return None
         config = OAuthConfig(
             client_id=box_config.client_id,
             client_secret=box_config.client_secret,
-            token_storage=SimpleTokenStorage(token_file),
+            token_storage=storage,
         )
         return BoxClient(BoxOAuth(config))
-    except Exception as e:
-        print(f"Box authentication error: {e}")
-        traceback.print_exc()
+    except Exception:
+        print("Box connection unavailable. Use Connect to Box to reconnect.")
         return None

@@ -56,8 +56,9 @@ deletion but never deletes them.
 
 ## `clear_box_verified_staging.py`
 
-Permanently clears local deployment-event folders only after each event passes
-a fresh, metadata-only Box verification. The command compares the SHA-1 values
+Normally clears local deployment-event folders only after each event passes
+a fresh, metadata-only Box verification. An explicit `--force` bypasses data
+verification. The command compares the SHA-1 values
 recorded at ingest with Box's server-side SHA-1 values. It does not download
 Box media or re-hash local images and recordings.
 
@@ -84,11 +85,63 @@ only the safe events with:
 cassn-clear-staging --apply
 ```
 
-An event is blocked unless device collection is complete, all metadata rows are
+Use `--force` for an explicit **unverified deletion**. It bypasses ordinary data
+and Box verification, including missing media, mismatched metadata, unfinished
+collection, missing session records, and unavailable Box credentials. It does
+not contact Box. `--apply` is still required for deletion.
+
+Both modes still block deletion for saved `ingest_safety` or `card_ingest`
+errors, unreadable ingest-hold evidence, and an existing Box publication record
+that is unreadable or not marked `published`. Unfinished collection alone can
+be bypassed; a saved ingest error cannot. Preserve the source card, staged
+files, QC records and publication journals for review. Do not remove or edit
+those records to bypass a hold.
+
+After reviewing the preview's targets and `BLOCKED` results:
+
+```bash
+cassn-clear-staging --force          # Preview
+cassn-clear-staging --force --apply  # Delete only unblocked events, without Box/data verification
+```
+
+Without `--force`, an event is blocked unless device collection is complete, all metadata rows are
 stamped as uploaded to Box, the normal post-upload verification artifact
 passed, every local raw file is represented in `session.json`, and a live Box
 listing contains matching paths and server-side hashes. Box is never modified,
-and no cleanup receipt or other persistent record is created.
+and no cleanup receipt or other persistent record is created. Normal cleanup
+accepts forward SoundHub submission updates in Box audio metadata when all
+recordings and other fields match; unrelated changes still block cleanup.
+
+Force deletes the entire event folder, including remaining SA media and local
+metadata. Default discovery selects event folders containing `session.json`;
+use `--event FOLDER_NAME --force` to explicitly select an event without it.
+Neither mode permits deleting the staging root, targets outside it, or
+symlinked targets/contents. Both refuse changes detected after preflight.
+
+## `cassn-clear-soundhub`
+
+Runs `prep_soundhub.py clear-completed` using the repository virtual environment
+from any working directory. Installed in `~/.local/bin` by
+`install_macos_app.py`, alongside `cassn-clear-staging` and the SD card commands.
+Uses the configured SoundHub staging root. Run only after SoundHub acceptance
+has been confirmed; the preflight verifies local staging and Box records, not
+SoundHub ingestion.
+
+```bash
+cassn-clear-soundhub          # Preview; no deletion
+cassn-clear-soundhub --apply  # Delete the completed local batch
+```
+
+Use `--force` for **unverified deletion** of the local project and fragment
+folders, including unfinished batches. It bypasses missing FLACs/manifests,
+submission status, Box credentials, and report checks, and performs no remote
+verification. It retains path/symlink checks and detects changes after preflight.
+It can also clear fragments left behind after the project folder was removed.
+
+```bash
+cassn-clear-soundhub --force          # Preview unverified deletion
+cassn-clear-soundhub --force --apply  # Delete local batch without verification
+```
 
 ## `cassn-mount-sd`
 
@@ -260,72 +313,36 @@ If the path is omitted it checks the normal local lookup cache.
 
 ## `box_auth_setup.py`
 
-Runs the Box OAuth setup flow and writes reusable Box tokens to
-`~/.cassn_config/box_tokens.json`.
+Opens the same secure **Connect to Box** dialog used by the application. Prefer
+clicking **Connect to Box** in the app; this launcher is available for standalone
+setup or reconnecting before running a Box-backed maintenance utility.
 
-### When to use
+### Requirements and setup
 
-Use this script the first time you connect the CA-SSN Field Data Manager to Box,
-or any time your saved Box tokens stop working and need to be refreshed.
-
-### Requirements
-
-The project's pinned dependencies include `box-sdk-gen`; install them with the
-[main setup instructions](../README.md#installation).
-
-You also need `~/.cassn_config/config.json` with your Box app
-`client_id` and `client_secret`.
-
-To verify `box-sdk-gen` is installed:
-
-```bash
-.venv/bin/python -c "import box_sdk_gen; print('box-sdk-gen ok')"
-```
-
-### Setup
-
-1. Confirm your Box credentials file exists:
-   ```bash
-   ls ~/.cassn_config/config.json
-   ```
-2. If `~/.cassn_config/config.json` does not exist, create it from the example file:
-   ```bash
-   mkdir -p ~/.cassn_config
-   cp config.json.example ~/.cassn_config/config.json
-   ```
-3. Edit `~/.cassn_config/config.json` and add your Box app `client_id` and `client_secret`.
+Install the project's pinned dependencies, including `box-sdk-gen`, `PySide6`,
+and `keyring`. Your administrator must register
+`http://127.0.0.1:8765/callback` as an OAuth redirect URI in the Box Developer
+Console. Enter the Box app credentials and folder IDs under **Box app settings…**
+if they are not already configured.
 
 ### Run
+
 ```bash
 .venv/bin/python utils/box_auth_setup.py
 ```
 
-During the OAuth flow, `box_auth_setup.py` will:
+Click **Connect to Box**, sign in in your browser, and grant access. The browser
+returns to the app automatically. The dialog supports cancellation and retry;
+there is no redirect URL to paste.
 
-1. Open your browser to the Box authorization page.
-2. Ask you to log in and grant access.
-3. Ask you to paste the full redirect URL back into the terminal.
-4. Exchange that authorization code for tokens.
-5. Save `box_tokens.json` to `~/.cassn_config/`.
+### Storage
 
-### Output
-
-On success, the script writes:
-
-```text
-~/.cassn_config/box_tokens.json
-```
-
-That token file is then used by the application and every Box-backed utility.
-Those commands consume the saved token; they do not run this setup script.
-
-### Notes
-
-- If the script finds an existing token file, it tests that connection first
-- If the existing token is invalid, it falls back to a fresh OAuth flow
-- Refreshed tokens are written back to `~/.cassn_config/box_tokens.json` automatically
-- The browser may redirect to a page that does not load; that is expected
-- Paste the entire redirect URL, not just the authorization code
+The client secret and access/refresh tokens are saved in the system credential
+store (macOS Keychain on Mac). After verified secure writes, the client secret
+is removed from `~/.cassn_config/config.json` and the legacy `box_tokens.json`
+is deleted. Ordinary settings and folder IDs remain in the config. Automatic
+refreshes use the same secure storage in the app and Box-backed utilities.
+Existing JSON credentials continue to work until a successful dialog sign-in.
 
 ---
 
@@ -346,6 +363,15 @@ Per device, it:
 4. Patches the deployment's `session.json` file inventory.
 5. Refreshes an existing legacy device manifest, if present, and regenerates
    the metadata CSVs. It never creates a new per-device manifest.
+6. Reruns the camera date-window and temporal-plausibility checks for the
+   selected devices, appending current results while retaining earlier QC
+   history. Remaining discrepancies stay flagged; missing deployment dates
+   cannot produce a passing date-window result.
+
+Repeating the exact apply command after a completed correction also refreshes
+these date checks without shifting images again. This can clear stale date
+findings left by an earlier version of the utility. Close the app first;
+`--dry-run` never updates QC results.
 
 The offset is fully general — any combination of
 years/months/days/hours/minutes/seconds, added or subtracted — for a verified
@@ -605,10 +631,11 @@ python utils/prep_soundhub.py upload --verify-only
 | `stage --root PATH` | Scan below this folder for every deployment with an `audio_file_metadata.csv`. |
 | `upload --verify-only` | Skip the transfer; only reconcile staging against the bucket. |
 | `upload --preflight-only` | Validate exact staged-FLAC coverage in Box metadata without S3 or Box writes. |
-| `upload --box-year-root DIR` | Override the automatically inferred standard Box Drive `data/<year>` folder. |
+| `upload --box-year-root DIR` | Explicitly use a local Box Drive `data/<year>` folder instead of the normal Box API connection. |
 | `upload --submitter NAME` | Override the default submitter, `Imperato, John`. |
 | `clear-completed` | Read-only cleanup preflight for a fully submitted local batch. |
 | `clear-completed --apply` | Delete the preflighted derived staging project after SoundHub acceptance. |
+| `clear-completed --force` | Preview local deletion without data/submission checks; add `--apply` to delete. |
 
 ### Output
 
@@ -644,10 +671,25 @@ so the submission travels to Box alongside the raw data.
   unsubmitted. The same concise Markdown report is saved into every affected
   Box deployment event's `soundhub/` folder with the destination, counts,
   manifest hashes, and verification result.
-- **Automatic year selection.** The normal Box Drive `data/<year>` folder
-  is inferred from the staged deployment IDs, including future years. A staging
-  tree containing multiple years is rejected; `--box-year-root` is only for a
-  nonstandard Box location, not routine year selection.
+- **Direct Box metadata access.** SoundHub uses the hosted **UC** Box connection,
+  including from the standalone CLI; sign in through the UC app's Connect to Box
+  flow first. It does not depend on legacy token files or change CLI staging paths.
+  The connection is reloaded after S3 verification, before Box updates, so the
+  long transfer does not retain an obsolete credential source. It reads fixed
+  metadata versions, verifies checksums, and checks update/report permissions.
+  Conditional version uploads reject concurrent edits and saved files are
+  verified on Box. This does not depend on Box Drive hydration or indexing.
+  Raw Box media is never traversed or downloaded.
+- **Readable attempt summaries.** Every archive attempt saves `upload_summary.md`
+  alongside `transfer.json` and the AWS log, updating it for success, failure,
+  cancellation, and interruption. S3 verification, Box flags/reports, and SoundHub
+  ingestion are separate outcomes. The full `submission_report.md` is still
+  generated after Box flags are saved. If a previous attempt verified the same
+  destination and exact object batch but failed to finish bookkeeping, another
+  upload is blocked; repair the Box record using the preserved attempt instead.
+- **Automatic year selection.** The configured Box data folder's `<year>` child
+  is inferred from staged deployment IDs, including future years. Mixed-year
+  staging is rejected. `--box-year-root` explicitly opts into local Drive access.
 - **No accidental historical re-upload.** Backlog media already marked as
   submitted on Box closes the current local batch. The GUI and CLI refuse to
   append new deployments until that completed batch has been deliberately

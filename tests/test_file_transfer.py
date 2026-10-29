@@ -14,6 +14,35 @@ from cassn.core.file_transfer import (
 from cassn.core.hashing import sha256_sha1
 
 
+def test_hash_progress_reports_bytes_without_changing_hashes(tmp_path, monkeypatch):
+    from cassn.core import hashing
+    source = tmp_path / "recording.wav"
+    source.write_bytes(b"audio" * 100000)
+    expected = sha256_sha1(source)
+    ticks = iter(number * 0.3 for number in range(100))
+    monkeypatch.setattr(hashing.time, "monotonic", lambda: next(ticks))
+    progress = []
+    result = hash_file_with_retries(source, progress=progress.append)
+    assert (result.sha256, result.sha1) == expected
+    assert progress[0] == 0
+    assert progress[-1] == source.stat().st_size
+    assert len(progress) > 2
+
+
+def test_hash_progress_cancellation_stops_without_retry(tmp_path):
+    source = tmp_path / "recording.wav"
+    source.write_bytes(b"audio")
+    calls = []
+
+    def cancel(read_bytes):
+        calls.append(read_bytes)
+        raise InterruptedError("cancelled")
+
+    with pytest.raises(InterruptedError, match="cancelled"):
+        hash_file_with_retries(source, progress=cancel, retry_delay=0)
+    assert calls == [0]
+
+
 def test_verified_copy_commits_matching_bytes(tmp_path):
     source = tmp_path / "source.wav"
     destination = tmp_path / "staged.wav"
@@ -113,3 +142,30 @@ def test_source_hash_retries_transient_io_error(tmp_path, monkeypatch):
 
     assert result.attempts == 2
     assert calls == 2
+
+
+@pytest.mark.parametrize("single_read", [True, False])
+def test_copy_never_deletes_a_previous_attempt_temporary(tmp_path, single_read):
+    import os
+    source = tmp_path / "source.wav"
+    destination = tmp_path / "staged.wav"
+    source.write_bytes(b"captured")
+    previous = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
+    previous.write_bytes(b"unrecorded evidence")
+    if single_read:
+        copy_file_single_read_verified(source, destination)
+    else:
+        sha256, sha1 = sha256_sha1(source)
+        copy_file_verified(source, destination, expected_sha256=sha256, expected_sha1=sha1)
+    assert previous.read_bytes() == b"unrecorded evidence"
+    assert destination.read_bytes() == b"captured"
+
+
+def test_new_file_copy_refuses_existing_unrecorded_destination(tmp_path):
+    source = tmp_path / "source.wav"
+    destination = tmp_path / "staged.wav"
+    source.write_bytes(b"incoming")
+    destination.write_bytes(b"unrecorded original")
+    with pytest.raises(FileTransferError, match="Unrecorded destination"):
+        copy_file_single_read_verified(source, destination, retry_delay=0)
+    assert destination.read_bytes() == b"unrecorded original"

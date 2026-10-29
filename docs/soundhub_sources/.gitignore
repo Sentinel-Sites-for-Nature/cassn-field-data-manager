@@ -1,0 +1,3 @@
+# Keep supplied personal email source files local to this checkout.
+*.eml
+*.csv

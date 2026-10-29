@@ -9,7 +9,9 @@ ever touches the filesystem to ensure the config directories exist, which is
 idempotent and safe.
 """
 
+import os
 from pathlib import Path
+from cassn.profile import HOSTED, PROFILE, PROJECTS
 from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
@@ -19,7 +21,11 @@ from zoneinfo import ZoneInfo
 # assets (logos) live next to the package, under BUNDLE_DIR.
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR = Path.home() / ".cassn_config"
+# CASSN_CONFIG_ROOT is an explicit development/test override, never a PI setting.
+BASE_CONFIG_DIR = Path(os.environ.get("CASSN_CONFIG_ROOT", Path.home() / ".cassn_config"))
+CONFIG_DIR = BASE_CONFIG_DIR / "profiles" / PROFILE if HOSTED else BASE_CONFIG_DIR
+LOCK_DIR = BASE_CONFIG_DIR / "window-locks"
+DEFAULT_STAGING_ROOT = Path.home() / "Desktop" / (f"{PROFILE.upper()}_CASSN_field_data_staging" if HOSTED else "CASSN_field_data_staging")
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 BUNDLE_DIR = Path(__file__).resolve().parent.parent
@@ -35,7 +41,8 @@ BOX_TOKEN_FILE = CONFIG_DIR / "box_tokens.json"
 # ---------------------------------------------------------------------------
 
 VERSION = "4.0"
-APP_TITLE = "CA-SSN Field Data Manager"
+APP_TITLE = (f"CA-SSN Data Manager — {PROFILE.upper()}" if HOSTED and os.environ.get("CASSN_UNIFIED") == "1"
+             else PROJECTS[PROFILE]["title"] if HOSTED else "CA-SSN Field Data Manager")
 
 # Camera EXIF and AudioMoth filenames both encode local Pacific time.
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
@@ -191,25 +198,26 @@ SOUNDHUB_STAGING_DEFAULT = Path.home() / "cassn" / "soundhub" / "s3_upload_stagi
 # encode-time cost; lossless either way, so the audio is identical.
 FLAC_COMPRESSION_LEVEL = 5
 
-# Deployment Template sheet of templates/SoundHub_Metadata_Template.xlsx, in
-# sheet order, with aru_status lowercased for the ingest schema. Internal
-# audio metadata retains ARU_status; mapping happens at the export boundary.
+# Website-linked CDFW Deployment Metadata Template, in sheet order:
+# https://docs.google.com/spreadsheets/d/1SPXHW_70cOeiKz0k_qoZJo92igfLlHtj5EiR1RKgoD0/edit
+# Brian's September 2 ingest correction requires lowercase aru_status.
+# Internal frequency/duration/ARU_status names are mapped at export.
 SOUNDHUB_DEPLOYMENT_FIELDS = [
     "project_short_name", "deployment_id", "subproject", "subproject_design",
-    "placename", "longitude", "latitude", "date_installed",
+    "placename", "longitude", "latitude", "date_installed", "recorded_by",
     "deployment_start_date", "deployment_start_time",
     "deployment_end_date", "deployment_end_time",
-    "frequency", "duration", "gain",
+    "recording_schedule", "recording_duration", "gain",
     "filter_type_khz", "filter_type_duration", "filter_type_amplitude",
     "ARU_make", "ARU_model", "ARU_container", "ARU_microphone",
-    "feature_type", "feature_type_details", "aru_status", "mounted_on",
-    "sensor_height_meters", "recorded_by", "notes",
+    "feature_type", "feature_type_details", "mounted_on",
+    "sensor_height_meters", "aru_status", "notes",
 ]
 
 # recording.csv carries the per-file timestamps SoundHub cannot parse out of our
 # renamed files. Brian's ingest feedback requires a project-relative
 # path and sample_rate in Hz. start/end retain the recording UTC offset.
-SOUNDHUB_RECORDING_FIELDS = ["path", "deployment_id", "start", "end", "sample_rate"]
+SOUNDHUB_RECORDING_FIELDS = ["deployment_id", "path", "start", "end", "sample_rate", "notes"]
 
 # "2026-05-11 00:00:00-07:00" — space-separated date and time, offset retained.
 # Rendered with ``datetime.isoformat(sep=SOUNDHUB_DATETIME_SEPARATOR)`` rather
@@ -226,15 +234,23 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
     "hash_verification": (
         "Per-file hash verification: SHA-256 and SHA-1 are computed before copy, "
         "then again after copy, and both must match. Mismatches abort the copy "
-        "and remove the destination file."
+        "and remove only the current attempt's temporary copy."
     ),
     "file_size_floor": (
-        "Files copied below device-aware floors are flagged as possible corrupted writes: "
+        "Warnings are reported for copied files below device-aware size minimums: "
         "images <500 KB, bird AudioMoth WAVs <1 GB, and bat AudioMoth WAVs <500 KB."
     ),
     "duplicate_detection": (
-        "Files whose SHA-256 matches an already-inventoried file in this session are flagged "
-        "and skipped. Indicates the same physical file was copied twice (e.g., re-running a card)."
+        "Historical duplicate-count summary. New ambiguous matching-content files stop "
+        "with an ingest_safety finding; equal bytes alone do not establish the same acquisition."
+    ),
+    "ingest_safety": (
+        "Files or source details need review. Sources and existing staged files are preserved; "
+        "upload and cleanup remain blocked until reviewed recovery records a resolution."
+    ),
+    "card_ingest": (
+        "Saved result of a card copy attempt. A successful retry clears this attempt error "
+        "while retaining its history; unresolved safety findings require separate review."
     ),
     "expected_file_count": (
         "User-supplied expected file count (auto-counted from source) is compared against the "
@@ -250,13 +266,12 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "before deployment start, after the collection date, and clock-reset clusters "
         "(many files at the same second)."
     ),
+    "camera_date_review": (
+        "Camera captures outside the deployment dates block review and upload until "
+        "the operator records an explanation. Original files and camera dates are retained."
+    ),
     "camera_timezone_consistency": (
-        "Camera clocks are expected to show local Pacific civil time. Original EXIF "
-        "clock readings resolve in America/Los_Angeles for new processing. Reported "
-        "offset discrepancies are warnings after resolution. Invalid, nonexistent, "
-        "or ambiguous capture times remain unresolved errors. Historical offset "
-        "errors remain errors until separately corrected. Clock accuracy is not verified. "
-        "This check does not rewrite images or stored timestamps."
+        "Checks camera timezone tags against Pacific time; does not verify camera clock accuracy."
     ),
     "coordinate_validation": (
         "Coordinates and elevation (from plots.csv) should be non-null and fall within the "
@@ -298,8 +313,9 @@ QC_CHECK_DESCRIPTIONS: dict[str, str] = {
         "files are flagged so they can be repaired before being silently lost."
     ),
     "pre_departure": (
-        "Aggregate readiness check before closing or switching deployments: all devices "
-        "complete, fixity check run, Box upload done, no QC errors."
+        "Saved checklist before closing or switching deployments: collection, hash "
+        "verification, Box upload and QC status. An acknowledged warning records "
+        "outstanding requirements at that time; it does not confirm completion."
     ),
     "lookup_snapshot": (
         "Lookup/config snapshot: copies the currently loaded lookup tables into "

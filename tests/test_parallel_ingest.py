@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from cassn.core.ingest_safety import IngestSafetyError, source_evidence, require_no_ingest_holds
 from cassn.core.quality_control import append_qc_report
 from cassn.core.image_metadata import _parse_reconyx_tags
 from cassn.core.wi_split import event_key
@@ -176,6 +177,15 @@ def test_burst_resume_matches_uninterrupted_ingest(
         row["file_hash_sha256"] for row in saved_rows
     ))
     context.file_inventory = json.loads(session.read_text())
+    if staged_state == "orphan_tail":
+        before = {p: p.read_bytes() for p in (deployment / "raw_data").rglob("*.jpg")}
+        with pytest.raises(IngestSafetyError, match="unrecorded staged"):
+            _ingest_camera(context, source, reconyx)
+        assert all(p.read_bytes() == data for p, data in before.items())
+        assert context.file_inventory == saved_rows
+        with pytest.raises(IngestSafetyError):
+            require_no_ingest_holds(deployment)
+        return
     _ingest_camera(context, source, reconyx)
     assert context.file_inventory[:saved_count] == saved_rows
     _assert_camera_inventory_matches(
@@ -546,6 +556,28 @@ def test_disconnected_source_reports_retryable_explanation(tmp_path, monkeypatch
     assert "completed files have been saved" in results[0]["error"]
 
 
+def test_card_replaced_during_copy_cannot_report_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _DummyReconyx)
+    source = tmp_path / "card"
+    source.mkdir()
+
+    def processor(*_args):
+        source.rename(tmp_path / "removed-card")
+        source.mkdir()
+        return 0, 0, 0
+
+    worker = CardIngestThread(
+        processor=processor, source_dir=source, deployment_folder=tmp_path / "event",
+        plot_num=1, plot_label="Plot 1", device_code="ML", device_label="p1_ML",
+        metadata={}, lookups=object(), inventory=[], hash_registry=IngestHashRegistry(),
+    )
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert results[0]["ok"] is False
+    assert "Source card changed or reconnected" in results[0]["error"]
+
+
 def test_two_device_copy_engines_run_concurrently_without_state_collisions(
     tmp_path, monkeypatch
 ):
@@ -655,8 +687,10 @@ def test_resume_repairs_audio_metadata_from_staged_destination(tmp_path, monkeyp
         "source_relpath": source_file.name,
         "file_type": "audio",
         "file_size_bytes": staged.stat().st_size,
-        "file_hash_sha256": "sha256",
-        "file_hash_sha1": "sha1",
+        "file_hash_sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(),
+        "file_hash_sha1": hashlib.sha1(source_file.read_bytes()).hexdigest(),
+        "source_evidence": source_evidence(source_file),
+        "deployment_id": "UC_Test_plot1_BD_20260101",
         "recording_duration_sec": "",
     }
     repaired_paths = []
@@ -688,7 +722,7 @@ def test_resume_repairs_audio_metadata_from_staged_destination(tmp_path, monkeyp
     assert existing["recording_duration_sec"] == 32400
 
 
-def test_concurrent_cards_deduplicate_identical_media_across_devices(
+def test_concurrent_equal_byte_cards_hold_instead_of_silent_success(
     tmp_path, monkeypatch
 ):
     import cassn.gui.wizard as wizard_module
@@ -707,22 +741,30 @@ def test_concurrent_cards_deduplicate_identical_media_across_devices(
         destination.mkdir(parents=True)
         context = _ProcessContext(event, registry)
         barrier.wait()
-        result = FieldDataWizard.process_sd_card_files(
-            context,
-            source,
-            destination,
-            plot,
-            f"Plot {plot}",
-            "ML",
-            f"p{plot}_ML",
-            _DummyReconyx(),
-        )
+        try:
+            result = FieldDataWizard.process_sd_card_files(
+                context,
+                source,
+                destination,
+                plot,
+                f"Plot {plot}",
+                "ML",
+                f"p{plot}_ML",
+                _DummyReconyx(),
+            )
+        except IngestSafetyError:
+            result = "held"
         return result, context.file_inventory
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         outputs = list(pool.map(run_device, (1, 2)))
 
-    assert sorted(result for result, _rows in outputs) == [(0, 1, 0), (1, 0, 0)]
+    assert sum(result == "held" for result, _rows in outputs) == 1
+    assert sum(result == (1, 0, 0) for result, _rows in outputs) == 1
+    assert all((tmp_path / f"card{plot}" / f"image{plot}.jpg").read_bytes() == b"identical-image"
+               for plot in (1, 2))
+    with pytest.raises(IngestSafetyError, match="Equal-byte"):
+        require_no_ingest_holds(event)
     assert sum(len(rows) for _result, rows in outputs) == 1
     assert len(list((event / "raw_data").rglob("*.jpg"))) == 1
 
@@ -787,6 +829,8 @@ def test_ingest_recovers_crash_paths_before_missing_file_restoration(tmp_path, m
     inventory = [{
         "device_label": "p1_ML", "new_filename": name, "file_type": "image",
         "source_relpath": "one.jpg", "file_size_bytes": 5,
+        "source_evidence": source_evidence(source / "one.jpg"),
+        "deployment_id": "UC_Test_plot1_ML_20260101",
         "file_hash_sha256": hashes.sha256, "file_hash_sha1": hashes.sha1,
         "storage_relpath": f"raw_data/p1_ML/{name}",
     }]
@@ -1016,3 +1060,198 @@ def test_camera_time_resolution_preserves_image_bytes_and_resume(tmp_path, monke
     ingest()
     assert json.dumps(context.file_inventory, sort_keys=True) == before
     assert original.read_bytes() == staged.read_bytes() == contents
+
+
+def test_small_file_evidence_survives_noop_resume(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    before = json.loads((context.current_deployment_folder / "qc/qc_report.json").read_text())
+    original = next(e for e in before["current_state"] if e["check"] == "file_size_floor")
+    assert original["severity"] == "warning"
+    assert len(original["findings"]) == 6
+    copied, _, _ = _ingest_camera(context, source, reconyx)
+    assert copied == 0
+    after = json.loads((context.current_deployment_folder / "qc/qc_report.json").read_text())
+    current = next(e for e in after["current_state"] if e["check"] == "file_size_floor")
+    assert current["severity"] == "warning"
+    assert current["findings"] == original["findings"]
+    for finding in current["findings"]:
+        assert finding["files"][0]["filename"]
+        assert "bytes" in finding["message"]
+
+
+@pytest.mark.parametrize("change", ["new_bytes", "other_card", "missing_evidence", "staged_corruption", "deployment_changed"])
+def test_resume_requires_source_evidence_and_matching_bytes(tmp_path, monkeypatch, change):
+    import cassn.gui.wizard as wizard_module
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir()
+    incoming = source / "one.jpg"
+    incoming.write_bytes(b"original")
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    assert _ingest_camera(context, source, _DummyReconyx()) == (1, 0, 0)
+    row = context.file_inventory[0]
+    staged = context.current_deployment_folder / row["storage_relpath"]
+    if change == "new_bytes":
+        incoming.write_bytes(b"different"[:8])
+    elif change == "other_card":
+        source = tmp_path / "other-card"
+        source.mkdir()
+        (source / "one.jpg").write_bytes(b"original")
+    elif change == "missing_evidence":
+        row.pop("source_evidence")
+    elif change == "deployment_changed":
+        row["deployment_id"] = "other-deployment"
+    else:
+        staged.write_bytes(b"corrupt!")
+    before = staged.read_bytes()
+    with pytest.raises(IngestSafetyError):
+        _ingest_camera(context, source, _DummyReconyx())
+    assert staged.read_bytes() == before
+    assert len(context.file_inventory) == 1
+    with pytest.raises(IngestSafetyError):
+        require_no_ingest_holds(context.current_deployment_folder)
+    # A retry cannot erase an unresolved safety finding, even with original bytes.
+    incoming.write_bytes(b"original")
+    with pytest.raises(IngestSafetyError):
+        _ingest_camera(context, incoming.parent, _DummyReconyx())
+
+
+@pytest.mark.parametrize("legacy_hold", [False, True])
+@pytest.mark.parametrize("staged_state", ["healthy", "missing", "truncated"])
+def test_reinserted_card_resumes_after_mount_number_changes(
+    tmp_path, monkeypatch, legacy_hold, staged_state
+):
+    import cassn.core.ingest_safety as safety
+    import cassn.gui.wizard as wizard_module
+
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    context._ingest_cancelled = lambda: len(context.file_inventory) >= 2
+    with pytest.raises(InterruptedError):
+        _ingest_camera(context, source, reconyx)
+    before = json.loads(json.dumps(context.file_inventory))
+    staged = context.current_deployment_folder / before[-1]["storage_relpath"]
+    if staged_state == "missing":
+        staged.unlink()
+    elif staged_state == "truncated":
+        staged.write_bytes(b"x")
+
+    if legacy_hold:
+        append_qc_report(
+            context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+            f"Cannot establish a retained-source retry for {source / before[0]['source_relpath']}. "
+            "Source evidence is missing or changed. Existing staged bytes were preserved; "
+            "review this acquisition before retrying."
+        )
+    # Do not remount real media: model macOS assigning a new st_dev while
+    # retaining all on-card file details and bytes.
+    def reconnected(path):
+        evidence = source_evidence(path)
+        evidence["device"] += 100
+        return evidence
+
+    monkeypatch.setattr(wizard_module, "source_evidence", reconnected)
+    monkeypatch.setattr(safety, "source_evidence", reconnected)
+    context._ingest_cancelled = lambda: False
+    assert _ingest_camera(context, source, reconyx) == (
+        4 + (staged_state != "healthy"), 0, 0
+    )
+    assert context.file_inventory[:2] == before
+    assert [row["sequence_event_num"] for row in context.file_inventory] == [1, 1, 1, 2, 2, 2]
+    for row in context.file_inventory:
+        assert (context.current_deployment_folder / row["storage_relpath"]).read_bytes() == (
+            source / row["source_relpath"]
+        ).read_bytes()
+    require_no_ingest_holds(context.current_deployment_folder)
+    assert _ingest_camera(context, source, reconyx) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("problem", ["source_bytes", "staged_bytes", "missing_file", "unrelated_hold", "cancelled", "save_failed"])
+def test_remount_recovery_keeps_hold_until_all_files_verified(tmp_path, monkeypatch, problem):
+    import cassn.core.ingest_safety as safety
+    import cassn.gui.wizard as wizard_module
+
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    row = context.file_inventory[-1]
+    append_qc_report(
+        context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+        f"Cannot establish a retained-source retry for {source / row['source_relpath']}. "
+        "Source evidence is missing or changed. Existing staged bytes were preserved; "
+        "review this acquisition before retrying."
+    )
+
+    def reconnected(path):
+        evidence = source_evidence(path)
+        evidence["device"] += 100
+        return evidence
+
+    monkeypatch.setattr(wizard_module, "source_evidence", reconnected)
+    monkeypatch.setattr(safety, "source_evidence", reconnected)
+    incoming = source / row["source_relpath"]
+    staged = context.current_deployment_folder / row["storage_relpath"]
+    if problem == "source_bytes":
+        import os
+        original_stat = incoming.stat()
+        incoming.write_bytes(b"x" * original_stat.st_size)
+        os.utime(incoming, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    elif problem == "staged_bytes":
+        staged.write_bytes(b"x" * staged.stat().st_size)
+    elif problem == "missing_file":
+        incoming.unlink()
+    elif problem == "unrelated_hold":
+        append_qc_report(context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+                         "Unrecorded staged files require review")
+    elif problem == "cancelled":
+        context._ingest_cancelled = lambda: True
+    elif problem == "save_failed":
+        context.save_session = lambda: False
+    staged_before = staged.read_bytes()
+    with pytest.raises((IngestSafetyError, InterruptedError, OSError)):
+        _ingest_camera(context, source, reconyx)
+    assert staged.read_bytes() == staged_before
+    with pytest.raises(IngestSafetyError):
+        require_no_ingest_holds(context.current_deployment_folder)
+
+
+def test_retry_cannot_complete_when_retained_source_file_is_missing(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    (source / context.file_inventory[-1]["source_relpath"]).unlink()
+    with pytest.raises(IngestSafetyError, match="previously copied source"):
+        _ingest_camera(context, source, reconyx)
+
+
+def test_resume_reports_card_and_local_verification_progress(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    messages = []
+    context._ingest_progress = lambda _count, message: messages.append(message)
+    assert _ingest_camera(context, source, reconyx) == (0, 0, 0)
+    assert messages[0].startswith("Checking saved card file 1/6:")
+    assert "0.0 /" in messages[0]
+    assert any(message.startswith("Checking saved local copy 6/6:") for message in messages)
+
+
+def test_repeated_config_destination_preserves_both_sources_and_staged_copy(tmp_path, monkeypatch):
+    import cassn.gui.wizard as wizard_module
+    monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
+    source = tmp_path / "card"
+    source.mkdir()
+    (source / "CONFIG1.TXT").write_bytes(b"config one")
+    (source / "CONFIG2.TXT").write_bytes(b"config two")
+    event = tmp_path / "event"
+    dest = event / "raw_data/p1_BD"
+    dest.mkdir(parents=True)
+    context = _ProcessContext(event, IngestHashRegistry(), _AudioLookups())
+    with pytest.raises(IngestSafetyError, match="Destination collision"):
+        FieldDataWizard.process_sd_card_files(context, source, dest, 1, "Plot 1", "BD", "p1_BD", _DummyReconyx())
+    assert (source / "CONFIG1.TXT").read_bytes() == b"config one"
+    assert (source / "CONFIG2.TXT").read_bytes() == b"config two"
+    assert len(context.file_inventory) == 1
+    assert next(dest.glob("*.txt")).read_bytes() == b"config one"

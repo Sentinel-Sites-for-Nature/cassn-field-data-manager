@@ -107,9 +107,9 @@ class _WorkerContext:
         self._uncommitted_hashes.clear()
 
     def _append_ingest_qc(
-        self, deployment_folder, check, device, severity, message
+        self, deployment_folder, check, device, severity, message, findings=None
     ) -> None:
-        append_qc_report(deployment_folder, check, device, severity, message)
+        append_qc_report(deployment_folder, check, device, severity, message, findings)
 
     def _ingest_cancelled(self) -> bool:
         return self.thread.is_cancelled()
@@ -187,6 +187,7 @@ class CardIngestThread(QThread):
         copy_finished = False
         result: dict
         try:
+            source_mount = self.source_dir.stat()
             self.log_line.emit(self.device_label, "Counting files on source card…")
             self.expected_file_count = count_expected_files(self.source_dir)
             self.progress.emit(
@@ -217,6 +218,11 @@ class CardIngestThread(QThread):
                 self.device_label,
                 reconyx,
             )
+            current_mount = self.source_dir.stat()
+            if (current_mount.st_dev, current_mount.st_ino) != (
+                source_mount.st_dev, source_mount.st_ino
+            ):
+                raise OSError("Source card changed or reconnected during copying; retry to verify completed files")
             copy_finished = True
             # rows_ready uses a blocking GUI connection: all inventory is durable
             # before any moves, and updated paths are durable before completion.
@@ -275,4 +281,13 @@ class CardIngestThread(QThread):
             if reconyx is not None:
                 reconyx.close()
             context.release_uncommitted_hashes()
+        try:
+            append_qc_report(
+                self.deployment_folder, "card_ingest", self.device_label,
+                "pass" if result.get("ok") else "error",
+                "Card ingest completed." if result.get("ok") else result.get("error", "Ingest incomplete"),
+            )
+        except Exception as exc:
+            result["ok"] = False
+            result["error"] = f"{result.get('error', 'Ingest stopped')}; could not save ingest report: {exc}"
         self.completed.emit(self.device_label, result)

@@ -104,6 +104,15 @@ def test_validation_rejects_noncanonical_prospective_deployment_id(tmp_path):
         validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
 
 
+def test_validation_rejects_incompatible_wi_feature_in_canonical_source(tmp_path):
+    _canonical_files(tmp_path)
+    path = tmp_path / "deployments.csv"
+    data = path.read_bytes().replace(b"Trail game", b"Aquatic feature")
+    path.write_bytes(data)
+    with pytest.raises(ValueError, match="TestSite plot 1 ML.*feature_type"):
+        validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
+
+
 def test_validation_accepts_explicit_already_filed_legacy_identifier(tmp_path):
     _canonical_files(tmp_path)
     path = tmp_path / "deployments.csv"
@@ -259,30 +268,41 @@ def test_validation_rejects_one_audiomoth_in_overlapping_event_slots(tmp_path):
         validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
 
 
-def test_sequence_suffix_is_not_used_when_end_dates_are_unique(tmp_path):
+@pytest.mark.parametrize("same_end_date", [False, True])
+def test_positive_sequence_always_requires_suffix(tmp_path, same_end_date):
     _canonical_files(tmp_path)
     path = tmp_path / "deployments.csv"
     with path.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     fields = list(rows[0])
-    rows[0]["deployment_end_date"] = "2026-01-31"
-    rows[0]["deployment_id"] = "UC_TestSite_plot1_ML_20260131"
+    rows[0]["deployment_end_date"] = "2026-02-01" if same_end_date else "2026-01-31"
+    rows[0]["deployment_id"] = "UC_TestSite_plot1_ML_" + ("20260201" if same_end_date else "20260131")
     successor = {
         **rows[0],
         "deployment_id": "UC_TestSite_plot1_ML_20260201",
         "deployment_sequence": "1",
-        "deployment_start_date": "2026-01-31",
+        "deployment_start_date": rows[0]["deployment_end_date"],
         "deployment_end_date": "2026-02-01",
     }
     _write_csv(path, fields, [rows[0], successor])
 
-    result = validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
-    assert result.deployments == 2
+    with pytest.raises(ValueError, match="prospective naming contract|duplicate deployment_id"):
+        validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
 
     successor["deployment_id"] = "UC_TestSite_plot1_ML_20260201-seq01"
     _write_csv(path, fields, [rows[0], successor])
-    with pytest.raises(ValueError, match="do not match the prospective naming contract"):
-        validate_deployment_lookups(path, tmp_path / "deployment_events.csv")
+    assert validate_deployment_lookups(path, tmp_path / "deployment_events.csv").deployments == 2
+
+    # Its identity must not depend on the earlier deployment being selected.
+    _write_csv(path, fields, [successor])
+    assert validate_deployment_lookups(path, tmp_path / "deployment_events.csv").deployments == 1
+
+    successor["deployment_id"] = "UC_TestSite_plot1_ML_20260201"
+    successor["identifier_policy"] = "filed_legacy"
+    _write_csv(path, fields, [successor])
+    original = path.read_bytes()
+    assert validate_deployment_lookups(path, tmp_path / "deployment_events.csv").deployments == 1
+    assert path.read_bytes() == original
 
 
 def test_pair_validation_rejects_reversed_interval(tmp_path):
@@ -394,3 +414,72 @@ def test_no_box_and_no_valid_cache_stops_with_actionable_error(tmp_path):
             tmp_path / "missing-cache",
             client_factory=lambda _config: None,
         )
+
+
+def test_hosted_cache_manifest_prevents_uc_fallback(tmp_path):
+    from cassn.box.auth import csu_config
+    _canonical_files(tmp_path)
+    with pytest.raises(LookupBootstrapError):
+        bootstrap_lookup_tables(csu_config(), tmp_path, client_factory=lambda _: None)
+
+
+def test_empty_csu_folder_reports_missing_files_instead_of_access_problem(tmp_path):
+    from cassn.box.auth import csu_config
+    from cassn.lookup_sync import REQUIRED_RUNTIME_FILENAMES
+    with pytest.raises(LookupBootstrapError) as caught:
+        bootstrap_lookup_tables(csu_config(), tmp_path / "cache", client_factory=lambda _: FakeBoxClient({}))
+    assert caught.value.reason == "missing_files"
+    assert set(caught.value.missing_files) == REQUIRED_RUNTIME_FILENAMES | {"program_config.json"}
+
+
+def test_hosted_validation_failure_is_distinct_from_download_access(tmp_path):
+    from cassn.box.auth import csu_config
+    import json
+    source = tmp_path / "source"
+    files = _canonical_files(source)
+    files["program_config.json"] = json.dumps({"organizations": ["CSU"], "observers": ["Test"], "default_downloader": "Test"}).encode()
+    files["deployments.csv"] = b"wrong,columns\nprivate,row-data\n"
+    with pytest.raises(LookupBootstrapError) as caught:
+        bootstrap_lookup_tables(csu_config(), tmp_path / "cache", client_factory=lambda _: FakeBoxClient(files))
+    assert caught.value.reason == "invalid_files"
+    assert "private" not in str(caught.value)
+
+
+def test_hosted_sync_binds_cache_to_project_and_allows_offline(tmp_path):
+    import json
+    from cassn.box.auth import csu_config
+    source, cache = tmp_path / "source", tmp_path / "cache"
+    source.mkdir()
+    files = _canonical_files(source)
+    files["program_config.json"] = json.dumps({"organizations": ["CSU"], "observers": ["Test"], "default_downloader": "Test"}).encode()
+    client = FakeBoxClient(files)
+    config = csu_config()
+    synced = bootstrap_lookup_tables(config, cache, client_factory=lambda _: client)
+    assert synced.source == "box"
+    manifest = json.loads((cache / ".project.json").read_text())
+    assert manifest["folder"] == config.app_config_folder_id
+    assert bootstrap_lookup_tables(config, cache, client_factory=lambda _: None).source == "offline-cache"
+    manifest["folder"] = "different"
+    (cache / ".project.json").write_text(json.dumps(manifest))
+    with pytest.raises(LookupBootstrapError):
+        bootstrap_lookup_tables(config, cache, client_factory=lambda _: None)
+
+
+def test_uc_hosted_uses_existing_defaults_without_changing_box(tmp_path):
+    import json
+    from cassn.box.auth import hosted_config
+    from cassn.config import ORGANIZATIONS, DOWNLOADERS, DEFAULT_DOWNLOADER
+    source, cache = tmp_path / 'source', tmp_path / 'cache'
+    source.mkdir()
+    files = _canonical_files(source)
+    client = FakeBoxClient(files)
+    config = hosted_config('uc')
+    synced = bootstrap_lookup_tables(config, cache, client_factory=lambda _: client)
+    assert synced.source == 'box'
+    assert 'program_config.json' not in synced.synced_files
+    assert json.loads((cache / 'program_config.json').read_text()) == {
+        'organizations': ORGANIZATIONS, 'observers': DOWNLOADERS,
+        'default_downloader': DEFAULT_DOWNLOADER}
+    assert bootstrap_lookup_tables(config, cache, client_factory=lambda _: None).source == 'offline-cache'
+    with pytest.raises(LookupBootstrapError):
+        bootstrap_lookup_tables(hosted_config('csu'), cache, client_factory=lambda _: None)

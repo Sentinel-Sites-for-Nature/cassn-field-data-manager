@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 from cassn.box.auth import BOX_AVAILABLE, BoxConfig, get_box_client
+from cassn.core.verification_evidence import readiness, verification_context, write_result
 from cassn.box.status import has_box_upload_history
 from cassn.box.threads import (
     BoxUploadThread,
@@ -77,14 +78,9 @@ from cassn.gui.workspace import (
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
-    validate_staging_manifests,
     write_deployment_copy,
 )
-from cassn.soundhub.lifecycle import (
-    plan_completed_batch_cleanup,
-    staging_extension_blockers,
-)
-from cassn.soundhub.staging import flac_available, fragments_root, project_root
+from cassn.soundhub.staging import flac_available, project_root
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -97,9 +93,10 @@ from cassn.config import (
     APP_TITLE,
     AUDIO_DEVICE_TYPES,
     AUDIO_FIELDS,
-    BOX_TOKEN_FILE,
     BUNDLE_DIR,
+    BASE_CONFIG_DIR,
     CONFIG_JSON,
+    DEFAULT_STAGING_ROOT,
     DEFAULT_DOWNLOADER,
     DEVICE_TYPES,
     DOWNLOADERS,
@@ -121,6 +118,10 @@ from cassn.core.image_metadata import (
     extract_reconyx_sequence,
 )
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
+from cassn.core.ingest_safety import (
+    hold_ingest, source_evidence, require_no_ingest_holds,
+    retained_source_matches, prepare_remounted_source_retry,
+)
 from cassn.core.file_transfer import (
     FileTransferError,
     copy_file_single_read_verified,
@@ -147,6 +148,7 @@ from cassn.core.inventory import (
 from cassn.core.quality_control import (
     append_qc_report,
     build_box_verification_record,
+    camera_date_discrepancies,
     check_camera_serial,
     check_camera_timezones,
     check_file_size_floor,
@@ -158,6 +160,10 @@ from cassn.core.quality_control import (
     validate_coordinates,
     validate_datetimes,
 )
+from cassn.core.qc_review import (
+    checklist_task, collection_review_findings, departure_warning_message, small_file_findings,
+)
+from cassn.gui.qc_review import CollectionReviewDialog
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
 from cassn.lookups import (
@@ -195,7 +201,7 @@ class FieldDataWizard(QMainWindow):
         # Data storage
         self.metadata = {}
         self.devices = []
-        self.staging_root = Path.home() / "Desktop" / "CASSN_field_data_staging"
+        self.staging_root = DEFAULT_STAGING_ROOT
         # Every staging location the user has used, remembered across launches so
         # the resume dialog can surface partial sessions from any of them (e.g. an
         # SSD/Desktop copy and the external G-DRIVE), not just the active root.
@@ -203,6 +209,7 @@ class FieldDataWizard(QMainWindow):
         self.card_concurrency_limit = 4
         self.current_deployment_folder = None
         self.file_inventory = []
+        self.camera_date_reviews = {}
         self.seen_file_hashes = set()  # session-wide duplicate detection
         self.card_ingest_threads: dict[str, CardIngestThread] = {}
         self._retiring_card_threads: set[CardIngestThread] = set()
@@ -222,7 +229,7 @@ class FieldDataWizard(QMainWindow):
         self._post_upload_box_summary = ""
         self._post_upload_box_issues = []
         self.fixity_check_run = False  # set True once fixity check completes this session
-        self.box_upload_complete = False  # set True once BoxUploadThread finishes successfully
+        self.box_upload_complete = False  # current batch file list and hashes verified
 
         # Load saved config (staging_root lives alongside the Box credentials)
         self.config_file = CONFIG_JSON
@@ -234,7 +241,7 @@ class FieldDataWizard(QMainWindow):
         # Build UI
         self.init_ui()
 
-        # A completed card panel remains visible until its source volume is
+        # A finished card panel remains visible until its source volume is
         # actually unmounted, then disappears without requiring a UI action.
         self._card_ejection_timer = QTimer(self)
         self._card_ejection_timer.setInterval(1000)
@@ -265,10 +272,6 @@ class FieldDataWizard(QMainWindow):
         if not BOX_AVAILABLE:
             return False
 
-        # Look for tokens next to .app (or script folder when not bundled)
-        if not BOX_TOKEN_FILE.exists():
-            return False
-
         try:
             client = get_box_client(self.box_config)
             if client:
@@ -279,11 +282,66 @@ class FieldDataWizard(QMainWindow):
 
         return False
 
+    def set_box_connection_state(self, connected):
+        self.box_authenticated = connected
+        self.box_connection_label.setText("✓ Connected" if connected else "Box disconnected — connect to upload")
+        self.box_connection_label.setStyleSheet("color: green; font-weight: bold;" if connected else "color: #955300;")
+        busy = bool(self._box_operation_active or any(
+            worker and worker.isRunning() for worker in
+            (self.upload_thread, self.box_verify_thread, self.fixity_thread)))
+        for name in ("upload_now_btn", "box_verify_btn", "fixity_btn"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(connected and not busy)
+        if hasattr(self, "disconnect_box_btn"):
+            from cassn.box.hosted import manager_for
+            self.disconnect_box_btn.setEnabled(manager_for(self.box_config).session is not None)
+        self._refresh_workspace_context()
+
+    def connect_to_box(self):
+        from cassn.gui.box_connect import BoxConnectDialog
+        dialog = BoxConnectDialog(self.box_config, self, auto_start=True)
+        if dialog.exec() == QDialog.Accepted:
+            self.box_config = dialog.connected_config
+            self.set_box_connection_state(True)
+            return True
+        return False
+
+    def disconnect_from_box(self):
+        from cassn.gui.hosted_setup import HostedDisconnectDialog
+        dialog = HostedDisconnectDialog(self.box_config, self)
+        dialog.exec()
+        if dialog.disconnected:
+            self.set_box_connection_state(False)
+            return True
+        return False
+
+    def _check_hosted_state(self):
+        # Read only in-memory status here; token acquisition stays on workers.
+        from cassn.box.hosted import manager_for
+        if manager_for(self.box_config).state in ("reconnect", "denied", "disconnected", "network", "storage"):
+            if self.box_authenticated:
+                if hasattr(self, "_publish_connection"):
+                    self._publish_connection(False)
+                else:
+                    self.set_box_connection_state(False)
+
     def load_config(self):
         """Load saved configuration"""
         try:
-            if self.config_file.exists():
-                with open(self.config_file, "r") as f:
+            source = self.config_file
+            legacy = BASE_CONFIG_DIR / "config.json"
+            migrate = (
+                not source.exists()
+                and self.box_config.provider == "hosted"
+                and self.box_config.profile == "uc"
+                and source != legacy
+                and legacy.exists()
+            )
+            if migrate:
+                source = legacy
+            if source.exists():
+                with open(source, "r") as f:
                     config = json.load(f)
                     if "staging_root" in config:
                         self.staging_root = Path(config["staging_root"])
@@ -297,6 +355,9 @@ class FieldDataWizard(QMainWindow):
                         )
                     except (TypeError, ValueError):
                         self.card_concurrency_limit = 4
+                if migrate:
+                    # Carry forward local preferences, never legacy Box credentials.
+                    self.save_config()
         except Exception:
             pass
 
@@ -348,9 +409,12 @@ class FieldDataWizard(QMainWindow):
             "devices": self.devices,
             "device_statuses": device_statuses,
             "file_inventory": self.file_inventory,
+            "camera_date_reviews": self.camera_date_reviews,
             "deployment_folder": str(self.current_deployment_folder),
         }
 
+        if self.box_config.provider == "hosted":
+            session["box_project"] = {"profile": self.box_config.profile, "data_folder": self.box_config.field_data_folder_id}
         error = write_session(self.current_deployment_folder, session)
         if error:
             if hasattr(self, "log_text"):
@@ -388,7 +452,7 @@ class FieldDataWizard(QMainWindow):
         """
         candidates = [
             self.staging_root,
-            Path.home() / "Desktop" / "CASSN_field_data_staging",
+            DEFAULT_STAGING_ROOT,
         ]
         candidates += [Path(p) for p in self.known_staging_roots]
 
@@ -412,7 +476,9 @@ class FieldDataWizard(QMainWindow):
         Delegates to core.inventory's multi-root scanner so the resume dialog
         surfaces partial sessions from the Desktop/SSD and the G-DRIVE alike.
         """
-        return _find_all_sessions_multi(self.staging_roots())
+        from cassn.profile import session_matches
+        return [entry for entry in _find_all_sessions_multi(self.staging_roots())
+                if entry["status"] != "ok" or session_matches(entry["data"], self.box_config)]
 
     def offer_resume_session(self, sessions: list):
         """Show a selection dialog listing all deployments in staging. Lets user open any of them
@@ -440,6 +506,8 @@ class FieldDataWizard(QMainWindow):
                 start = meta.get("deployment_event_start_date", "?")
                 end = meta.get("deployment_event_end_date", "?")
                 label = f"✓  {site_name}  |  {start} → {end}  |  {completed}/{total} devices done"
+            elif s["status"] == "unsupported":
+                label = f"⚠  UNSUPPORTED — {s['path'].parent.name} ({s['error_msg']})"
             else:
                 folder_name = s["path"].parent.name
                 label = f"⚠  CORRUPTED — {folder_name}  (truncated file, may be repairable)"
@@ -465,6 +533,10 @@ class FieldDataWizard(QMainWindow):
             return
         chosen = selected.data(Qt.UserRole)
 
+        if chosen["status"] == "unsupported":
+            QMessageBox.warning(self, "Unsupported Session",
+                                f"{chosen['path']}\n\n{chosen['error_msg']}")
+            return
         if chosen["status"] == "corrupted":
             QMessageBox.warning(
                 self,
@@ -480,6 +552,10 @@ class FieldDataWizard(QMainWindow):
 
     def restore_session(self, session_data):
         """Restore app state from a saved session dict."""
+        from cassn.profile import session_matches
+        if not session_matches(session_data, self.box_config):
+            QMessageBox.warning(self, "Different Project", "This deployment belongs to a different project. Open it in its original application.")
+            return
         self.metadata = normalize_deployment_event_metadata(
             session_data.get("metadata", {})
         )
@@ -501,6 +577,7 @@ class FieldDataWizard(QMainWindow):
             migrated_site_metadata = True
         self.devices = [tuple(d) for d in session_data.get("devices", [])]
         self.file_inventory = session_data.get("file_inventory", [])
+        self.camera_date_reviews = session_data.get("camera_date_reviews", {})
         self.current_deployment_folder = Path(session_data["deployment_folder"])
         try:
             removed_duplicates = deduplicate_exact_storage_entries(self.file_inventory)
@@ -626,7 +703,7 @@ class FieldDataWizard(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         # Set window icon
-        icon_path = BUNDLE_DIR / "assets" / "cassn_icon.png"
+        icon_path = BUNDLE_DIR / "assets" / "ssn_data_manager_icon.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -734,7 +811,7 @@ class FieldDataWizard(QMainWindow):
         title = workspace_label("Deployments and devices", "pageTitle")
         layout.addWidget(title)
         layout.addWidget(workspace_label(
-            "Choose the event and devices you’re collecting.", "subtitle", wrap=True,
+            "Choose the event and devices you’re ingesting.", "subtitle", wrap=True,
         ))
         layout.setContentsMargins(26, 16, 26, 16)
         layout.setSpacing(10)
@@ -886,18 +963,27 @@ class FieldDataWizard(QMainWindow):
 
         # Staging location
         staging_group = QGroupBox("Local Staging Location")
-        staging_layout = QHBoxLayout()
+        staging_layout = QVBoxLayout()
         staging_layout.setContentsMargins(0, 0, 0, 0)
+        staging_description = workspace_label(
+            "Choose where your data is staged before upload to Box. Make sure this location "
+            "has enough free storage for the full set of SD cards you plan to collect.",
+            "muted", wrap=True,
+        )
+        staging_layout.addWidget(staging_description)
+        staging_controls = QHBoxLayout()
 
         self.staging_label = QLineEdit(str(self.staging_root))
         self.staging_label.setReadOnly(True)
-        staging_layout.addWidget(self.staging_label)
+        staging_controls.addWidget(self.staging_label)
 
         change_btn = QPushButton("Change...")
         change_btn.clicked.connect(self.choose_staging_location)
-        staging_layout.addWidget(change_btn)
+        staging_controls.addWidget(change_btn)
+        staging_layout.addLayout(staging_controls)
 
         self.set_default_cb = QCheckBox("Set as default")
+        self.set_default_cb.toggled.connect(self._on_staging_default_changed)
         staging_layout.addWidget(self.set_default_cb)
 
         staging_group.setLayout(staging_layout)
@@ -920,7 +1006,7 @@ class FieldDataWizard(QMainWindow):
         box_logo.setContentsMargins(0, 0, 0, 6)
         box_status_layout.addWidget(box_logo)
         box_status_layout.addSpacing(6)
-        box_status_label = QLabel()
+        box_status_label = self.box_connection_label = QLabel()
         if self.box_authenticated:
             box_status_label.setText("✓ Connected")
             box_status_label.setStyleSheet("color: green; font-weight: bold;")
@@ -937,10 +1023,18 @@ class FieldDataWizard(QMainWindow):
         upload_note.setWordWrap(True)
         box_layout.addWidget(upload_note)
 
-        if not self.box_authenticated:
-            auth_note = QLabel("⚠ Box not connected. Run box_auth_setup.py to authenticate.")
-            auth_note.setStyleSheet("color: orange;")
-            box_layout.addWidget(auth_note)
+        self.connect_box_btn = QPushButton("Connect to Box")
+        self.connect_box_btn.clicked.connect(self.connect_to_box)
+        box_layout.addWidget(self.connect_box_btn)
+        if self.box_config.provider == "hosted":
+            self.disconnect_box_btn = QPushButton("Disconnect")
+            self.disconnect_box_btn.clicked.connect(self.disconnect_from_box)
+            self.disconnect_box_btn.setEnabled(self.box_authenticated)
+            box_layout.addWidget(self.disconnect_box_btn)
+            self._hosted_timer = QTimer(self)
+            self._hosted_timer.setInterval(1000)
+            self._hosted_timer.timeout.connect(self._check_hosted_state)
+            self._hosted_timer.start()
 
         box_group.setLayout(box_layout)
         self.storage_columns.addWidget(box_group, 1)
@@ -1179,6 +1273,9 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_status_label = QLabel("")
         upload_layout.addWidget(self.upload_status_label)
+        self.upload_metrics_label = QLabel("")
+        self.upload_metrics_label.setWordWrap(True)
+        upload_layout.addWidget(self.upload_metrics_label)
 
         # Cancel button (shown only while an upload is running)
         self.cancel_upload_btn = QPushButton("Cancel Upload")
@@ -1255,11 +1352,6 @@ class FieldDataWizard(QMainWindow):
             "Add or refresh this deployment event in the cumulative SoundHub "
             "staging batch. Source WAVs are not modified and nothing is uploaded.",
         )
-        self.soundhub_upload_btn = self._menu_action(
-            "Upload Bird Data to SoundHub",
-            self.upload_to_soundhub,
-            "Push the staged FLAC tree and project manifests to the SoundHub S3 bucket.",
-        )
 
         self.box_verify_btn = self._menu_action(
             "Verify Box Upload",
@@ -1273,12 +1365,6 @@ class FieldDataWizard(QMainWindow):
             self.run_fixity_check,
             "End-to-end Box/local verification: compare each local raw file's "
             "SHA-1 against the SHA-1 reported by Box.",
-        )
-        self.soundhub_verify_btn = self._menu_action(
-            "Check SoundHub Landing Zone",
-            self.verify_soundhub,
-            "Diagnostic only: compare the currently pending batch with the S3 "
-            "landing zone. Successful uploads are verified automatically.",
         )
 
         self.open_btn = self._menu_action(
@@ -1299,12 +1385,15 @@ class FieldDataWizard(QMainWindow):
             "Clear this session and begin a new deployment.",
         )
 
+        if self.box_config.profile == "csu":
+            # The existing SoundHub staging configuration belongs to UC.
+            for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
+                action.setVisible(False)
         button_layout = QHBoxLayout()
-        button_layout.addWidget(self._menu_button("Uploads ▾", [
+        button_layout.addWidget(self._menu_button("Prepare && Upload ▾", [
             self.upload_now_btn,
             None,
             self.soundhub_stage_btn,
-            self.soundhub_upload_btn,
         ]))
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
             self.box_verify_btn,
@@ -1313,8 +1402,6 @@ class FieldDataWizard(QMainWindow):
                 "Check Camera Timezones", self.run_camera_timezone_check,
                 "Compare original camera EXIF offsets with local Pacific time. Does not change images.",
             ),
-            None,
-            self.soundhub_verify_btn,
         ]))
         button_layout.addWidget(self._menu_button("Deployment ▾", [
             self.open_btn,
@@ -1466,7 +1553,7 @@ class FieldDataWizard(QMainWindow):
                     cell_layout.setSpacing(2)
                     for row in rows:
                         sequence = int(row.get("deployment_sequence") or 0)
-                        label = "" if len(rows) == 1 else f"seq{sequence:02d}"
+                        label = "" if len(rows) == 1 else f"Deployment {sequence + 1}"
                         cb = QCheckBox(label)
                         cb.setChecked(True)
                         cb.toggled.connect(self._refresh_workspace_context)
@@ -1525,6 +1612,12 @@ class FieldDataWizard(QMainWindow):
             self._remember_staging_root(self.staging_root)
             self.staging_label.setText(str(self.staging_root))
             self._refresh_workspace_context()
+            if self.set_default_cb.isChecked():
+                self.save_config()
+
+    def _on_staging_default_changed(self, checked):
+        if checked:
+            self.save_config()
 
     def validate_and_next(self):
         """Validate metadata and proceed to collection tab"""
@@ -1743,16 +1836,34 @@ class FieldDataWizard(QMainWindow):
         self._reflow_card_panels()
 
     def _remove_ejected_completed_card_panels(self) -> None:
-        """Dismiss successful panels after their source volume is unmounted."""
+        """Dismiss finished panels after ejection, even if a mount folder remains."""
         for device_label, panel in list(self.card_ingest_panels.items()):
-            if not panel.get("complete"):
+            if device_label in self.card_ingest_threads or not panel.get("finished"):
                 continue
             source_dir = panel.get("source_dir")
-            if source_dir is not None and not Path(source_dir).exists():
-                self.log(f"[{device_label}] Source card ejected; cleared completed job panel.")
+            volume = panel.get("source_volume")
+            disconnected = source_dir is not None and not Path(source_dir).exists()
+            if volume is not None:
+                try:
+                    disconnected = disconnected or (
+                        not volume.is_mount()
+                        or volume.stat().st_dev != panel["source_volume_device"]
+                    )
+                except OSError:
+                    disconnected = True
+            if disconnected:
                 self._remove_card_panel(device_label)
+                self.log(f"[{device_label}] Source card ejected; cleared finished job panel.")
 
     def _create_card_panel(self, device_label: str, source_dir: Path) -> None:
+        source_dir = source_dir.resolve()
+        # Remember the mounted filesystem rather than relying on a directory's
+        # existence: an ejected volume can leave its mount-point folder behind.
+        source_volume = next(
+            (path for path in (source_dir, *source_dir.parents)
+             if path.parent != path and path.is_mount()),
+            None,
+        )
         existing = self.card_ingest_panels.pop(device_label, None)
         if existing:
             existing["group"].setParent(None)
@@ -1820,7 +1931,10 @@ class FieldDataWizard(QMainWindow):
             "errors": 0,
             "cancel": cancel,
             "started": time.monotonic(),
-            "source_dir": source_dir.resolve(),
+            "source_dir": source_dir,
+            "source_volume": source_volume,
+            "source_volume_device": source_volume.stat().st_dev if source_volume else None,
+            "finished": False,
             "complete": False,
         }
         self._reflow_card_panels()
@@ -1997,6 +2111,13 @@ class FieldDataWizard(QMainWindow):
         panel = self.card_ingest_panels.get(device_label)
         if not panel:
             return
+        if filename.startswith("Checking saved "):
+            if item:
+                item.setText(2, "Checking saved files")
+            panel["progress"].setRange(0, 0)
+            panel["status"].setText("Checking saved files before resuming…")
+            panel["detail"].setText(filename)
+            return
         if expected > 0:
             panel["progress"].setRange(0, expected)
             panel["progress"].setValue(min(copied, expected))
@@ -2054,6 +2175,9 @@ class FieldDataWizard(QMainWindow):
         item = self._device_item(device_label)
         panel = self.card_ingest_panels.get(device_label)
 
+        if panel:
+            panel["finished"] = True
+
         if not result.get("ok"):
             cancelled = bool(result.get("cancelled"))
             if item:
@@ -2090,12 +2214,23 @@ class FieldDataWizard(QMainWindow):
 
         if panel:
             timezone_error = check_camera_timezones(device_entries)[0] == "error"
+            date_review_needed = any(
+                not self._camera_date_review_is_current(finding)
+                for finding in camera_date_discrepancies(
+                    device_entries,
+                    self.metadata.get("deployment_event_start_date", ""),
+                    self.metadata.get("deployment_event_end_date", ""),
+                )
+            )
+            qc_blocked = timezone_error or date_review_needed
             panel["status"].setText(
+                "Copy complete — camera date review required; safe to eject card"
+                if date_review_needed else
                 "Copy complete — timezone QC error; safe to eject card"
                 if timezone_error else "Complete — safe to eject card"
             )
             panel["status"].setStyleSheet(
-                f"color: {'#cc0000' if timezone_error else 'green'}; font-weight: bold;"
+                f"color: {'#cc0000' if qc_blocked else 'green'}; font-weight: bold;"
             )
             panel["progress"].setRange(0, max(total_for_device, 1))
             panel["progress"].setValue(total_for_device)
@@ -2201,9 +2336,9 @@ class FieldDataWizard(QMainWindow):
             self.seen_file_hashes.discard(file_hash)
 
     def _append_ingest_qc(
-        self, deployment_folder, check, device, severity, message
+        self, deployment_folder, check, device, severity, message, findings=None
     ) -> None:
-        append_qc_report(deployment_folder, check, device, severity, message)
+        append_qc_report(deployment_folder, check, device, severity, message, findings)
 
     def _ingest_cancelled(self) -> bool:
         return False
@@ -2231,15 +2366,17 @@ class FieldDataWizard(QMainWindow):
         hash_mismatch_names: list[str] = []
         duplicate_names: list[str] = []
 
-        # Reconcile disk against the persisted inventory before resuming: a crash
-        # between the 30s session flushes can leave files staged on disk that
-        # aren't in file_inventory. Left in place, their source would be re-copied
-        # under fresh event numbers, stranding the first copies as orphans and
-        # gapping the event sequence. Deleting them makes the inventory
-        # authoritative so the re-copy below stays contiguous.
-        orphans = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
-        if orphans:
-            self.log(f"  Removed {len(orphans)} orphaned file(s) from {device_label} left by a prior interrupted copy.")
+        recovering_remount = prepare_remounted_source_retry(
+            self.current_deployment_folder, device_label, source_dir, self.file_inventory
+        )
+        if recovering_remount:
+            self.log("  Reconnected card: rechecking saved files before clearing the previous retry error.")
+        unknown = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
+        if unknown:
+            hold_ingest(self.current_deployment_folder, device_label,
+                        f"{len(unknown)} unrecorded staged file(s) preserved in {dest_dir}. "
+                        f"Examples: {unknown[:10]}. "
+                        "Recover their inventory before retrying; do not erase the source card.")
 
         # Resume support is keyed by source-relative identity. Existing records
         # whose staged file is missing or size-inconsistent are restored to their
@@ -2247,6 +2384,8 @@ class FieldDataWizard(QMainWindow):
         inventoried_sources = inventory_by_source_relpath(
             self.file_inventory, device_label
         )
+        retained_sources = set(inventoried_sources)
+        verified_sources = set()
         inventoried_storage = index_inventory_by_storage_relpath(self.file_inventory)
         file_sequence = next_plain_file_sequence(self.file_inventory, device_label)
 
@@ -2328,8 +2467,31 @@ class FieldDataWizard(QMainWindow):
                 # a missing/truncated one is restored to the exact path already in
                 # the inventory and verified against its recorded hashes.
                 source_relpath = str(source_path.relative_to(source_dir))
+                evidence = source_evidence(source_path)
                 prior_entry = inventoried_sources.get(source_relpath)
                 if prior_entry is not None:
+                    def checking_progress(phase):
+                        def update(read_bytes):
+                            if self._ingest_cancelled():
+                                raise InterruptedError("Card ingest cancelled")
+                            self._ingest_progress(
+                                files_copied,
+                                f"Checking saved {phase} {len(verified_sources) + 1}/{len(retained_sources)}: "
+                                f"{filename}\n{read_bytes / (1024 * 1024):,.1f} / "
+                                f"{evidence['size'] / (1024 * 1024):,.1f} MB read",
+                            )
+                        return update
+
+                    incoming = hash_file_with_retries(source_path, progress=checking_progress("card file"))
+                    if (prior_entry.get("deployment_id") != deployment_id
+                            or not retained_source_matches(prior_entry.get("source_evidence"), evidence)
+                            or source_evidence(source_path) != evidence
+                            or incoming.sha256 != prior_entry.get("file_hash_sha256")
+                            or incoming.sha1 != prior_entry.get("file_hash_sha1")):
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Cannot establish a retained-source retry for {source_path}. "
+                                    "Source evidence is missing or changed. Existing staged bytes were preserved; "
+                                    "review this acquisition before retrying.")
                     # Replay the saved burst identity before either resume path
                     # continues, so a new frame can finish the same event.
                     if (
@@ -2347,6 +2509,11 @@ class FieldDataWizard(QMainWindow):
                         and (not expected_size or prior_dest.stat().st_size == expected_size)
                     )
                     if staged_is_complete:
+                        staged_hashes = hash_file_with_retries(prior_dest, progress=checking_progress("local copy"))
+                        if (staged_hashes.sha256 != incoming.sha256
+                                or staged_hashes.sha1 != incoming.sha1):
+                            hold_ingest(self.current_deployment_folder, device_label,
+                                        f"Staged bytes conflict with inventory at {prior_dest}; preserved for review.")
                         if (
                             file_type == "audio"
                             and refresh_audiomoth_inventory_metadata(
@@ -2361,6 +2528,7 @@ class FieldDataWizard(QMainWindow):
                                 raise OSError(
                                     "Could not persist repaired audio metadata"
                                 )
+                        verified_sources.add(source_relpath)
                         continue
 
                     expected_sha256 = str(prior_entry.get("file_hash_sha256", ""))
@@ -2386,6 +2554,7 @@ class FieldDataWizard(QMainWindow):
                         )
                     files_copied += 1
                     self._ingest_progress(files_copied, prior_dest.name)
+                    verified_sources.add(source_relpath)
                     continue
 
                 # For images: read EXIF + Reconyx metadata from source before
@@ -2456,21 +2625,10 @@ class FieldDataWizard(QMainWindow):
                         source_hash = copy_result.sha256
                         source_sha1 = copy_result.sha1
                         if not copy_result.accepted:
-                            self.log(
-                                f"  Warning: duplicate file skipped — {new_filename} "
-                                "matches an already-inventoried file"
-                            )
-                            duplicate_count += 1
-                            duplicate_names.append(new_filename)
-                            self._append_ingest_qc(
-                                self.current_deployment_folder,
-                                "duplicate_detection",
-                                device_label,
-                                "warning",
-                                f"Duplicate hash: {new_filename} matches an "
-                                "already-inventoried file",
-                            )
-                            continue
+                            hold_ingest(self.current_deployment_folder, device_label,
+                                        f"Equal-byte acquisition requires review: {source_path} "
+                                        f"(SHA-256 {source_hash}). Source retained; this file was not accepted. "
+                                        "Do not erase the card or mark this acquisition complete.")
                         hash_reserved = file_type != "config"
                         if copy_result.attempts > 1:
                             self.log(
@@ -2491,47 +2649,17 @@ class FieldDataWizard(QMainWindow):
                             source_hash, file_type
                         )
                     if prior_at_destination is not None and not hash_reserved:
-                        self.log(
-                            f"  Warning: duplicate file skipped — {new_filename} "
-                            "matches an already-inventoried file"
-                        )
-                        duplicate_count += 1
-                        duplicate_names.append(new_filename)
-                        self._append_ingest_qc(
-                            self.current_deployment_folder,
-                            "duplicate_detection",
-                            device_label,
-                            "warning",
-                            f"Duplicate hash: {new_filename} matches an "
-                            "already-inventoried file",
-                        )
-                        continue
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Equal-byte acquisition requires review: {source_path} "
+                                    f"(SHA-256 {source_hash}); source and existing destination retained.")
 
                     if prior_at_destination is not None:
-                        if prior_at_destination.get("file_hash_sha256") == source_hash:
-                            expected_size = int(
-                                prior_at_destination.get("file_size_bytes", 0) or 0
-                            )
-                            if (
-                                not dest_path.is_file()
-                                or (expected_size and dest_path.stat().st_size != expected_size)
-                            ):
-                                copy_file_verified(
-                                    source_path,
-                                    dest_path,
-                                    expected_sha256=source_hash,
-                                    expected_sha1=source_sha1,
-                                )
-                            self.log(
-                                f"  Already inventoried at {relative_dest}; "
-                                "not creating a duplicate record."
-                            )
-                            self._release_ingest_hash(source_hash, file_type)
-                            continue
-                        raise ValueError(
-                            f"Refusing to overwrite inventory-owned destination: "
-                            f"{relative_dest}"
-                        )
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Destination collision at {relative_dest} for {source_path}; "
+                                    "existing bytes and source preserved. Review CONFIG/burst/source identity.")
+                    if source_evidence(source_path) != evidence:
+                        hold_ingest(self.current_deployment_folder, device_label,
+                                    f"Source changed while reading {source_path}; staged copy preserved for review.")
                 except FileTransferError as exc:
                     if hash_reserved:
                         self._release_ingest_hash(source_hash, file_type)
@@ -2551,14 +2679,14 @@ class FieldDataWizard(QMainWindow):
                         self._release_ingest_hash(source_hash, file_type)
                     raise
 
-                # File size floor: flag suspiciously small files using device-aware thresholds.
+                # File size floor: warn when below device-aware thresholds.
                 dest_size = dest_path.stat().st_size
                 size_hit = check_file_size_floor(dest_size, file_type, dev_code)
                 if size_hit is not None:
                     _size_floor, floor_label = size_hit
                     self.log(
-                        f"  Warning: {new_filename} is only {format_size_floor(dest_size)} "
-                        f"(below {floor_label} floor) — possible corrupted write"
+                        f"  Warning: {new_filename} is {format_size_floor(dest_size)} "
+                        f"(below {floor_label} minimum)"
                     )
                     small_file_count += 1
                     small_file_names.append(new_filename)
@@ -2629,6 +2757,7 @@ class FieldDataWizard(QMainWindow):
                     soundhub_config=self.lookups.soundhub_config,
                 )
 
+                file_info["source_evidence"] = evidence
                 self.file_inventory.append(file_info)
                 inventoried_sources[source_relpath] = file_info
                 inventoried_storage[file_info["storage_relpath"]] = file_info
@@ -2651,6 +2780,22 @@ class FieldDataWizard(QMainWindow):
                             "Collection stopped because session.json could not be saved"
                         )
 
+        missing_sources = retained_sources - verified_sources
+        if missing_sources:
+            hold_ingest(
+                self.current_deployment_folder, device_label,
+                f"{len(missing_sources)} previously copied source file(s) are missing from the card. "
+                "Reconnect the original card; staged copies were preserved."
+            )
+        if recovering_remount:
+            if not self.save_session():
+                raise OSError("Could not save verified card retry; previous safety hold retained")
+            self._append_ingest_qc(
+                self.current_deployment_folder, "ingest_safety", device_label, "pass",
+                f"Reconnected card verified: {len(verified_sources)} retained source files and staged "
+                "copies passed both saved hashes. Previous mount-number rejection resolved."
+            )
+
         expected_floor = (
             file_size_floor_for("audio", dev_code)
             if dev_code in AUDIO_DEVICE_TYPES
@@ -2672,9 +2817,16 @@ class FieldDataWizard(QMainWindow):
         if hash_mismatch_count == 0 and files_copied == 0:
             # No copy attempts logged — don't write a hash_verification entry
             pass
-        if small_file_count > 0:
-            self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "warning",
-                                   f"{small_file_count} file(s) below device-aware size floor(s): {floor_summary}")
+        # Include retained files on resume so a no-op copy cannot clear an
+        # existing small-file warning or lose its evidence.
+        device_rows = [row for row in self.file_inventory if row.get("device_label") == device_label]
+        size_findings = small_file_findings(device_rows)
+        if size_findings:
+            self._append_ingest_qc(
+                self.current_deployment_folder, "file_size_floor", device_label, "warning",
+                f"{len(size_findings)} file(s) below device-aware size floor(s). "
+                "See retained findings for filenames and measured sizes.", size_findings,
+            )
         elif expected_floor is not None:
             self._append_ingest_qc(self.current_deployment_folder, "file_size_floor", device_label, "pass",
                                    f"All {files_copied} file(s) above {format_size_floor(expected_floor)} threshold")
@@ -2834,6 +2986,88 @@ class FieldDataWizard(QMainWindow):
     # Review / metadata generation
     # ------------------------------------------------------------------
 
+    def _camera_date_findings(self) -> list[dict]:
+        return camera_date_discrepancies(
+            self.file_inventory,
+            self.metadata.get("deployment_event_start_date", ""),
+            self.metadata.get("deployment_event_end_date", ""),
+        )
+
+    def _camera_date_review_is_current(self, finding: dict) -> bool:
+        prior = getattr(self, "camera_date_reviews", {}).get(finding["device_label"], {})
+        return (prior.get("fingerprint") == finding["fingerprint"]
+                and bool(prior.get("decision"))
+                and len(str(prior.get("note", "")).strip()) >= 10)
+
+    def _prompt_camera_date_review(self, finding: dict) -> tuple[str, str] | None:
+        """Require a documented operator decision; never change camera timestamps."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Camera date review — {finding['device_label']}")
+        dlg.setMinimumWidth(540)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(
+            f"<b>{finding['device_label']} has captures outside the deployment dates.</b><br>"
+            f"Before start: {finding['before_count']} · After collection date: {finding['after_count']}<br>"
+            f"Earliest affected: {finding['earliest']} · Latest affected: {finding['latest']}<br>"
+            "Review the camera clock and field records. If field dates or file assignment "
+            "are wrong, cancel and correct them before continuing. Original files and EXIF are never changed."
+        ))
+        confirmed = QCheckBox("I verified the camera clock/date was incorrect; retain its original dates")
+        layout.addWidget(confirmed)
+        layout.addWidget(QLabel("Evidence for the camera-clock finding (required):"))
+        note = QTextEdit()
+        note.setPlaceholderText("For example: setup and retrieval frames align after a two-day camera-date offset.")
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save = buttons.button(QDialogButtonBox.Save)
+        save.setEnabled(False)
+
+        def update_save():
+            save.setEnabled(confirmed.isChecked() and len(note.toPlainText().strip()) >= 10)
+
+        confirmed.toggled.connect(update_save)
+        note.textChanged.connect(update_save)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return "Camera clock/date was incorrect; original camera dates retained", note.toPlainText().strip()
+
+    def _ensure_camera_dates_reviewed(self) -> bool:
+        """Block review/export/upload until every out-of-window camera is addressed."""
+        reviews = getattr(self, "camera_date_reviews", {})
+        for finding in self._camera_date_findings():
+            label = finding["device_label"]
+            if self._camera_date_review_is_current(finding):
+                continue
+            append_qc_report(
+                self.current_deployment_folder, "camera_date_review", label, "error",
+                f"{finding['before_count']} before start; {finding['after_count']} after collection date. "
+                "Operator review required before continuing.",
+            )
+            response = self._prompt_camera_date_review(finding)
+            if response is None:
+                return False
+            decision, note = response
+            if not decision or len(note.strip()) < 10:
+                return False
+            reviews[label] = {
+                "fingerprint": finding["fingerprint"],
+                "decision": decision,
+                "note": note,
+                "reviewed_at": datetime.now().astimezone().isoformat(),
+            }
+            self.camera_date_reviews = reviews
+            if not self.save_session():
+                reviews.pop(label, None)
+                return False
+            append_qc_report(
+                self.current_deployment_folder, "camera_date_review", label, "pass",
+                f"Reviewed: {decision}. Evidence: {note}. Original camera dates retained.",
+            )
+        return True
+
     def validate_and_next_collection(self):
         """Validate collection and proceed to review"""
         if self.card_ingest_threads:
@@ -2844,22 +3078,8 @@ class FieldDataWizard(QMainWindow):
                 f"Wait for the active card jobs to finish before finalizing:\n{labels}",
             )
             return
-        pending = False
-        for i in range(self.device_tree.topLevelItemCount()):
-            item = self.device_tree.topLevelItem(i)
-            if item.text(2) not in {"Complete", "Skipped"}:
-                pending = True
-                break
-
-        if pending:
-            reply = QMessageBox.question(
-                self,
-                "Incomplete Collection",
-                "Some devices are pending, incomplete, or failed. Continue anyway?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply == QMessageBox.No:
-                return
+        if not self._ensure_camera_dates_reviewed():
+            return
 
         # Coordinate validation: latitude/longitude and elevation non-null and
         # within the California study area. All three come from plots.csv, so this
@@ -2867,24 +3087,14 @@ class FieldDataWizard(QMainWindow):
         # into the metadata CSVs.
         coord_warnings = validate_coordinates(self.file_inventory)
         if coord_warnings:
-            detail = "\n".join(f"  {w}" for w in coord_warnings)
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Coordinate Validation Warning")
-            msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setText(
-                "Some coordinates or elevations are missing or outside the "
-                "California study area. Review before generating CSVs."
-            )
-            msg_box.setDetailedText(detail)
-            msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-            msg_box.button(QMessageBox.Ok).setText("Continue Anyway")
-            if msg_box.exec() == QMessageBox.Cancel:
-                return
             for w in coord_warnings:
                 append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "warning", w)
         else:
             append_qc_report(self.current_deployment_folder, "coordinate_validation", "", "pass",
                              "All coordinates and elevations non-null and within study-area bounds")
+
+        if not self._confirm_collection_review(coord_warnings):
+            return
 
         self.generate_metadata_files()
         self.update_review_tab()
@@ -2892,6 +3102,46 @@ class FieldDataWizard(QMainWindow):
         # Uploads are operator-initiated. Reaching this tab used to start the
         # Box transfer on its own, which gave no chance to review the summary
         # first and no way to choose a destination.
+
+    def _collection_review_findings(self, coord_warnings: list[str]) -> list[dict]:
+        """Combine current QC and device status into actionable, grouped findings."""
+        entries = []
+        for i in range(self.device_tree.topLevelItemCount()):
+            item = self.device_tree.topLevelItem(i)
+            status = item.text(2)
+            if status != "Complete":
+                entries.append({
+                    "check": "Device collection status",
+                    "_device": item.data(0, Qt.UserRole) or item.text(0),
+                    "severity": "error" if status in {"Failed", "Incomplete"} else "warning",
+                    "message": f"{item.text(0)} · {item.text(1)}: {status}. "
+                    + ("This device was skipped." if status == "Skipped" else
+                       "Collection is incomplete; check this device before uploading."),
+                })
+        path = qc_path_for(self.current_deployment_folder, "qc_report.json")
+        try:
+            report = json.loads(path.read_text()) if path.exists() else {}
+            current = report.get("current_state", [])
+            if not isinstance(current, list) or not all(
+                isinstance(entry, dict) and isinstance(entry.get("check"), str)
+                and isinstance(entry.get("severity"), str)
+                and isinstance(entry.get("_device", ""), str) for entry in current
+            ):
+                raise ValueError("Invalid current_state in QC report")
+            entries.extend(entry for entry in current if entry.get("check") != "coordinate_validation")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            entries.append({"check": "QC report could not be read", "severity": "error",
+                "message": f"Check the QC report and ingest log before uploading: {exc}"})
+        entries.extend({"check": "coordinate_validation", "severity": "warning", "message": message}
+                       for message in coord_warnings)
+        return collection_review_findings(entries, self.file_inventory)
+
+    def _confirm_collection_review(self, coord_warnings: list[str]) -> bool:
+        dialog = CollectionReviewDialog(
+            self._collection_review_findings(coord_warnings), self.file_inventory,
+            self.current_deployment_folder, parent=self,
+        )
+        return dialog.exec() == QDialog.Accepted
 
     def generate_metadata_files(self):
         """Generate CSVs, deployment_event_record.json, and WI deployment exports."""
@@ -2957,10 +3207,10 @@ class FieldDataWizard(QMainWindow):
             f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
             "<h3>Before you finish</h3>"
             "<p>Review the staged event tree and resolve any QC findings. "
-            "Use <b>Uploads → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
+            "Use <b>Prepare &amp; Upload → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
             "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
-            "<p>For bird audio, <b>Uploads → Add Bird Audio to SoundHub Staging</b> adds this event to the "
-            "pending batch. Submit the cumulative SoundHub batch when ready.</p>"
+            "<p>For bird audio, <b>Prepare &amp; Upload → Add Bird Audio to SoundHub Staging</b> adds this event to the "
+            "local staging batch. No SoundHub upload is performed from this screen.</p>"
         )
         self._populate_staged_event_tree()
 
@@ -3091,10 +3341,25 @@ class FieldDataWizard(QMainWindow):
             self._box_operation_token = object()
         worker._box_operation_token = self._box_operation_token
         try:
+            if worker is getattr(self, 'fixity_thread', None) or worker is getattr(self, 'box_verify_thread', None):
+                kind = 'hash' if worker is self.fixity_thread else 'box'
+                try:
+                    worker._verification_context = verification_context(
+                        self.current_deployment_folder, self.file_inventory, self.metadata, self.box_config)
+                except (OSError, ValueError, TypeError):
+                    worker._verification_context = None
+                self.box_upload_complete = False
+                write_result(self.current_deployment_folder, kind, worker._verification_context,
+                             pending=True, summary="Verification is running; no pass recorded.")
             worker.start()
-        except Exception:
+        except Exception as exc:
             FieldDataWizard._set_box_controls_busy(self, False)
             self.cancel_upload_btn.hide()
+            if isinstance(exc, OSError):
+                self.hash_status_label.setText(f"Verification could not start: {exc}")
+                QMessageBox.warning(self, "Verification Could Not Start",
+                                    f"Could not save verification evidence. No check started. {exc}")
+                return False
             raise
 
     def _box_callback_is_current(self, worker_attribute: str) -> bool:
@@ -3112,6 +3377,26 @@ class FieldDataWizard(QMainWindow):
             and worker._box_operation_token is self._box_operation_token
             and getattr(worker, '_box_owner_folder', None) == self.current_deployment_folder
         )
+
+    def _save_check_result(self, kind, ok, summary, issues):
+        """Only the unchanged context captured before this worker started can pass."""
+        worker = self.sender()
+        expected = getattr(worker, '_verification_context', None) if worker is not None else None
+        try:
+            current = verification_context(self.current_deployment_folder, self.file_inventory,
+                                           self.metadata, self.box_config)
+            if expected is None or expected != current:
+                ok = False
+                summary += " Verification context changed or is unavailable; rerun this check."
+            write_result(self.current_deployment_folder, kind, current,
+                         ok=ok, summary=summary, issues=issues)
+            _, self.box_upload_complete = readiness(self.current_deployment_folder, self.file_inventory,
+                                                    self.metadata, self.box_config)
+        except (OSError, ValueError, TypeError) as exc:
+            ok = False
+            self.box_upload_complete = False
+            summary += f" Verification evidence could not be saved: {exc}"
+        return ok, summary
 
     def upload_to_box(self):
         """Prepare new data for WI, then upload the deployment folder to Box."""
@@ -3141,6 +3426,14 @@ class FieldDataWizard(QMainWindow):
         if self.wi_split_thread and self.wi_split_thread.isRunning():
             return
         if self.upload_thread and self.upload_thread.isRunning():
+            return
+        if not self._ensure_camera_dates_reviewed():
+            return
+
+        try:
+            require_no_ingest_holds(self.current_deployment_folder)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Ingest Review Required", str(exc))
             return
 
         # Hold through callbacks between preparation, upload, and verification.
@@ -3286,6 +3579,8 @@ class FieldDataWizard(QMainWindow):
             box_config=self.box_config,
             valid_site_names=self._valid_site_names(),
         )
+        self.upload_metrics_label.setText("")
+        self.upload_thread.metrics_updated.connect(self.on_upload_metrics)
         self.upload_thread.progress.connect(self.on_upload_progress)
         self.upload_thread.finished.connect(self.on_upload_finished)
         FieldDataWizard._start_owned_box_worker(self, self.upload_thread)
@@ -3322,6 +3617,24 @@ class FieldDataWizard(QMainWindow):
         self.upload_progress_bar.setValue(percent)
         self.upload_status_label.setText(f"Uploading: {filename} ({current}/{total})")
 
+    def on_upload_metrics(self, values):
+        """Show aggregate rates without flooding the per-file progress label."""
+        if not self._box_callback_is_current('upload_thread'):
+            return
+        stage = values.get('stage', 'preparing')
+        names = {'preparing': 'Preparing folders', 'transferring': 'Transferring files',
+                 'verifying_media': 'Checking uploaded media',
+                 'publishing_metadata': 'Publishing metadata',
+                 'checking_presence': 'Checking uploaded paths',
+                 'complete': 'Transfer and publication complete',
+                 'cancelled': 'Cancelled; files retained', 'failed': 'Stopped; files retained'}
+        state = 'Waiting for Box' if values.get('waiting', 0) else names.get(stage, stage)
+        self.upload_metrics_label.setText(
+            f"{state} · {values.get('acknowledged_MB_per_second', 0):.2f} MB/s acknowledged "
+            f"· {values.get('files_per_second', 0):.2f} files/s "
+            f"· {values.get('status_429', 0)} rate-limit responses"
+        )
+
     def on_upload_finished(self, success, message):
         """Handle upload completion"""
         if not self._box_callback_is_current('upload_thread'):
@@ -3334,10 +3647,11 @@ class FieldDataWizard(QMainWindow):
             self.upload_progress_bar.setValue(100)
             self.upload_status_label.setText(f"✓ {message}")
             self.upload_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.box_upload_complete = True
+            self.box_upload_complete = False  # Provenance publication is still pending.
             # Update provenance in both metadata CSVs
             self._write_upload_provenance()
         else:
+            self.box_upload_complete = False
             self.open_btn.setEnabled(True)
             self.switch_deployment_btn.setEnabled(True)
             self.exit_btn.setEnabled(True)
@@ -3359,6 +3673,7 @@ class FieldDataWizard(QMainWindow):
         observer = self.metadata.get("observer", "")
         upload_dt = datetime.now(timezone.utc).isoformat()
         updated_paths = []
+        from cassn.box.metadata_merge import stamp_box_provenance
 
         for csv_path, fields in [
             (self.current_deployment_folder / "image_file_metadata.csv", IMAGE_FIELDS),
@@ -3367,20 +3682,14 @@ class FieldDataWizard(QMainWindow):
             if not csv_path.exists():
                 continue
             try:
-                with open(csv_path, newline="", encoding="utf-8") as f:
-                    rows = list(csv.DictReader(f))
-                for row in rows:
-                    row["is_uploaded_to_box"] = True
-                    row["box_uploader"] = observer
-                    row["box_upload_datetime"] = upload_dt
-                with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(rows)
+                stamp_box_provenance(csv_path, observer, upload_dt)
                 self.log(f"Updated provenance locally: {csv_path.name}")
                 updated_paths.append(csv_path)
             except Exception as e:
-                self.log(f"Warning: could not update provenance in {csv_path.name}: {e}")
+                self._post_upload_box_summary = "Provenance stamping failed"
+                self._post_upload_box_issues = []
+                self._finish_post_upload_verification(False, f"Could not stamp {csv_path.name}: {e}", [])
+                return
 
         # Re-upload the provenance-stamped CSVs to the same Box folder
         deploy_folder_id = self.upload_thread.deploy_folder_id if self.upload_thread else None
@@ -3391,8 +3700,9 @@ class FieldDataWizard(QMainWindow):
             self.provenance_thread.finished.connect(self._on_provenance_upload_finished)
             FieldDataWizard._start_owned_box_worker(self, self.provenance_thread)
         elif updated_paths:
-            self.log("Warning: deploy_folder_id not available — provenance CSVs updated locally only")
-            self._start_post_upload_verification()
+            self._post_upload_box_summary = "Provenance publication was not run"
+            self._post_upload_box_issues = []
+            self._finish_post_upload_verification(False, "Box destination unavailable for provenance publication", [])
         else:
             self._start_post_upload_verification()
 
@@ -3403,7 +3713,11 @@ class FieldDataWizard(QMainWindow):
         if success:
             self.log(f"✓ {message}")
         else:
-            self.log(f"Warning: {message}")
+            self.box_upload_complete = False
+            self._post_upload_box_summary = "Provenance publication failed"
+            self._post_upload_box_issues = []
+            self._finish_post_upload_verification(False, message, [])
+            return
         self._start_post_upload_verification()
 
     def _start_post_upload_verification(self):
@@ -3459,6 +3773,8 @@ class FieldDataWizard(QMainWindow):
             return
         self._post_upload_box_summary = summary
         self._post_upload_box_issues = issues or []
+        ok, summary = FieldDataWizard._save_check_result(self, 'box', ok, summary, issues or [])
+        self._post_upload_box_summary = summary
         self.log(summary)
 
         severity = "pass" if ok and not issues else ("warning" if ok else "error")
@@ -3511,6 +3827,7 @@ class FieldDataWizard(QMainWindow):
     def _on_auto_fixity_finished(self, ok: bool, summary: str, issues: list):
         if not self._box_callback_is_current('fixity_thread'):
             return
+        ok, summary = FieldDataWizard._save_check_result(self, 'hash', ok and not issues, summary, issues or [])
         self.fixity_check_run = True
         self.log(summary)
         self.save_session()
@@ -3532,23 +3849,35 @@ class FieldDataWizard(QMainWindow):
         box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
         box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
         has_box_warning = bool(box_extra)
-        all_ok = hash_ok and not box_missing and not box_extra and not hash_issues
+        all_ok = hash_ok and not self._post_upload_box_issues and not hash_issues
+        if all_ok and self.current_deployment_folder:
+            from cassn.box.publication import require_publication_complete
+            try:
+                require_publication_complete(self.current_deployment_folder)
+            except ValueError as exc:
+                all_ok = hash_ok = False
+                hash_summary = f"Metadata publication remains unresolved: {exc}"
+        self.box_upload_complete = all_ok
 
-        # Persist the verification result as an audit artifact (previously this
-        # file was referenced by the readiness check but never actually written).
+        # Individual results were persisted by the owned callbacks. Never
+        # synthesize a successful record from callback booleans alone.
         try:
-            record = build_box_verification_record(
-                hash_ok=hash_ok,
-                hash_summary=hash_summary,
-                hash_issues=hash_issues,
-                box_summary=self._post_upload_box_summary or "",
-                box_issues=self._post_upload_box_issues,
-            )
-            qc_path_for(self.current_deployment_folder, "box_upload_verification.json").write_text(
-                json.dumps(record, indent=2)
-            )
-        except Exception:
-            pass  # never block the UI on writing the audit artifact
+            if all_ok:
+                _, all_ok = readiness(self.current_deployment_folder, self.file_inventory,
+                                      self.metadata, self.box_config)
+                if not all_ok:
+                    hash_summary += " Current verification evidence is unavailable; rerun the checks."
+            if not all_ok:
+                from cassn.box.publication import atomic_json
+                record = build_box_verification_record(
+                    hash_ok=hash_ok, hash_summary=hash_summary, hash_issues=hash_issues,
+                    box_summary=self._post_upload_box_summary or "", box_issues=self._post_upload_box_issues)
+                record["verified"] = False
+                atomic_json(qc_path_for(self.current_deployment_folder, "box_upload_verification.json"), record)
+        except (OSError, ValueError, TypeError) as exc:
+            all_ok = False
+            hash_summary += f" Verification evidence could not be saved: {exc}"
+        self.box_upload_complete = all_ok
 
         self.open_btn.setEnabled(True)
         self.switch_deployment_btn.setEnabled(True)
@@ -3602,6 +3931,9 @@ class FieldDataWizard(QMainWindow):
         hash_mismatches = [i for i in hash_issues if i["type"] == "mismatch"]
         hash_missing = [i for i in hash_issues if i["type"] == "missing"]
         hash_unavailable = [i for i in hash_issues if i["type"] == "box_hash_unavailable"]
+        archive_issues = [i for i in self._post_upload_box_issues
+                          if i["type"] == "archive_metadata_unverified"]
+        missing_local = [i for i in hash_issues if i["type"] == "missing_local"]
 
         if box_missing:
             lines.append(f"FILES IN INVENTORY BUT MISSING FROM BOX ({len(box_missing)}):")
@@ -3626,6 +3958,14 @@ class FieldDataWizard(QMainWindow):
                 lines.append("")
             lines.append(f"BOX HASHES UNAVAILABLE ({len(hash_unavailable)}):")
             lines.extend(f"  ✗ {m['filename']}" for m in hash_unavailable[:100])
+        if archive_issues:
+            lines.append("ARCHIVE METADATA NEEDS REVIEW (missing, ambiguous, or changed Box file):")
+            lines.extend(f"  ✗ {m['filename']}" for m in archive_issues[:100])
+        if missing_local:
+            lines.append("INVENTORIED FILES MISSING LOCALLY:")
+            lines.extend(f"  ✗ {m['filename']}" for m in missing_local[:100])
+        lines.extend(f"{i.get('type', 'issue')}: {i.get('filename', '')}" for i in hash_issues
+                     if i.get('type') not in {'mismatch', 'missing', 'box_hash_unavailable', 'missing_local'})
         return "\n".join(lines)
 
     def _run_device_qc_checks(self, device_entries: list, device_label: str):
@@ -3635,31 +3975,58 @@ class FieldDataWizard(QMainWindow):
         deploy_start = self.metadata.get("deployment_event_start_date", "")
         deploy_end = self.metadata.get("deployment_event_end_date", "")
 
+        sequence_findings = []
+        serial_findings = []
         check_results = [
-            ("sequence_gap", check_sequence_integrity(device_entries, device_label)),
-            ("temporal_plausibility", validate_datetimes(device_entries, deploy_start, deploy_end)),
-            ("camera_serial_match", check_camera_serial(device_entries, device_label)),
-            ("recording_stop_reason", check_recording_stop_reasons(device_entries, device_label)),
+            ("sequence_gap", check_sequence_integrity(device_entries, device_label, findings=sequence_findings), sequence_findings),
+            ("temporal_plausibility", validate_datetimes(device_entries, deploy_start, deploy_end), None),
+            ("camera_serial_match", check_camera_serial(device_entries, device_label, findings=serial_findings), serial_findings),
+            ("recording_stop_reason", check_recording_stop_reasons(device_entries, device_label), None),
         ]
 
         any_warnings = False
-        for check_name, warnings_list in check_results:
+        for check_name, warnings_list, evidence in check_results:
             if warnings_list:
                 any_warnings = True
                 for msg in warnings_list:
-                    self._append_card_message(
-                        device_label, f"QC warning: {msg}", alert=True
-                    )
+                    self._append_card_message(device_label, f"QC warning: {msg}", alert=True)
                     self.log(f"  QC [{device_label}] {msg}")
-                    append_qc_report(self.current_deployment_folder, check_name, device_label, "warning", msg)
+                append_qc_report(
+                    self.current_deployment_folder, check_name, device_label, "warning",
+                    "\n".join(warnings_list), findings=evidence,
+                )
             else:
                 append_qc_report(self.current_deployment_folder, check_name, device_label, "pass", "OK")
 
         if any(entry.get("file_type") == "image" for entry in device_entries):
-            severity, message = check_camera_timezones(device_entries)
+            date_findings = camera_date_discrepancies(device_entries, deploy_start, deploy_end)
+            if date_findings:
+                finding = date_findings[0]
+                reviewed = getattr(self, "camera_date_reviews", {}).get(device_label, {})
+                resolved = self._camera_date_review_is_current(finding)
+                append_qc_report(
+                    self.current_deployment_folder, "camera_date_review", device_label,
+                    "pass" if resolved else "error",
+                    (f"Reviewed: {reviewed.get('decision')}. Evidence: {reviewed.get('note')}."
+                     if resolved else
+                     f"{finding['before_count']} before start; {finding['after_count']} after collection date. "
+                     "Operator review required before continuing."),
+                )
+                if not resolved:
+                    any_warnings = True
+                    self._append_card_message(
+                        device_label, "QC error: camera dates need review before continuing.", alert=True,
+                    )
+            else:
+                append_qc_report(
+                    self.current_deployment_folder, "camera_date_review", device_label,
+                    "pass", "No camera dates outside the deployment window.",
+                )
+            timezone_findings = []
+            severity, message = check_camera_timezones(device_entries, findings=timezone_findings)
             append_qc_report(
                 self.current_deployment_folder, "camera_timezone_consistency",
-                device_label, severity, message,
+                device_label, severity, message, findings=timezone_findings,
             )
             if severity != "pass":
                 any_warnings = True
@@ -3683,9 +4050,11 @@ class FieldDataWizard(QMainWindow):
             if entry.get("file_type") == "image"
         }):
             entries = [entry for entry in self.file_inventory if entry.get("device_label") == label]
-            severity, message = check_camera_timezones(entries)
+            timezone_findings = []
+            severity, message = check_camera_timezones(entries, findings=timezone_findings)
             append_qc_report(
                 self.current_deployment_folder, "camera_timezone_consistency", label, severity, message,
+                findings=timezone_findings,
             )
             self._append_card_message(label, f"QC {severity}: {message}", alert=severity != "pass")
             self.log(f"QC [{label}] {severity}: {message}")
@@ -3758,6 +4127,7 @@ class FieldDataWizard(QMainWindow):
         if not self._box_callback_is_current('fixity_thread'):
             return
         deployment_folder = self.current_deployment_folder
+        ok, summary = FieldDataWizard._save_check_result(self, 'hash', ok and not issues, summary, issues or [])
         FieldDataWizard._set_box_controls_busy(self, False)
         self.fixity_btn.setText("Verify Box ↔ Local Hashes")
         self.fixity_check_run = True
@@ -3799,6 +4169,8 @@ class FieldDataWizard(QMainWindow):
                 lines.append(f"  ✗ {m['filename']}")
 
         msg = QMessageBox(self)
+        lines.extend(f"{i.get('type', 'issue')}: {i.get('filename', '')}" for i in issues
+                     if i.get('type') not in {'mismatch', 'missing', 'box_hash_unavailable'})
         msg.setWindowTitle("Verify Box ↔ Local Hashes — Issues Found")
         msg.setIcon(QMessageBox.Critical)
         msg.setText(summary)
@@ -3846,6 +4218,7 @@ class FieldDataWizard(QMainWindow):
     def _on_box_verify_finished(self, ok: bool, summary: str, issues: list):
         if not self._box_callback_is_current('box_verify_thread'):
             return
+        ok, summary = FieldDataWizard._save_check_result(self, 'box', ok, summary, issues or [])
         FieldDataWizard._set_box_controls_busy(self, False)
         self.box_verify_btn.setText("Verify Box Upload")
         self.log(summary)
@@ -3854,7 +4227,7 @@ class FieldDataWizard(QMainWindow):
         severity = "pass" if ok and not issues else ("warning" if ok else "error")
         append_qc_report(self.current_deployment_folder, "box_verify", "", severity, summary)
 
-        if not issues:
+        if ok and not issues:
             QMessageBox.information(self, "Box Verify Passed", summary)
             return
 
@@ -3873,9 +4246,11 @@ class FieldDataWizard(QMainWindow):
                 lines.append(f"  ⚠ {e['filename']}")
 
         msg = QMessageBox(self)
-        msg.setWindowTitle("Box Verify — Issues Found" if missing else "Box Verify — Extras on Box")
-        msg.setIcon(QMessageBox.Critical if missing else QMessageBox.Warning)
+        msg.setWindowTitle("Box Verify — Failed" if not ok else "Box Verify — Issues Found")
+        msg.setIcon(QMessageBox.Critical if not ok or missing else QMessageBox.Warning)
         msg.setText(summary)
+        lines.extend(f"{i.get('type', 'issue')}: {i.get('filename', '')}" for i in issues
+                     if i.get('type') not in {'missing_from_box', 'extra_on_box'})
         msg.setDetailedText("\n".join(lines))
         msg.exec()
 
@@ -3927,11 +4302,8 @@ class FieldDataWizard(QMainWindow):
     # ------------------------------------------------------------------
     # Wildlife SoundHub
     #
-    # Two operator-initiated steps: transcode the bird audio into the local
-    # tree that mirrors the S3 bucket, then push it. They are separate because
-    # the transcode is long, restartable, and worth reviewing before anything
-    # leaves the machine — and because the upload role cannot delete, so a
-    # wrong key is permanent.
+    # Review exposes local staging only. Submission and landing-zone methods
+    # remain separate from the staging action and have no menu entries.
     # ------------------------------------------------------------------
 
     def _soundhub_staging_root(self) -> Path:
@@ -3944,12 +4316,7 @@ class FieldDataWizard(QMainWindow):
         return False
 
     def _set_soundhub_actions_enabled(self, enabled: bool):
-        for action in (
-            self.soundhub_stage_btn,
-            self.soundhub_upload_btn,
-            self.soundhub_verify_btn,
-        ):
-            action.setEnabled(enabled)
+        self.soundhub_stage_btn.setEnabled(enabled)
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
             action.setEnabled(enabled and not self._box_operation_active)
 
@@ -3970,68 +4337,6 @@ class FieldDataWizard(QMainWindow):
 
         staging_root = self._soundhub_staging_root()
         root = project_root(staging_root)
-        fragments = fragments_root(staging_root)
-        has_fragments = fragments.is_dir() and any(
-            path.is_dir() for path in fragments.iterdir()
-        )
-        has_manifests = any(
-            (root / name).exists() for name in ("deployment.csv", "recording.csv")
-        )
-        if has_fragments or has_manifests:
-            try:
-                validate_staging_manifests(staging_root)
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Existing SoundHub Batch Needs Attention",
-                    "The existing local SoundHub batch is not internally valid "
-                    f"and cannot be safely extended:\n\n{e}",
-                )
-                return
-            try:
-                lifecycle = plan_completed_batch_cleanup(staging_root)
-            except Exception as e:
-                QMessageBox.warning(
-                    self, "SoundHub Staging Check Failed", str(e)
-                )
-                return
-            if lifecycle.closed:
-                detail = ""
-                if lifecycle.errors:
-                    detail = "\n\nCleanup is currently blocked:\n" + "\n".join(
-                        f"• {error}" for error in lifecycle.errors
-                    )
-                QMessageBox.information(
-                    self,
-                    "Completed SoundHub Batch Still Staged",
-                    f"The existing batch contains {lifecycle.recording_count} "
-                    "recording(s), and all are already recorded as submitted. "
-                    "A new deployment cannot be added to its completed manifests.\n\n"
-                    "After SoundHub acceptance is confirmed, use the maintenance "
-                    "utility in Terminal:\n\n"
-                    "python utils/prep_soundhub.py clear-completed\n"
-                    "python utils/prep_soundhub.py clear-completed --apply"
-                    f"{detail}",
-                )
-                return
-            # A local batch does not need to exist on Box before another event
-            # is added.  Box provenance is mandatory only at upload preflight.
-            # Errors before a provenance plan exists still indicate an unsafe
-            # local path/layout and remain blocking.
-            extension_blockers = staging_extension_blockers(lifecycle)
-            if extension_blockers:
-                QMessageBox.warning(
-                    self,
-                    "Existing SoundHub Batch Needs Attention",
-                    "The existing staging batch cannot be safely extended:\n\n"
-                    + "\n".join(f"• {error}" for error in extension_blockers),
-                )
-                return
-            if lifecycle.errors:
-                self.log(
-                    "SoundHub staging remains open; Box provenance will be "
-                    "required and rechecked before upload."
-                )
 
         def row_count(name):
             path = root / name
@@ -4052,7 +4357,9 @@ class FieldDataWizard(QMainWindow):
             "Bird (BD) WAVs will be converted to FLAC and the two cumulative "
             "CSV manifests will be rebuilt. Existing staged deployments remain; "
             "re-staging the same deployment IDs refreshes them. Source WAVs are "
-            "not modified, bat audio is excluded, and nothing is uploaded.",
+            "not modified, bat audio is excluded, and nothing is uploaded.\n\n"
+            "Before conversion starts, the existing batch will be checked in the "
+            "background. A completed or invalid batch will not be extended.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
         )
         if confirm != QMessageBox.Yes:
@@ -4062,7 +4369,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_group.setTitle("SoundHub staging progress")
-        self.soundhub_status_label.setText("Converting bird audio to FLAC…")
+        self.soundhub_status_label.setText("Checking existing SoundHub batch…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
@@ -4209,14 +4516,16 @@ class FieldDataWizard(QMainWindow):
                 self.cancel_soundhub_btn.setText("Cancelling…")
                 self.cancel_soundhub_btn.setEnabled(False)
                 self.soundhub_status_label.setText(
-                    "Cancellation requested — finishing the current file…"
+                    "Cancellation requested — waiting for the current check or file to finish…"
                 )
                 return
 
     def on_soundhub_progress(self, current, total, name):
         if total:
             self.soundhub_progress_bar.setValue(int(current / total * 100))
-        self.soundhub_status_label.setText(f"{name} ({current}/{total})")
+        self.soundhub_status_label.setText(
+            f"{name} ({current}/{total})" if total else name
+        )
 
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()
@@ -4229,7 +4538,8 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_status_label.setStyleSheet("color: green;")
             QMessageBox.information(
                 self, "SoundHub Preparation Complete",
-                message + "\n\nUse Uploads → Upload Bird Data to SoundHub when ready.",
+                message + "\n\nStaging is complete. Source WAVs are unchanged and nothing was uploaded. "
+                "Use Deployment → Open SoundHub Staging Folder to review the local batch.",
             )
             return
 
@@ -4290,39 +4600,20 @@ class FieldDataWizard(QMainWindow):
             "note": f"{pending_count} device(s) still pending" if not all_done else "",
         })
 
-        # 2. Hash verification passed. Auto-satisfied by a successful automatic
-        # post-upload hash verify: the automatic verify writes its result to
-        # qc_report.json under "file_hash_verification_run", so a passing entry
-        # there means a hash verification ran AND passed with no errors — no need
-        # to also click the manual button. The in-session manual flag still counts.
-        hash_verified = self.fixity_check_run
-        if not hash_verified:
-            hash_qc_path = qc_path_for(self.current_deployment_folder, "qc_report.json")
-            if hash_qc_path.exists():
-                try:
-                    with open(hash_qc_path) as f:
-                        hash_qc_data = json.load(f)
-                    hash_verified = any(
-                        c.get("check") == "file_hash_verification_run"
-                        and c.get("severity") == "pass"
-                        for c in hash_qc_data.get("current_state", [])
-                    )
-                except Exception:
-                    pass
+        # Read only current, successful, persisted evidence. Flags, historical
+        # QC entries and manifest existence describe history, not a pass.
+        hash_verified, box_ok = readiness(
+            self.current_deployment_folder, self.file_inventory, self.metadata,
+            getattr(self, 'box_config', None))
         items.append({
             "label": "Hash verification passed",
             "ok": hash_verified,
-            "note": "Run an upload (auto-verifies) or click 'Verify Box ↔ Local Hashes'" if not hash_verified else "",
+            "note": "Run 'Verify Box ↔ Local Hashes' for the current batch; older results may need rechecking" if not hash_verified else "",
         })
-
-        # 3. Box upload verified
-        verification_file = qc_path_for(self.current_deployment_folder, "box_upload_verification.json")
-        upload_manifest = qc_path_for(self.current_deployment_folder, "box_upload_manifest.json")
-        box_ok = self.box_upload_complete or verification_file.exists() or upload_manifest.exists()
         items.append({
             "label": "Box upload completed",
             "ok": box_ok,
-            "note": "No upload recorded for this session" if not box_ok else "",
+            "note": "Verify Box Upload and Box ↔ Local Hashes for the current batch" if not box_ok else "",
         })
 
         # 4. No QC errors in qc_report.json
@@ -4338,11 +4629,12 @@ class FieldDataWizard(QMainWindow):
                 qc_error_count = len(errors)
                 qc_ok = qc_error_count == 0
             except Exception:
-                pass
+                qc_ok = False
+                qc_error_count = -1
         items.append({
             "label": "No QC errors recorded",
             "ok": qc_ok,
-            "note": f"{qc_error_count} error(s) in qc_report.json" if not qc_ok else "",
+            "note": ("Could not read qc_report.json" if qc_error_count < 0 else f"{qc_error_count} error(s) in qc_report.json") if not qc_ok else "",
         })
 
         # Re-evaluate retained evidence, including after session reload, rather
@@ -4380,7 +4672,8 @@ class FieldDataWizard(QMainWindow):
         list_widget = QListWidget()
         for it in items:
             icon = "✓" if it["ok"] else "⚠"
-            text = f"{icon}  {it['label']}"
+            label = it["label"] if it["ok"] else checklist_task(it["label"])
+            text = f"{icon}  {label}"
             if it["note"]:
                 text += f"\n     {it['note']}"
             entry = QListWidgetItem(text)
@@ -4410,7 +4703,7 @@ class FieldDataWizard(QMainWindow):
             failed = [it["label"] for it in items if not it["ok"]]
             if failed:
                 append_qc_report(self.current_deployment_folder, "pre_departure", "", "warning",
-                                 f"Acknowledged with {len(failed)} unmet item(s): {', '.join(failed)}")
+                                 departure_warning_message(failed))
             else:
                 append_qc_report(self.current_deployment_folder, "pre_departure", "", "pass",
                                  "All pre-departure items satisfied")
@@ -4495,6 +4788,7 @@ class FieldDataWizard(QMainWindow):
             self.metadata = {}
             self.devices = []
             self.file_inventory = []
+            self.camera_date_reviews = {}
             self.seen_file_hashes = set()
             self._ingest_hash_registry = IngestHashRegistry()
             self._active_card_sources.clear()

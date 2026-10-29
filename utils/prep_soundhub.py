@@ -265,6 +265,8 @@ def cmd_upload(args) -> int:
             progress=show,
         )
     except SoundHubSubmissionError as e:
+        if e.result.get("transfer_directory"):
+            print(f"Transfer record: {e.result['transfer_directory']}")
         if e.phase == "box_provenance":
             print(
                 "ERROR: S3 verification succeeded, but the Box submission record "
@@ -274,6 +276,7 @@ def cmd_upload(args) -> int:
             print(f"ERROR during {e.phase.replace('_', ' ')}: {e}")
         return 1
 
+    print(f"Transfer record: {result['transfer_directory']}")
     upload = result["upload"]
     print(
         f"\nS3 transfer finished: {upload['uploaded']} object(s) uploaded, "
@@ -305,23 +308,28 @@ def cmd_clear_completed(args) -> int:
         plan = plan_completed_batch_cleanup(
             staging_root,
             args.box_year_root,
+            force=getattr(args, "force", False),
         )
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
 
-    print("Completed SoundHub batch cleanup preflight")
+    print("SoundHub staging cleanup preflight")
+    if plan.force:
+        print("  FORCE — UNVERIFIED: Box, S3, and submission checks bypassed.")
     print(f"  Local project folder:     {plan.project_root}")
     print(f"  Local fragment folder:    {plan.fragments_root}")
-    print(f"  Deployment events:        {plan.event_count}")
-    print(f"  SoundHub deployments:     {plan.deployment_count}")
-    print(f"  Recordings:               {plan.recording_count}")
-    print(f"  Pending recordings:       {plan.pending_count}")
+    if not plan.force:
+        print(f"  Deployment events:        {plan.event_count}")
+        print(f"  SoundHub deployments:     {plan.deployment_count}")
+        print(f"  Recordings:               {plan.recording_count}")
+        print(f"  Pending recordings:       {plan.pending_count}")
     print(f"  Local files to remove:    {plan.local_file_count}")
     print(f"  Local data to remove:     {plan.local_bytes / 1e9:.2f} GB")
-    print(f"  Shared verified report:   {plan.report_name or '(not confirmed)'}")
+    if not plan.force:
+        print(f"  Shared verified report:   {plan.report_name or '(not confirmed)'}")
 
-    if not plan.closed:
+    if not plan.closed and not plan.force:
         print("\nCLEANUP BLOCKED — this staging batch is not fully submitted.")
         for error in plan.errors:
             print(f"  - {error}")
@@ -334,15 +342,12 @@ def cmd_clear_completed(args) -> int:
 
     if not args.apply:
         print("\nDRY RUN PASSED — nothing was deleted.")
-        print(
-            "This verifies local staging and Box Drive records; it does not "
-            "confirm SoundHub ingestion."
-        )
-        print(
-            "After SoundHub acceptance is confirmed, delete this derived local "
-            "batch with:\n"
-            "  python utils/prep_soundhub.py clear-completed --apply"
-        )
+        if plan.force:
+            print("UNVERIFIED: no submission or remote-copy verification was performed.")
+            print("Run cassn-clear-soundhub --force --apply to remove these local folders.")
+        else:
+            print("This verifies local staging and Box records; it does not confirm SoundHub ingestion.")
+            print("After SoundHub acceptance, run cassn-clear-soundhub --apply to clear staging.")
         return 0
 
     try:
@@ -351,7 +356,8 @@ def cmd_clear_completed(args) -> int:
         print(f"\nCLEANUP FAILED — {exc}")
         return 1
 
-    print("\nCOMPLETED SOUNDHUB BATCH CLEARED")
+    print("\nSOUNDHUB STAGING CLEARED — UNVERIFIED FORCE" if plan.force
+          else "\nCOMPLETED SOUNDHUB BATCH CLEARED")
     print(f"  Removed project folder:  {result.removed_project_root}")
     if result.removed_fragments_root is not None:
         print(f"  Removed fragment folder: {result.removed_fragments_root}")
@@ -370,6 +376,7 @@ def _print_preflight(plan) -> None:
     print(f"  Deployment events in next batch:    {len(provenance.pending_event_ids)}")
     print(f"  SoundHub deployments in next batch: {len(provenance.pending_deployment_ids)}")
     print(f"  Box metadata CSVs to update:         {provenance.pending_file_count}")
+    print(f"  Box metadata access:                 {'API' if provenance.box_store else 'Drive'}")
     print(f"  Box metadata root:                   {provenance.box_year_root}")
     print(f"  S3 objects to upload and verify:     {len(plan.objects)}")
     print(f"  Data in next submission:             {plan.total_bytes / 1e9:.2f} GB")
@@ -445,7 +452,7 @@ def main() -> int:
     )
     p_upload.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box data/<year> folder",
+        help="Use a local Box Drive data/<year> folder instead of the Box API",
     )
     p_upload.add_argument(
         "--submitter",
@@ -459,13 +466,18 @@ def main() -> int:
         help="Preview or clear a completed local staging batch after acceptance",
     )
     p_clear.add_argument(
+        "--force",
+        action="store_true",
+        help="bypass data and submission verification; deletion still requires --apply",
+    )
+    p_clear.add_argument(
         "--apply",
         action="store_true",
         help="Delete the preflighted derived local batch (default is dry run)",
     )
     p_clear.add_argument(
         "--box-year-root",
-        help="Override the automatically inferred Box data/<year> folder",
+        help="Use a local Box Drive data/<year> folder instead of the Box API",
     )
     p_clear.set_defaults(func=cmd_clear_completed)
 

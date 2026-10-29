@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import time
+import re
+from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
 from cassn.box.client import BoxStorage
+from cassn.box.metadata_merge import CSV_NAMES, read_csv
+from cassn.box.metadata_store import BoxFileStore
 from cassn.core.hashing import sha1 as compute_file_sha1
 from cassn.core.inventory import index_inventory_by_storage_relpath
 
@@ -17,6 +21,8 @@ _EXPECTED_METADATA = {
     "qc/qc_report.json",
     "qc/box_upload_manifest.json",
     "qc/box_upload_verification.json",
+    "qc/file_hash_verification.json",
+    "qc/box_file_list_verification.json",
     "qc/deployment_summary.txt",
 }
 
@@ -63,10 +69,50 @@ def is_orphan_on_box(path: str) -> bool:
     return (
         path not in _EXPECTED_METADATA
         and not path.startswith("qc/lookup_snapshot/")
+        and not path.startswith("qc/box_batches/")
         and not path.startswith("soundhub/")
         and not PurePosixPath(path).name.startswith("wildlife_insights_")
         and not PurePosixPath(path).name.endswith("_manifest.json")
     )
+
+
+def recorded_archive_paths(storage, folder_id, box_hashes) -> tuple[set[str], list]:
+    """A remote row accounts for a raw file only with unique path + matching SHA-1.
+
+    This does not add Box-only records to the local ingest session. Unavailable
+    legacy evidence is reported rather than treating filename presence as proof.
+    """
+    if getattr(storage, "client", None) is None:
+        return set(), []  # Pure listing-only callers have no metadata evidence.
+    store = BoxFileStore(storage.client)
+    items = list(storage.iter_folder_items(folder_id))
+    paths_by_name = defaultdict(list)
+    for path in box_hashes:
+        if path.startswith("raw_data/"):
+            paths_by_name[PurePosixPath(path).name].append(path)
+    known, issues, names = set(), [], set()
+    for name in CSV_NAMES:
+        matches = [item.id for item in items if item.type == "file" and item.name == name]
+        if len(matches) > 1:
+            raise ValueError(f"Multiple metadata files named {name}")
+        if not matches:
+            continue
+        ref = store.snapshot(matches[0])
+        _, rows = read_csv(store.read(ref))
+        for row in rows:
+            filename = row["filename"]
+            if filename in names:
+                raise ValueError(f"Ambiguous archived filename: {filename}")
+            names.add(filename)
+            explicit = row.get("storage_relpath") or row.get("relative_path")
+            paths = [path for path in paths_by_name[filename] if not explicit or path == explicit]
+            digest = row.get("file_hash_sha1", "").lower()
+            if len(paths) == 1 and re.fullmatch(r"[0-9a-f]{40}", digest) and box_hashes[paths[0]] == digest:
+                known.add(paths[0])
+            else:
+                issues.append({"type": "archive_metadata_unverified", "filename": filename})
+        store.assert_unchanged(ref)
+    return known, issues
 
 
 def verify_box_hashes(
@@ -126,6 +172,10 @@ def verify_box_hashes(
         if path.is_file() and BoxStorage.should_upload_file(path)
     ]
     inventory_entry_by_path = index_inventory_by_storage_relpath(file_inventory)
+    # Inventory members missing locally must never disappear from the check.
+    present_paths = {p.relative_to(deployment_folder).as_posix() for p in files_to_check}
+    missing_local = sorted(set(inventory_entry_by_path) - present_paths)
+    untracked_local = sorted(present_paths - set(inventory_entry_by_path))
     total = len(files_to_check)
     mismatches = []
     missing_from_box = []
@@ -193,20 +243,34 @@ def verify_box_hashes(
     _emit(checked, total, "")
 
     orphans: list[str] = []
+    archive_issues = []
+    known_archive = set()
     if detect_orphans:
+        known_archive, archive_issues = recorded_archive_paths(storage, deploy_id, box_hashes)
         local_paths = set(inventory_entry_by_path)
         orphans = sorted(
-            path for path in (box_paths - local_paths) if is_orphan_on_box(path)
+            path for path in (box_paths - local_paths - known_archive) if is_orphan_on_box(path)
         )
 
-    all_ok = not mismatches and not missing_from_box and not box_hash_unavailable and not orphans
+    if _cancelled():
+        return False, f"Verification cancelled after {checked}/{total} files.", []
+
+    all_ok = bool(total and inventory_entry_by_path) and not (mismatches or missing_from_box or box_hash_unavailable or orphans or missing_local or untracked_local or archive_issues)
     summary = (
         f"End-to-end hash verification: {checked} local file(s) checked against Box. "
         f"{len(mismatches)} hash mismatch(es), {len(missing_from_box)} file(s) "
         f"missing from Box, {len(box_hash_unavailable)} Box hash(es) unavailable."
     )
     if detect_orphans:
-        summary += f" {len(orphans)} unexpected file(s) on Box."
+        summary += (f" {len(orphans)} unexpected file(s) on Box. "
+                    f"Archive metadata: {len(known_archive)} recorded raw path(s) matched; "
+                    f"{len(archive_issues)} unverified row(s).")
+    if not total or not inventory_entry_by_path:
+        summary += " No files or no valid expected inventory to verify."
+    if missing_local:
+        summary += f" {len(missing_local)} inventoried file(s) missing locally."
+    if untracked_local:
+        summary += f" {len(untracked_local)} local file(s) absent from inventory."
     issues = (
         [{"type": "mismatch", "filename": item["filename"]} for item in mismatches]
         + [{"type": "missing", "filename": path} for path in missing_from_box]
@@ -215,5 +279,8 @@ def verify_box_hashes(
             for path in box_hash_unavailable
         ]
         + [{"type": "extra_on_box", "filename": path} for path in orphans]
+        + [{"type": "missing_local", "filename": path} for path in missing_local]
+        + [{"type": "untracked_local", "filename": path} for path in untracked_local]
+        + archive_issues
     )
     return all_ok, summary, issues

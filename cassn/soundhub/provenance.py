@@ -20,6 +20,7 @@ from pathlib import Path
 
 from cassn.config import SOUNDHUB_DEVICE_TYPE, SOUNDHUB_RECORDING_FIELDS
 from cassn.soundhub.staging import project_root
+from cassn.soundhub.box_metadata import BoxFileSnapshot, BoxMetadataStore
 
 
 DEFAULT_SUBMITTER = "Imperato, John"
@@ -45,6 +46,7 @@ class MetadataDocument:
     has_bom: bool
     source_bytes: bytes
     matches: dict[int, tuple[str, str]] = field(default_factory=dict)
+    box_file: BoxFileSnapshot | None = None
 
 
 @dataclass
@@ -57,6 +59,7 @@ class ProvenancePlan:
     documents: list[MetadataDocument] = field(default_factory=list)
     event_ids: set[str] = field(default_factory=set)
     errors: list[str] = field(default_factory=list)
+    box_store: BoxMetadataStore | None = field(default=None, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -109,7 +112,10 @@ class ProvenanceApplyResult:
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict], bool, bytes]:
-    source_bytes = path.read_bytes()
+    return _parse_csv(path.read_bytes())
+
+
+def _parse_csv(source_bytes: bytes) -> tuple[list[str], list[dict], bool, bytes]:
     has_bom = source_bytes.startswith(b"\xef\xbb\xbf")
     text = source_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text, newline=""))
@@ -260,12 +266,17 @@ def _event_audio_csvs(box_year_root: Path):
 def plan_submission_provenance(
     staging_root: Path,
     box_year_root: Path | None = None,
+    *,
+    box_store: BoxMetadataStore | None = None,
 ) -> ProvenancePlan:
-    """Build a non-mutating, exact staged-FLAC to Box-row mapping."""
+    """Map staged FLACs to Box rows; an explicit year root opts into Drive I/O."""
     staging_root = Path(staging_root).expanduser().resolve()
+    use_api = box_store is not None or box_year_root is None
     if box_year_root is None:
         box_year_root = default_box_year_root(infer_submission_year(staging_root))
-    box_year_root = Path(box_year_root).expanduser().resolve()
+    box_year_root = Path(box_year_root).expanduser()
+    if not use_api:
+        box_year_root = box_year_root.resolve()
     plan = ProvenancePlan(staging_root, box_year_root)
 
     try:
@@ -273,15 +284,27 @@ def plan_submission_provenance(
     except SoundHubProvenanceError as exc:
         plan.errors.append(str(exc))
         return plan
-    if not box_year_root.is_dir():
-        plan.errors.append(f"Box year root does not exist: {box_year_root}")
+    try:
+        if use_api:
+            plan.box_store = box_store or BoxMetadataStore.connect()
+            sources = list(plan.box_store.iter_metadata(box_year_root))
+        else:
+            if not box_year_root.is_dir():
+                raise ValueError(f"Box year root does not exist: {box_year_root}")
+            sources = [(path, None) for path in _event_audio_csvs(box_year_root)]
+    except Exception as exc:
+        plan.errors.append(f"Could not list Box metadata: {exc}")
         return plan
 
     found: dict[tuple[str, str], tuple[Path, int, str]] = {}
     states_by_deployment: dict[str, set[str]] = {}
-    for path in _event_audio_csvs(box_year_root):
+    for path, box_file in sources:
         try:
-            fieldnames, rows, has_bom, source_bytes = _read_csv(path)
+            if plan.box_store is not None:
+                parsed = _parse_csv(plan.box_store.read(box_file))
+            else:
+                parsed = _read_csv(path)
+            fieldnames, rows, has_bom, source_bytes = parsed
         except Exception as exc:
             plan.errors.append(f"{path}: could not read CSV: {exc}")
             continue
@@ -303,7 +326,7 @@ def plan_submission_provenance(
             plan.errors.append(f"{path}: missing required column(s): {', '.join(missing)}")
             continue
 
-        document = MetadataDocument(path, fieldnames, rows, has_bom, source_bytes)
+        document = MetadataDocument(path, fieldnames, rows, has_bom, source_bytes, box_file=box_file)
         for index, row in enumerate(rows):
             key = _metadata_key(row)
             if key not in plan.target_keys:
@@ -346,6 +369,14 @@ def plan_submission_provenance(
             plan.errors.append(
                 f"{deployment_id}: mixed submitted and pending recording provenance"
             )
+    if plan.box_store is not None:
+        for document in plan.pending_documents:
+            try:
+                if not document.box_file.can_upload:
+                    raise ValueError("No Box permission to update submission metadata")
+                plan.box_store.check_report_permission(document.box_file.parent_id)
+            except Exception as exc:
+                plan.errors.append(f"{document.path}: {exc}")
     return plan
 
 
@@ -367,12 +398,17 @@ def apply_submission_provenance(
     submitted_iso = submitted_at.astimezone(timezone.utc).isoformat()
 
     for document in plan.documents:
-        if document.path.read_bytes() != document.source_bytes:
+        if plan.box_store is not None:
+            try:
+                plan.box_store.assert_unchanged(document.box_file)
+            except Exception as exc:
+                raise SoundHubProvenanceError(str(exc)) from exc
+        elif document.path.read_bytes() != document.source_bytes:
             raise SoundHubProvenanceError(
                 f"{document.path}: changed after preflight; rebuild the provenance plan"
             )
 
-    writes: list[tuple[Path, bytes]] = []
+    writes: list[tuple[MetadataDocument, bytes]] = []
     changed_rows = 0
     for document in plan.documents:
         updated = [dict(row) for row in document.rows]
@@ -387,14 +423,17 @@ def apply_submission_provenance(
         if document_changes:
             writes.append(
                 (
-                    document.path,
+                    document,
                     _csv_bytes(document.fieldnames, updated, has_bom=document.has_bom),
                 )
             )
             changed_rows += document_changes
 
-    for path, payload in writes:
-        _write_atomic(path, payload)
+    for document, payload in writes:
+        if plan.box_store is not None:
+            plan.box_store.write_metadata(document.box_file, payload)
+        else:
+            _write_atomic(document.path, payload)
     return ProvenanceApplyResult(len(writes), changed_rows, submitted_iso, submitter)
 
 
@@ -414,6 +453,7 @@ def write_submission_report(
     verification: dict,
     provenance_result: ProvenanceApplyResult,
     planned_objects: list[dict],
+    local_report_path: Path | None = None,
 ) -> list[Path]:
     """Write the verified batch report into every affected Box event."""
     if not verification.get("ok"):
@@ -472,6 +512,13 @@ def write_submission_report(
     event_roots = sorted({document.path.parent for document in plan.pending_documents})
     paths = [event_root / "soundhub" / filename for event_root in event_roots]
     payload = content.encode("utf-8")
-    for path in paths:
-        _write_atomic(path, payload)
+    if local_report_path is not None:
+        _write_atomic(local_report_path, payload)
+    if plan.box_store is not None:
+        event_ids = {document.box_file.parent_id for document in plan.pending_documents}
+        for event_id in sorted(event_ids):
+            plan.box_store.write_report(event_id, filename, payload)
+    else:
+        for path in paths:
+            _write_atomic(path, payload)
     return paths

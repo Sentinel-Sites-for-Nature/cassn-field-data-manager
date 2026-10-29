@@ -151,6 +151,59 @@ def test_missing_box_media_blocks_cleanup_without_reading_media(tmp_path):
     assert any("raw_data/p1_ML/image.jpg" in reason for reason in plan.reasons)
 
 
+def test_missing_local_media_requires_force(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    (event / "raw_data/p1_ML/image.jpg").unlink()
+
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+
+    assert not plan.clearable
+    assert any("missing locally" in reason for reason in plan.reasons)
+
+    plan = inspect_deployment_for_cleanup(
+        event, staging, storage, "field-root", force=True
+    )
+    assert plan.clearable
+    assert plan.file_count > 0
+    assert plan.local_bytes > 0
+    assert event.exists()  # Inspection remains read-only, even with force.
+    clear_verified_deployment(plan)
+    assert not event.exists()
+
+
+@pytest.mark.parametrize("box_digest", [None, "", "0" * 40])
+def test_force_bypasses_box_copy_checks_for_missing_local_media(
+    tmp_path, box_digest
+):
+    staging, event, storage = _build_event(tmp_path)
+    (event / "raw_data/p1_ML/image.jpg").unlink()
+    storage.tree["device"] = (
+        [] if box_digest is None else [_file("image.jpg", box_digest)]
+    )
+
+    plan = inspect_deployment_for_cleanup(
+        event, staging, storage, "field-root", force=True
+    )
+
+    assert plan.clearable
+    assert plan.force
+    assert not plan.box_folder_id
+    clear_verified_deployment(plan)
+    assert not event.exists()
+
+
+def test_force_bypasses_changed_remaining_media(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    (event / "raw_data/p1_ML/image.jpg").write_bytes(b"changed")
+
+    plan = inspect_deployment_for_cleanup(
+        event, staging, storage, "field-root", force=True
+    )
+
+    assert plan.clearable
+    assert plan.force
+
+
 def test_historical_local_only_box_manifest_does_not_block_cleanup(tmp_path):
     staging, event, storage = _build_event(tmp_path)
     storage.tree["qc"] = [
@@ -206,10 +259,11 @@ def test_apply_deletes_only_preflighted_event_without_creating_receipt(tmp_path)
     assert not (tmp_path / "receipts").exists()
 
 
-def test_apply_refuses_event_changed_after_preflight(tmp_path):
+@pytest.mark.parametrize("force", [False, True])
+def test_apply_refuses_event_changed_after_preflight(tmp_path, force):
     staging, event, storage = _build_event(tmp_path)
     plan = inspect_deployment_for_cleanup(
-        event, staging, storage, "field-root"
+        event, staging, storage, "field-root", force=force
     )
     (event / "new-untracked-file.txt").write_text("changed")
 
@@ -217,3 +271,123 @@ def test_apply_refuses_event_changed_after_preflight(tmp_path):
         clear_verified_deployment(plan)
 
     assert event.is_dir()
+
+
+@pytest.mark.parametrize('target', ['root', 'outside', 'symlink', 'nested_symlink'])
+def test_force_preserves_path_boundaries(tmp_path, target):
+    staging, event, _ = _build_event(tmp_path)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'keep').write_text('keep')
+    candidate = event
+    if target == 'root':
+        candidate = staging
+    elif target == 'outside':
+        candidate = outside
+    elif target == 'symlink':
+        candidate = staging / 'linked'
+        candidate.symlink_to(outside, target_is_directory=True)
+    else:
+        (event / 'linked').symlink_to(outside, target_is_directory=True)
+    plan = inspect_deployment_for_cleanup(candidate, staging, None, '', force=True)
+    assert not plan.clearable
+    with pytest.raises(StagingCleanupError):
+        clear_verified_deployment(plan)
+    assert (outside / 'keep').read_text() == 'keep'
+
+
+def test_force_cli_needs_no_box_or_session_and_requires_apply(tmp_path, monkeypatch, capsys):
+    from utils import clear_box_verified_staging as cli
+    staging, event, _ = _build_event(tmp_path)
+    (event / 'session.json').unlink()
+    def unavailable(*args):
+        raise AssertionError('force must not contact Box')
+    monkeypatch.setattr(cli, 'load_box_config', unavailable)
+    args = ['--staging-root', str(staging), '--event', event.name, '--force']
+    assert cli.main(args) == 0
+    assert event.exists()
+    assert 'UNVERIFIED' in capsys.readouterr().out
+    assert cli.main(args + ['--apply']) == 0
+    assert not event.exists()
+
+
+@pytest.mark.parametrize('change,accepted', [
+    ('submission', True), ('filename', False), ('row_removed', False),
+    ('other_field', False), ('bad_timestamp', False), ('regression', False),
+])
+def test_normal_cleanup_only_accepts_forward_soundhub_updates(tmp_path, monkeypatch, change, accepted):
+    import csv
+    import io
+    from cassn.soundhub.box_metadata import BoxMetadataStore
+    staging, event, storage = _build_event(tmp_path)
+    fields = ['filename', 'deployment_id', 'is_uploaded_to_box', 'notes',
+              'is_submitted_to_soundhub', 'soundhub_submitter', 'soundhub_submission_datetime']
+    before = dict(zip(fields, ['audio.wav', 'deployment', 'True', 'original', 'False', '', '']))
+    after = dict(before, is_submitted_to_soundhub='True', soundhub_submitter='Imperato, John',
+                 soundhub_submission_datetime='2026-10-22T20:28:23+00:00')
+    if change == 'filename':
+        after['filename'] = 'different.wav'
+    elif change == 'other_field':
+        after['notes'] = 'different'
+    elif change == 'bad_timestamp':
+        after['soundhub_submission_datetime'] = 'bad'
+    elif change == 'regression':
+        before, after = after, before
+    def encoded(rows):
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+        return stream.getvalue().encode()
+    (event / 'audio_file_metadata.csv').write_bytes(encoded([before]))
+    payload = encoded([] if change == 'row_removed' else [after])
+    storage.tree['event'].append(_file('audio_file_metadata.csv', __import__('hashlib').sha1(payload).hexdigest()))
+    monkeypatch.setattr(BoxMetadataStore, 'snapshot', lambda self, fid: fid)
+    monkeypatch.setattr(BoxMetadataStore, 'read', lambda self, ref: payload)
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert plan.clearable is accepted
+    if not accepted:
+        assert any('metadata differ' in reason for reason in plan.reasons)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_ingest_hold_blocks_cleanup_even_with_complete_session(tmp_path, force):
+    from cassn.core.quality_control import append_qc_report
+    staging, event, storage = _build_event(tmp_path)
+    append_qc_report(event, "ingest_safety", "p1_ML", "error", "Unrecorded source needs review")
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root", force=force)
+    assert not plan.clearable
+    assert any("Unresolved ingest failure" in reason for reason in plan.reasons)
+    assert (event / "raw_data/p1_ML/image.jpg").read_bytes() == b"captured image"
+
+
+def test_new_evidence_keeps_existing_cleanup_checks_and_rejects_stale_batch(tmp_path):
+    from cassn.core.verification_evidence import verification_context, write_result
+    staging, event, storage = _build_event(tmp_path)
+    session = json.loads((event / 'session.json').read_text())
+    config = SimpleNamespace(field_data_folder_id='field-root', profile='uc')
+    context = verification_context(event, session['file_inventory'], session['metadata'], config)
+    for kind in ('box', 'hash'):
+        write_result(event, kind, context, ok=True, summary='Synthetic check passed')
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert plan.clearable, plan.reasons
+    # A matching proof never bypasses the independent live Box check.
+    storage.tree['device'] = []
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert not plan.clearable
+    assert any('missing from Box' in reason for reason in plan.reasons)
+    # A changed batch fails before any Box access, even if bytes weren't read.
+    session['file_inventory'][0]['file_hash_sha256'] = 'c' * 64
+    (event / 'session.json').write_text(json.dumps(session))
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert not plan.clearable
+    assert any('stale or incomplete' in reason for reason in plan.reasons)
+
+
+@pytest.mark.parametrize('change', ['unknown_version', 'bad_destination'])
+def test_malformed_new_proof_does_not_fall_back_to_legacy_cleanup(tmp_path, change):
+    staging, event, storage = _build_event(tmp_path)
+    proof = {'verified': True, 'evidence_version': 2 if change == 'unknown_version' else 1,
+             'destination': []}
+    (event / 'qc/box_upload_verification.json').write_text(json.dumps(proof))
+    assert not inspect_deployment_for_cleanup(event, staging, storage, 'field-root').clearable

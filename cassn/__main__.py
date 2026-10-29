@@ -17,10 +17,11 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtNetwork import QLocalServer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from cassn.box.auth import BOX_AVAILABLE, load_box_config
-from cassn.config import CONFIG_JSON, LOCAL_DATA_DIR
+from cassn.config import CONFIG_JSON, LOCAL_DATA_DIR, LOCK_DIR
+from cassn.profile import HOSTED, PROFILE
 from cassn.core.image_metadata import EXIF_AVAILABLE
 from cassn.gui.windows import DeploymentWindows, ResourceBusy, ResourceLease
 from cassn.gui.activation import ActivationServer, activate_running_instance, activation_name
@@ -43,7 +44,7 @@ def _lookup_status_message(result: LookupBootstrapResult) -> str:
     return "Lookup tables: using the last validated offline cache."
 
 
-def main() -> None:
+def main(*, application=None) -> None:
     if not EXIF_AVAILABLE:
         print("Warning: PIL/piexif not available. EXIF extraction will be disabled.")
         print("Install with: pip install pillow piexif")
@@ -51,15 +52,15 @@ def main() -> None:
     if not BOX_AVAILABLE:
         print("Warning: box-sdk-gen not available. Box upload will be disabled.")
         print("Install with: pip install box-sdk-gen")
-        print("Then run box_auth_setup.py to authenticate")
+        print("Install dependencies, then use Connect to Box in the app.")
 
-    app = QApplication(sys.argv)
+    app = application if application is not None else QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    lock_directory = CONFIG_JSON.parent / "window-locks"
-    server_name = activation_name(lock_directory)
+    lock_directory = LOCK_DIR if HOSTED else CONFIG_JSON.parent / "window-locks"
+    server_name = activation_name(lock_directory / PROFILE if HOSTED else lock_directory)
     try:
-        application_lease = ResourceLease(lock_directory, ["application"])
+        application_lease = ResourceLease(lock_directory, ["application:" + PROFILE if HOSTED else "application"])
     except ResourceBusy:
         print("CA-SSN is already running; requesting its existing window.", flush=True)
         if activate_running_instance(server_name):
@@ -79,22 +80,53 @@ def main() -> None:
     # Box is the canonical distribution point. Synchronize the complete
     # configuration before strict loading; a validated local snapshot is the
     # only permitted offline fallback.
-    box_config = load_box_config()
     try:
-        bootstrap = bootstrap_lookup_tables(box_config, LOCAL_DATA_DIR)
+        box_config = load_box_config()
+    except Exception:
+        box_config = None
+    hosted_connected = None
+    if box_config is not None and box_config.provider == "hosted":
+        from cassn.gui.hosted_setup import HostedSetupDialog
+        dialog = HostedSetupDialog(box_config)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            application_lease.release()
+            return
+        bootstrap = dialog.bootstrap
         lookups = bootstrap.lookups
-    except LookupBootstrapError as exc:
-        QMessageBox.critical(
-            None,
-            "Lookup Configuration Unavailable",
-            str(exc),
-        )
-        raise SystemExit(1) from exc
+        hosted_connected = dialog.connected
+    else:
+        if box_config is None:
+            from cassn.gui.box_connect import BoxConnectDialog
+            dialog = BoxConnectDialog(box_config)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                application_lease.release()
+                return
+            box_config = dialog.connected_config
+        try:
+            bootstrap = bootstrap_lookup_tables(box_config, LOCAL_DATA_DIR)
+            lookups = bootstrap.lookups
+        except LookupBootstrapError as exc:
+            from cassn.gui.box_connect import BoxConnectDialog
+            QMessageBox.information(None, "Box Connection Required", str(exc))
+            dialog = BoxConnectDialog(box_config)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                application_lease.release()
+                return
+            box_config = dialog.connected_config
+            try:
+                bootstrap = bootstrap_lookup_tables(box_config, LOCAL_DATA_DIR)
+                lookups = bootstrap.lookups
+            except LookupBootstrapError as retry_exc:
+                QMessageBox.critical(None, "Lookup Configuration Unavailable", str(retry_exc))
+                application_lease.release()
+                return
     print(_lookup_status_message(bootstrap), flush=True)
     if bootstrap.warning:
         QMessageBox.warning(None, "Using Offline Lookup Cache", bootstrap.warning)
 
     windows = DeploymentWindows(lookups=lookups, box_config=box_config, lock_directory=lock_directory)
+    if hosted_connected is not None:
+        windows.box_authenticated = hosted_connected
     windows.new_window(open_sessions=True)
     # The application lease proves no other supported instance owns this name.
     QLocalServer.removeServer(server_name)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Permanently clear local deployment events only after live Box verification."""
+"""Clear local events after Box verification, or force without bypassing safety holds."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Verify locally staged CA-SSN deployment events against Box using "
             "stored/server-side SHA-1 values, then optionally clear verified events. "
+            "Use --force for unverified local deletion. "
             "The default is a read-only dry run."
         )
     )
@@ -56,9 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="inspect only this direct child event folder (repeatable)",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help=("bypass data and Box verification, not saved ingest errors, incomplete "
+              "publication or local deletion guards; deletion still requires --apply"),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
-        help="permanently delete each event that passes every safety check",
+        help="delete listed events after verification, or without data verification with --force",
     )
     parser.add_argument(
         "--config",
@@ -69,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _selected_deployments(staging_root: Path, names: list[str]) -> list[Path]:
+def _selected_deployments(staging_root: Path, names: list[str], *, force: bool = False) -> list[Path]:
     if not names:
         return discover_staged_deployments(staging_root)
 
@@ -79,7 +86,7 @@ def _selected_deployments(staging_root: Path, names: list[str]) -> list[Path]:
         if candidate_name.name != name or name in {"", ".", ".."}:
             raise ValueError(f"--event must be a direct folder name: {name!r}")
         candidate = staging_root / name
-        if not candidate.is_dir() or not (candidate / "session.json").is_file():
+        if not candidate.is_dir() or (not force and not (candidate / "session.json").is_file()):
             raise ValueError(f"staged deployment event not found: {candidate}")
         selected.append(candidate)
     return selected
@@ -95,11 +102,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Staging root: {staging_root}")
     print(f"Mode: {'APPLY (permanent local deletion)' if args.apply else 'dry run'}")
 
+    if args.force:
+        print("FORCE — UNVERIFIED: data and Box checks bypassed; entire event folders will be removed.")
+
     if not staging_root.is_dir():
         print(f"ERROR: staging root does not exist: {staging_root}", file=sys.stderr)
         return 2
     try:
-        deployments = _selected_deployments(staging_root, args.event)
+        deployments = _selected_deployments(staging_root, args.event, force=args.force)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -107,19 +117,23 @@ def main(argv: list[str] | None = None) -> int:
         print("No staged deployment events with session.json were found.")
         return 0
 
-    try:
-        box_config = load_box_config(args.config)
-    except (OSError, KeyError, ValueError) as exc:
-        print(f"ERROR: could not load Box configuration: {exc}", file=sys.stderr)
-        return 2
-    client = get_box_client(box_config)
-    if client is None:
-        print(
-            "ERROR: could not authenticate with Box; no local folders were changed.",
-            file=sys.stderr,
-        )
-        return 2
-    storage = BoxStorage(client)
+    storage = None
+    field_data_folder_id = ""
+    if not args.force:
+        try:
+            box_config = load_box_config(args.config)
+        except (OSError, KeyError, ValueError) as exc:
+            print(f"ERROR: could not load Box configuration: {exc}", file=sys.stderr)
+            return 2
+        client = get_box_client(box_config)
+        if client is None:
+            print(
+                "ERROR: could not authenticate with Box; no local folders were changed.",
+                file=sys.stderr,
+            )
+            return 2
+        storage = BoxStorage(client)
+        field_data_folder_id = str(box_config.field_data_folder_id or "")
 
     cleared = 0
     blocked = 0
@@ -130,7 +144,8 @@ def main(argv: list[str] | None = None) -> int:
             deployment,
             staging_root,
             storage,
-            str(box_config.field_data_folder_id or ""),
+            field_data_folder_id,
+            force=args.force,
         )
         if not plan.clearable:
             blocked += 1
@@ -140,10 +155,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         print(
-            f"  SAFE TO CLEAR: {plan.file_count:,} raw file(s), "
+            f"  {'UNVERIFIED FORCE TARGET' if args.force else 'SAFE TO CLEAR'}: {plan.file_count:,} {'local' if args.force else 'raw'} file(s), "
             f"{_format_bytes(plan.local_bytes)}"
         )
-        print(f"  Box: {plan.box_path} (folder {plan.box_folder_id})")
+        if not args.force:
+            print(f"  Box: {plan.box_path} (folder {plan.box_folder_id})")
         if not args.apply:
             continue
         try:
@@ -164,8 +180,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(
-            f"\nDry run: {safe} event(s) safe to clear; {blocked} blocked. "
-            "Rerun with --apply to permanently delete only the safe events."
+            f"\nDry run: {safe} event(s) {'selected for unverified deletion' if args.force else 'safe to clear'}; {blocked} blocked. "
+            "Add --apply to the same command to permanently delete the listed events."
         )
     return 1 if blocked else 0
 
