@@ -359,3 +359,35 @@ def test_ingest_hold_blocks_cleanup_even_with_complete_session(tmp_path, force):
     assert not plan.clearable
     assert any("Unresolved ingest failure" in reason for reason in plan.reasons)
     assert (event / "raw_data/p1_ML/image.jpg").read_bytes() == b"captured image"
+
+
+def test_new_evidence_keeps_existing_cleanup_checks_and_rejects_stale_batch(tmp_path):
+    from cassn.core.verification_evidence import verification_context, write_result
+    staging, event, storage = _build_event(tmp_path)
+    session = json.loads((event / 'session.json').read_text())
+    config = SimpleNamespace(field_data_folder_id='field-root', profile='uc')
+    context = verification_context(event, session['file_inventory'], session['metadata'], config)
+    for kind in ('box', 'hash'):
+        write_result(event, kind, context, ok=True, summary='Synthetic check passed')
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert plan.clearable, plan.reasons
+    # A matching proof never bypasses the independent live Box check.
+    storage.tree['device'] = []
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert not plan.clearable
+    assert any('missing from Box' in reason for reason in plan.reasons)
+    # A changed batch fails before any Box access, even if bytes weren't read.
+    session['file_inventory'][0]['file_hash_sha256'] = 'c' * 64
+    (event / 'session.json').write_text(json.dumps(session))
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert not plan.clearable
+    assert any('stale or incomplete' in reason for reason in plan.reasons)
+
+
+@pytest.mark.parametrize('change', ['unknown_version', 'bad_destination'])
+def test_malformed_new_proof_does_not_fall_back_to_legacy_cleanup(tmp_path, change):
+    staging, event, storage = _build_event(tmp_path)
+    proof = {'verified': True, 'evidence_version': 2 if change == 'unknown_version' else 1,
+             'destination': []}
+    (event / 'qc/box_upload_verification.json').write_text(json.dumps(proof))
+    assert not inspect_deployment_for_cleanup(event, staging, storage, 'field-root').clearable

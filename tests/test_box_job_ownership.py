@@ -1,6 +1,7 @@
 """Real queued Qt signals must not change another deployment's state."""
 
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QObject, Qt, Signal
@@ -48,10 +49,11 @@ class Harness(QObject):
     def __init__(self, folder):
         super().__init__()
         self.current_deployment_folder = folder
-        self.file_inventory = [{'new_filename': 'image.jpg'}]
+        self.file_inventory = [{'device_label': 'p1_ML', 'new_filename': 'image.jpg',
+                                'file_hash_sha256': 'a' * 64, 'file_size_bytes': 7}]
         self.metadata = {'observer': 'Test'}
         self.devices = []
-        self.box_config = {}
+        self.box_config = SimpleNamespace(field_data_folder_id='test-root', profile='uc')
         self.box_authenticated = True
         self._box_operation_active = True
         self.box_upload_complete = False
@@ -251,3 +253,96 @@ def test_manual_check_waits_for_card_jobs(setup, method):
     getattr(context, method)()
     assert not context._box_operation_active
     assert context.fixity_thread is None and context.box_verify_thread is None
+
+
+@pytest.mark.parametrize('method,attribute', [('run_box_verify', 'box_verify_thread'),
+                                           ('run_fixity_check', 'fixity_thread')])
+def test_failure_without_issues_never_shows_passed(setup, method, attribute):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._box_operation_active = False
+    getattr(context, method)()
+    getattr(context, attribute).result.emit(False, 'Could not authenticate', [])
+    w.QMessageBox.information.assert_not_called()
+    assert not readiness(context.current_deployment_folder, context.file_inventory,
+                         context.metadata, context.box_config)[1]
+    assert 'Could not authenticate' in w.QMessageBox.return_value.setText.call_args.args[0]
+    assert not context._box_operation_active
+
+
+def test_inventory_changed_while_worker_ran_cannot_pass(setup):
+    _, context, qc = setup
+    context._box_operation_active = False
+    context.run_fixity_check()
+    context.file_inventory[0]['file_hash_sha256'] = 'c' * 64
+    context.fixity_thread.result.emit(True, 'Checked old batch', [])
+    assert qc.call_args.args[3] == 'error'
+    w.QMessageBox.information.assert_not_called()
+    assert not context.box_upload_complete
+    assert not context._box_operation_active
+
+
+def test_successful_manual_pair_persists_reopenable_current_proof(setup):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._box_operation_active = False
+    context.run_box_verify()
+    context.box_verify_thread.result.emit(True, 'Box list matches', [])
+    context.run_fixity_check()
+    context.fixity_thread.result.emit(True, 'Hashes match', [])
+    args = (context.current_deployment_folder, context.file_inventory, context.metadata, context.box_config)
+    assert readiness(*args) == (True, True)
+    assert context.box_upload_complete
+    context.run_fixity_check()
+    assert readiness(*args) == (False, False)
+    context.fixity_thread.result.emit(False, 'Verification cancelled', [])
+    assert readiness(*args) == (False, False)
+
+
+def test_evidence_write_failure_prevents_worker_start_and_releases_controls(setup, monkeypatch):
+    _, context, _ = setup
+    context._box_operation_active = False
+    monkeypatch.setattr(w, 'write_result', MagicMock(side_effect=OSError('synthetic full disk')))
+    context.run_fixity_check()
+    assert not context.fixity_thread.started
+    assert not context._box_operation_active
+    w.QMessageBox.warning.assert_called_once()
+
+
+def test_extras_remain_warning_without_recording_completion(setup):
+    _, context, qc = setup
+    context._box_operation_active = False
+    context.run_box_verify()
+    context.box_verify_thread.result.emit(True, 'Unexpected Box file', [
+        {'type': 'extra_on_box', 'filename': 'raw_data/p1_ML/other.jpg'}])
+    assert qc.call_args.args[3] == 'warning'
+    w.QMessageBox.information.assert_not_called()
+    assert not context.box_upload_complete
+
+
+@pytest.mark.parametrize('failed_stage', ['box', 'hash'])
+def test_automatic_failure_without_issues_never_records_completion(setup, failed_stage):
+    from cassn.core.verification_evidence import readiness
+    _, context, _ = setup
+    context._start_post_upload_verification()
+    context.box_verify_thread.result.emit(failed_stage != 'box', 'Box result', [])
+    if failed_stage == 'hash':
+        context.fixity_thread.result.emit(False, 'Hash check cancelled', [])
+    assert not context._box_operation_active
+    assert not context.box_upload_complete
+    assert readiness(context.current_deployment_folder, context.file_inventory,
+                     context.metadata, context.box_config) == (False, False)
+    w.QMessageBox.information.assert_not_called()
+
+
+def test_auto_box_extras_keep_actual_hash_result_without_claiming_completion(setup):
+    import json
+    _, context, _ = setup
+    context._start_post_upload_verification()
+    context.box_verify_thread.result.emit(True, 'Box extra', [
+        {'type': 'extra_on_box', 'filename': 'raw_data/p1_ML/other.jpg'}])
+    context.fixity_thread.result.emit(True, 'Hashes match', [])
+    record = json.loads((context.current_deployment_folder / 'qc/box_upload_verification.json').read_text())
+    assert record['verified'] is False
+    assert record['hash_verification']['ok'] is True
+    assert not context.box_upload_complete

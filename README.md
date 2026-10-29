@@ -325,6 +325,27 @@ Verification distinguishes this batch from recorded earlier files. Cleanup
 checks that accumulated Box metadata covers the local batch; it still requires
 successful publication, passing verification and the existing deletion guards.
 
+Readiness requires saved, successful checks for the **current batch**, not just
+an upload manifest, an earlier QC pass, or a check that finished with errors.
+The file-list and hash results in `qc/box_file_list_verification.json` and
+`qc/file_hash_verification.json` are bound to this staging folder, inventory,
+Box destination and metadata-publication attempt. Both must pass before
+`qc/box_upload_verification.json` records completion. Failed, cancelled or
+interrupted reruns invalidate the previous completion result; unreadable or
+changed evidence cannot satisfy readiness. Unexpected Box files remain a
+warning and prevent a clean completion until reviewed.
+
+Older unbound results do not satisfy the new checklist. After an existing
+upload finishes, run **Verify Box Upload** and **Verify Box ↔ Local Hashes** to
+save current evidence; re-uploading media is not required. Finish any unresolved
+metadata publication first. Changing the batch, staging path or Box destination
+requires new checks. These checks retain the saved local SHA-1 policy (computing
+missing legacy SHA-1 values); they do not newly rehash all local media or certify
+the contents of an entire historical archive. Staging cleanup keeps its
+independent local-size, stored-hash, live Box, provenance and hold checks; its
+legacy compatibility rules are unchanged, and new evidence must also match the
+current batch.
+
 ### Screenshots
 
 #### Deployments and devices
@@ -795,7 +816,7 @@ opened or changed to build the summary.
 | `hash_verification` | SHA-256 and SHA-1 are computed at the source, then again at the destination after copy. Mismatch aborts the file and removes only the current attempt's temporary copy. | Automatic, every SD card copy (per file) | Log panel + critical popup on mismatch; one aggregate entry per device in `qc_report.json` |
 | `file_size_floor` | Flags copied media files below device-aware floors: images under 500 KB, bird AudioMoth WAVs (`BD`) under 1 GB, and bat AudioMoth WAVs (`BT`) under 500 KB. Config `.txt` files are excluded. | Automatic, every SD card copy (per file) | Log panel + warning summary at device completion; entry per device in `qc_report.json` |
 | `ingest_safety` | Preserves unrecorded staged files; blocks changed/missing source evidence, destination collisions, and equal-byte acquisitions that cannot be established as a retained-source retry. Equal hashes alone do not establish the same acquisition. | Before and during card ingest | Saved error in `qc_report.json`, card panel and dialog; blocks affected completion, upload and cleanup until reviewed recovery |
-| `card_ingest` | Retains each card attempt's success, cancellation or failure, including its original error. A successful retry clears this attempt error while keeping history; it cannot clear an `ingest_safety` hold. | Card worker completion | Card panel and reopenable QC report |
+| `card_ingest` | Retains each card attempt's success, cancellation or failure, including its original error. A successful retry clears this attempt error while keeping history. Only the specific old card-reconnection safety hold can also clear automatically, after full retained-source and staged-copy verification. | Card worker completion | Card panel and reopenable QC report |
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
 | `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
@@ -808,7 +829,7 @@ opened or changed to build the summary.
 | `file_hash_verification_run` | Compares each expected Box raw-data file's stored local SHA-1 against Box's server-side SHA-1. For older sessions without stored SHA-1, the app computes SHA-1 from the local file. Lookup uses the complete deployment-relative path, so both flat (`raw_data/device/file`) and WI-split (`raw_data/device/device_N/file`) layouts compare correctly without filename collisions. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box ↔ Local Hashes") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json`. Individual mismatches recorded as `file_hash_mismatch` entries. |
 | `box_verify` | Calls the Box API, recursively lists the deployment folder, and reconciles complete deployment-relative paths against local inventory. Flat legacy sessions and nested WI-split sessions are both supported. Known deployment-metadata files (`*_metadata.csv`, `deployment_event_record.json`, `qc_report.json`, `wildlife_insights_*.csv`, `*_manifest.json`) are auto-whitelisted as expected extras. | Automatic after successful Box upload; manual button on Tab 3 ("Verify Box Upload") | Post-upload verification progress panel + detail popup + log panel + session-level entry in `qc_report.json` |
 | `session_health` | At app launch, every `session.json` in the staging root is parsed. Truncated or malformed files are surfaced in the Open Deployment dialog as "⚠ CORRUPTED" rather than being silently hidden. | Automatic at app launch and "Open Different Deployment…" | Resume dialog entry + per-deployment `qc_report.json` |
-| `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, file-hash verification run, Box upload done, and no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
+| `pre_departure` | Aggregate readiness check before closing or switching deployments: all devices complete, successful current-batch hash and Box file-list evidence, and no current QC errors. Reads `current_state` of `qc_report.json` so resolved errors don't trigger false alarms. | Automatic on window close, "Start New Deployment", and "Open Different Deployment…" | Modal dialog with ✓/⚠ items + session-level entry in `qc_report.json` |
 | (session summary) | Plain-text rollup at session close: dates, device counts, per-device file totals, plot coordinates, and QC pass/warning/error counts. | Automatic at session close | `qc/deployment_summary.txt` in deployment folder |
 
 ### Per-device check coverage

@@ -496,8 +496,10 @@ class BoxVerifyThread(QThread):
             issues = [
                 {"type": "missing_from_box", "filename": n} for n in sorted(missing)
             ] + [{"type": "extra_on_box", "filename": n} for n in sorted(extra)] + archive_issues
-            ok = not missing and not archive_issues
-            if not missing and not extra:
+            ok = bool(local_paths) and not missing and not archive_issues
+            if not local_paths:
+                summary = "No valid expected inventory to verify."
+            elif not missing and not extra:
                 summary = "All batch files are present on Box."
             else:
                 summary = f"Box verify: {len(missing)} missing from Box, {len(extra)} unexpected."

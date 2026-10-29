@@ -45,6 +45,8 @@ _LOCAL_ONLY_AFTER_UPLOAD = {
     # so historical events may legitimately retain both QC proofs only locally.
     "qc/box_upload_manifest.json",
     "qc/box_upload_verification.json",
+    "qc/file_hash_verification.json",
+    "qc/box_file_list_verification.json",
 }
 _EXACT_SMALL_SIDECARS = {
     "image_file_metadata.csv",
@@ -358,6 +360,21 @@ def inspect_deployment_for_cleanup(
     verification_path = _verification_artifact(deployment)
     try:
         verification = _read_json(verification_path)
+        if "evidence_version" in verification and verification["evidence_version"] != 1:
+            plan.reasons.append("unsupported Box verification evidence version")
+        if verification.get("evidence_version") == 1:
+            from types import SimpleNamespace
+            from cassn.core.verification_evidence import readiness
+            # Cleanup receives the selected data root, not a GUI profile. Read
+            # the recorded profile only to reconstruct the non-secret binding.
+            destination = verification.get("destination", {})
+            if not isinstance(destination, dict):
+                raise ValueError("invalid verification destination")
+            config = SimpleNamespace(field_data_folder_id=str(field_data_folder_id),
+                                     profile=destination.get("profile", "legacy"))
+            _, current = readiness(deployment, session.get("file_inventory"), metadata, config)
+            if not current:
+                plan.reasons.append("Box verification evidence is stale or incomplete")
         if verification.get("verified") is not True:
             plan.reasons.append("latest Box upload verification did not pass")
     except (OSError, ValueError) as exc:
