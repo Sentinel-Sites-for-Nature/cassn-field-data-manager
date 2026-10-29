@@ -78,14 +78,9 @@ from cassn.gui.workspace import (
 from cassn.soundhub.export import (
     enrich_audio_rows,
     read_bd_audio_rows,
-    validate_staging_manifests,
     write_deployment_copy,
 )
-from cassn.soundhub.lifecycle import (
-    plan_completed_batch_cleanup,
-    staging_extension_blockers,
-)
-from cassn.soundhub.staging import flac_available, fragments_root, project_root
+from cassn.soundhub.staging import flac_available, project_root
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -4342,68 +4337,6 @@ class FieldDataWizard(QMainWindow):
 
         staging_root = self._soundhub_staging_root()
         root = project_root(staging_root)
-        fragments = fragments_root(staging_root)
-        has_fragments = fragments.is_dir() and any(
-            path.is_dir() for path in fragments.iterdir()
-        )
-        has_manifests = any(
-            (root / name).exists() for name in ("deployment.csv", "recording.csv")
-        )
-        if has_fragments or has_manifests:
-            try:
-                validate_staging_manifests(staging_root)
-            except Exception as e:
-                QMessageBox.warning(
-                    self,
-                    "Existing SoundHub Batch Needs Attention",
-                    "The existing local SoundHub batch is not internally valid "
-                    f"and cannot be safely extended:\n\n{e}",
-                )
-                return
-            try:
-                lifecycle = plan_completed_batch_cleanup(staging_root)
-            except Exception as e:
-                QMessageBox.warning(
-                    self, "SoundHub Staging Check Failed", str(e)
-                )
-                return
-            if lifecycle.closed:
-                detail = ""
-                if lifecycle.errors:
-                    detail = "\n\nCleanup is currently blocked:\n" + "\n".join(
-                        f"• {error}" for error in lifecycle.errors
-                    )
-                QMessageBox.information(
-                    self,
-                    "Completed SoundHub Batch Still Staged",
-                    f"The existing batch contains {lifecycle.recording_count} "
-                    "recording(s), and all are already recorded as submitted. "
-                    "A new deployment cannot be added to its completed manifests.\n\n"
-                    "After SoundHub acceptance is confirmed, use the maintenance "
-                    "utility in Terminal:\n\n"
-                    "python utils/prep_soundhub.py clear-completed\n"
-                    "python utils/prep_soundhub.py clear-completed --apply"
-                    f"{detail}",
-                )
-                return
-            # A local batch does not need to exist on Box before another event
-            # is added.  Box provenance is mandatory only at upload preflight.
-            # Errors before a provenance plan exists still indicate an unsafe
-            # local path/layout and remain blocking.
-            extension_blockers = staging_extension_blockers(lifecycle)
-            if extension_blockers:
-                QMessageBox.warning(
-                    self,
-                    "Existing SoundHub Batch Needs Attention",
-                    "The existing staging batch cannot be safely extended:\n\n"
-                    + "\n".join(f"• {error}" for error in extension_blockers),
-                )
-                return
-            if lifecycle.errors:
-                self.log(
-                    "SoundHub staging remains open; Box provenance will be "
-                    "required and rechecked before upload."
-                )
 
         def row_count(name):
             path = root / name
@@ -4424,7 +4357,9 @@ class FieldDataWizard(QMainWindow):
             "Bird (BD) WAVs will be converted to FLAC and the two cumulative "
             "CSV manifests will be rebuilt. Existing staged deployments remain; "
             "re-staging the same deployment IDs refreshes them. Source WAVs are "
-            "not modified, bat audio is excluded, and nothing is uploaded.",
+            "not modified, bat audio is excluded, and nothing is uploaded.\n\n"
+            "Before conversion starts, the existing batch will be checked in the "
+            "background. A completed or invalid batch will not be extended.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
         )
         if confirm != QMessageBox.Yes:
@@ -4434,7 +4369,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_group.setTitle("SoundHub staging progress")
-        self.soundhub_status_label.setText("Converting bird audio to FLAC…")
+        self.soundhub_status_label.setText("Checking existing SoundHub batch…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
@@ -4581,14 +4516,16 @@ class FieldDataWizard(QMainWindow):
                 self.cancel_soundhub_btn.setText("Cancelling…")
                 self.cancel_soundhub_btn.setEnabled(False)
                 self.soundhub_status_label.setText(
-                    "Cancellation requested — finishing the current file…"
+                    "Cancellation requested — waiting for the current check or file to finish…"
                 )
                 return
 
     def on_soundhub_progress(self, current, total, name):
         if total:
             self.soundhub_progress_bar.setValue(int(current / total * 100))
-        self.soundhub_status_label.setText(f"{name} ({current}/{total})")
+        self.soundhub_status_label.setText(
+            f"{name} ({current}/{total})" if total else name
+        )
 
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()

@@ -16,7 +16,16 @@ from cassn.soundhub.export import (
     write_deployment_copy,
     write_deployment_fragments,
 )
-from cassn.soundhub.staging import stage_deployment
+from cassn.soundhub.lifecycle import (
+    plan_completed_batch_cleanup,
+    staging_extension_blockers,
+)
+from cassn.soundhub.staging import (
+    SoundHubStagingError,
+    fragments_root,
+    project_root,
+    stage_deployment,
+)
 from cassn.soundhub.provenance import DEFAULT_SUBMITTER
 from cassn.soundhub.submission import (
     SoundHubSubmissionError,
@@ -46,8 +55,61 @@ class SoundHubStageThread(QThread):
     def cancel(self):
         self._cancel_event.set()
 
+    def _check_existing_batch(self):
+        """Keep slow filesystem and Box checks off the GUI thread, before writes."""
+        root = project_root(self.staging_root)
+        fragments = fragments_root(self.staging_root)
+        has_fragments = fragments.is_dir() and any(
+            path.is_dir() for path in fragments.iterdir()
+        )
+        has_manifests = any(
+            (root / name).exists() for name in ("deployment.csv", "recording.csv")
+        )
+        if not (has_fragments or has_manifests):
+            return
+
+        self.progress.emit(0, 0, "Checking existing SoundHub batch…")
+        validate_staging_manifests(self.staging_root)
+        if self._cancel_event.is_set():
+            return
+        self.progress.emit(0, 0, "Checking existing batch submission records in Box…")
+        lifecycle = plan_completed_batch_cleanup(self.staging_root)
+        if self._cancel_event.is_set():
+            return
+        if lifecycle.closed:
+            detail = ""
+            if lifecycle.errors:
+                detail = "\n\nCleanup is currently blocked:\n" + "\n".join(
+                    f"• {error}" for error in lifecycle.errors
+                )
+            raise SoundHubStagingError(
+                f"The existing batch contains {lifecycle.recording_count} "
+                "recording(s), and all are already recorded as submitted. "
+                "A new deployment cannot be added to its completed manifests.\n\n"
+                "After SoundHub acceptance is confirmed, use the maintenance "
+                "utility in Terminal:\n\n"
+                "python utils/prep_soundhub.py clear-completed\n"
+                "python utils/prep_soundhub.py clear-completed --apply"
+                f"{detail}"
+            )
+        # Preserve local staging's existing policy: Box provenance errors alone
+        # do not block extension, but unsafe local paths/layouts do.
+        blockers = staging_extension_blockers(lifecycle)
+        if blockers:
+            raise SoundHubStagingError(
+                "The existing staging batch cannot be safely extended:\n\n"
+                + "\n".join(f"• {error}" for error in blockers)
+            )
+
     def run(self):
         try:
+            self._check_existing_batch()
+            if self._cancel_event.is_set():
+                self.completed.emit(
+                    False, True, "SoundHub staging cancelled before conversion.", {}
+                )
+                return
+            self.progress.emit(0, 0, "Reading bird audio metadata…")
             audio_rows = enrich_audio_rows(
                 read_bd_audio_rows(self.deployment_folder), self.lookups
             )

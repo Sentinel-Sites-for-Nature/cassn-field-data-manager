@@ -313,3 +313,41 @@ def test_unreadable_collection_qc_report_remains_visible(workspace_window, tmp_p
     (tmp_path / "qc/qc_report.json").write_text(contents)
     findings = window._collection_review_findings([])
     assert any(f["severity"] == "error" and f["title"] == "QC report could not be read" for f in findings)
+
+
+def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import soundhub_thread, wizard
+    from cassn.soundhub.staging import project_root
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path / "event"
+    staging = tmp_path / "soundhub"
+    root = project_root(staging)
+    root.mkdir(parents=True)
+    (root / "deployment.csv").write_text("deployment_id\nfirst\nsecond\n")
+    (root / "recording.csv").write_text("path\nfirst/a.flac\nsecond/b.flac\nsecond/c.flac\n")
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: staging)
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    validate = MagicMock(side_effect=AssertionError("Validation must run in the worker"))
+    check_box = MagicMock(side_effect=AssertionError("Box checks must run in the worker"))
+    monkeypatch.setattr(soundhub_thread, "validate_staging_manifests", validate)
+    monkeypatch.setattr(soundhub_thread, "plan_completed_batch_cleanup", check_box)
+    worker = MagicMock()
+    stage = MagicMock(return_value=worker)
+    monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
+    question = MagicMock(return_value=wizard.QMessageBox.No)
+    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+
+    window.stage_for_soundhub()
+    assert "2 SoundHub deployment(s), 3 recording(s)" in question.call_args.args[2]
+    validate.assert_not_called()
+    check_box.assert_not_called()
+    stage.assert_not_called()
+
+    question.return_value = wizard.QMessageBox.Yes
+    window.stage_for_soundhub()
+    worker.start.assert_called_once()
+    assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
+    validate.assert_not_called()
+    check_box.assert_not_called()
+    window.soundhub_stage_thread = None
