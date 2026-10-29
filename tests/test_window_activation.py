@@ -26,7 +26,7 @@ def activation_app():
 def test_second_launch_sends_window_activation_and_receives_acknowledgment(activation_app):
     app = activation_app
     activated = MagicMock()
-    with tempfile.TemporaryDirectory(prefix="cassn-ipc-", dir="/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="ipc-") as directory:
         name = str(Path(directory) / "window.sock")
         server = ActivationServer(name, activated)
         script = """

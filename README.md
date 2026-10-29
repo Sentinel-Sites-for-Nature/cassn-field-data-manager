@@ -877,6 +877,41 @@ test suite with its Python interpreter and warnings treated as errors:
 .venv/bin/python -m pytest -q -W error
 ```
 
+The ordinary pytest command now starts with a fresh temporary configuration,
+lookup cache, application cache and temporary-files directory before importing
+project test modules. It does not change `HOME`. Python-side guards reject
+production or unrelated file reads, writes outside the test directory, real
+network calls, credential-store access, browser launches and external upload or
+maintenance commands. Existing `CASSN_CONFIG_ROOT`/profile settings are replaced
+for the test session; cloud credential environment variables are cleared.
+Tests must supply synthetic staging paths through `tmp_path`, rather than use
+the application's production Desktop or external-drive defaults.
+
+Python child processes inherit the same guards before their application imports;
+startup failure stops the child. Temporary Python mock executables and the
+installed FLAC encoder's supported options remain available for synthetic
+fixtures. Real AWS, Box, Pelican, ExifTool, shell and installation commands are
+not allowed by the ordinary suite. Native Qt network/browser entry points and
+OS keychain access are blocked; temporary local Unix/Qt communication remains
+available for the multi-window tests.
+
+Collection defaults to `tests/`, excluding ignored planning, data, build and
+review-output directories. Assertion code is compiled afresh to avoid stale
+absolute paths in copied pytest bytecode. Tests choose their own temporary
+`--basetemp`; an externally supplied location is rejected before pytest can
+clear it. The temporary session directory is removed on normal exit.
+
+`integration` tests are excluded by default. Selecting that marker does not
+remove these guards; any future live integration check needs a separate,
+explicitly reviewed runner and authorization. These are protections against
+accidental test effects, not an operating-system security sandbox: pytest
+plugins can start before the repository conftest, and arbitrary native code is
+not universally intercepted. Keep new fixtures and integrations reviewable.
+If an execution sandbox blocks Qt's temporary local socket, report that limit
+and rerun that test in an environment allowing local communication, with the
+test guards retained. Do not weaken the guards or skip the assertion to obtain
+a passing result.
+
 ### Build the hosted Mac app
 
 Build from the repository root on an Apple Silicon Mac, using an arm64 Python
