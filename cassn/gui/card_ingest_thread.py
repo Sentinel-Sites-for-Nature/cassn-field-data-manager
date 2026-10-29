@@ -187,6 +187,7 @@ class CardIngestThread(QThread):
         copy_finished = False
         result: dict
         try:
+            source_mount = self.source_dir.stat()
             self.log_line.emit(self.device_label, "Counting files on source card…")
             self.expected_file_count = count_expected_files(self.source_dir)
             self.progress.emit(
@@ -217,6 +218,11 @@ class CardIngestThread(QThread):
                 self.device_label,
                 reconyx,
             )
+            current_mount = self.source_dir.stat()
+            if (current_mount.st_dev, current_mount.st_ino) != (
+                source_mount.st_dev, source_mount.st_ino
+            ):
+                raise OSError("Source card changed or reconnected during copying; retry to verify completed files")
             copy_finished = True
             # rows_ready uses a blocking GUI connection: all inventory is durable
             # before any moves, and updated paths are durable before completion.

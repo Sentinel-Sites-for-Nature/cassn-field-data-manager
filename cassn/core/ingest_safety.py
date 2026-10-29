@@ -24,6 +24,70 @@ def source_evidence(path) -> dict:
             "mtime_ns": stat.st_mtime_ns}
 
 
+def retained_source_matches(saved, current) -> bool:
+    """Compare retained file details across mounts, alongside BOTH saved hashes.
+
+    st_dev identifies a mount, not a physical card: macOS can assign a new
+    number on reinsertion. Keep path, inode, size and timestamp checks. This
+    comparison alone does not establish identity and must never replace hashing.
+    Exact evidence equality is still required before/after each individual read.
+    """
+    keys = {"path", "device", "inode", "size", "mtime_ns"}
+    return (isinstance(saved, dict) and keys <= saved.keys()
+            and keys <= current.keys()
+            and all(saved[key] == current[key] for key in keys - {"device"}))
+
+
+def prepare_remounted_source_retry(folder, device, source_dir, inventory) -> bool:
+    """Allow rechecking ONLY the old mount-number rejection, preserving its hold.
+
+    Metadata preflight permits entering the normal hash-verified retry; it does
+    not resolve anything. The caller may resolve this hold only after every
+    retained file and staged copy passes verification and the session is saved.
+    Unrelated safety findings and malformed reports continue to block retries.
+    """
+    try:
+        require_no_ingest_holds(folder, device=device, checks={"ingest_safety"})
+        return False
+    except IngestSafetyError:
+        report_path = qc_path_for(Path(folder), "qc_report.json")
+        try:
+            report = json.loads(report_path.read_text())
+            holds = [entry for entry in report["current_state"]
+                     if entry.get("check") == "ingest_safety"
+                     and entry.get("_device") == device
+                     and entry.get("severity") == "error"]
+            legacy_suffix = (
+                ". Source evidence is missing or changed. Existing staged bytes were preserved; "
+                "review this acquisition before retrying."
+            )
+            if not holds or not all(
+                entry.get("message", "").startswith("Cannot establish a retained-source retry for ")
+                and entry["message"].endswith(legacy_suffix) for entry in holds
+            ):
+                raise ValueError("Not a remount retry hold")
+            rows = [row for row in inventory if row.get("device_label") == device]
+            remounted = False
+            for row in rows:
+                relative = row.get("source_relpath")
+                if not relative:
+                    raise ValueError("Missing retained source path")
+                current = source_evidence(Path(source_dir) / relative)
+                saved = row.get("source_evidence")
+                if not retained_source_matches(saved, current):
+                    raise ValueError("Retained source details changed")
+                remounted |= saved["device"] != current["device"]
+            if not rows or not remounted:
+                raise ValueError("No remount established")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            # Re-raise the original hold with its useful recovery message.
+            raise IngestSafetyError(
+                f"Unresolved ingest failure; review {report_path} before retrying. "
+                "Reconnect the original card; changed files or other safety findings need review."
+            )
+        return True
+
+
 def hold_ingest(folder, device, message):
     append_qc_report(folder, "ingest_safety", device, "error", message)
     raise IngestSafetyError(message)

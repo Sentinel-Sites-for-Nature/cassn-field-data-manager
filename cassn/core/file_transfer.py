@@ -127,14 +127,18 @@ def hash_file_with_retries(
     *,
     max_attempts: int = 3,
     retry_delay: float = 0.5,
+    progress=None,
 ) -> FileHashes:
     """Hash ``path``, retrying transient OS-level read failures."""
     path = Path(path)
     last_error: OSError | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            sha256, sha1 = sha256_sha1(path)
+            sha256, sha1 = (sha256_sha1(path) if progress is None
+                            else sha256_sha1(path, progress=progress))
             return FileHashes(sha256, sha1, attempt)
+        except InterruptedError:
+            raise
         except OSError as exc:
             last_error = exc
             if attempt < max_attempts and retry_delay:

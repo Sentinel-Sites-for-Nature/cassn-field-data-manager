@@ -13,27 +13,40 @@ produces byte-identical hashes to the original code.
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 _CHUNK_SIZE = 65536  # 64 KiB — faster than 4 KiB on large files
 
 
-def hash_file(filepath, algorithms: tuple[str, ...] = ("sha256", "sha1")) -> dict[str, str]:
+def hash_file(filepath, algorithms: tuple[str, ...] = ("sha256", "sha1"), *, progress=None) -> dict[str, str]:
     """Compute one or more digests of a file in a single streaming pass.
 
     Returns ``{algorithm_name: hexdigest}`` for each requested algorithm.
     """
     hashers = {name: hashlib.new(name) for name in algorithms}
+    read_bytes = 0
+    last_update = time.monotonic()
+    if progress is not None:
+        progress(0)
     with open(filepath, "rb") as f:
         for block in iter(lambda: f.read(_CHUNK_SIZE), b""):
             for h in hashers.values():
                 h.update(block)
+            if progress is not None:
+                read_bytes += len(block)
+                now = time.monotonic()
+                if now - last_update >= 0.25:
+                    progress(read_bytes)
+                    last_update = now
+    if progress is not None:
+        progress(read_bytes)
     return {name: h.hexdigest() for name, h in hashers.items()}
 
 
-def sha256_sha1(filepath) -> tuple[str, str]:
+def sha256_sha1(filepath, *, progress=None) -> tuple[str, str]:
     """Return ``(sha256_hex, sha1_hex)`` computed in one read pass."""
-    digests = hash_file(filepath, ("sha256", "sha1"))
+    digests = hash_file(filepath, ("sha256", "sha1"), progress=progress)
     return digests["sha256"], digests["sha1"]
 
 

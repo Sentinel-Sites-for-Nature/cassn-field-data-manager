@@ -217,8 +217,14 @@ def sorted_walk(source_dir):
     disk order — i.e. non-reproducible. Sorting both lists makes the traversal
     deterministic; sorting ``dirs`` in place also steers ``os.walk``'s descent.
     """
-    for root, dirs, files in os.walk(source_dir):
-        dirs.sort()
+    def raise_walk_error(error):
+        raise error
+
+    for root, dirs, files in os.walk(source_dir, onerror=raise_walk_error):
+        # Prune before descent: macOS creates protected metadata directories
+        # such as .Spotlight-V100 and .Trashes on otherwise readable cards.
+        # Keep errors fatal for actual media folders.
+        dirs[:] = sorted(name for name in dirs if not name.startswith((".", "_")))
         files.sort()
         yield root, dirs, files
 
@@ -236,11 +242,11 @@ def count_expected_files(source_dir) -> int:
     """
     return sum(
         1
-        for f in Path(source_dir).rglob("*")
-        if f.is_file()
-        and not f.name.startswith(".")
-        and not f.name.startswith("_")
-        and classify_file(f.name) != "other"
+        for root, _dirs, files in sorted_walk(source_dir)
+        for name in files
+        if not name.startswith((".", "_"))
+        and classify_file(name) != "other"
+        and (Path(root) / name).is_file()
     )
 
 

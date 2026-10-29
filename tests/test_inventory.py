@@ -95,6 +95,43 @@ def test_sorted_walk_orders_dirs_and_files(tmp_path):
     ]
 
 
+def test_sorted_walk_raises_when_card_directory_becomes_unreadable(tmp_path, monkeypatch):
+    folder = tmp_path / "DCIM"
+    folder.mkdir()
+    original_scandir = os.scandir
+
+    def disconnected_scandir(path):
+        if os.fspath(path) == str(folder):
+            raise OSError("SD card disconnected")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", disconnected_scandir)
+    with pytest.raises(OSError, match="SD card disconnected"):
+        list(sorted_walk(tmp_path))
+    with pytest.raises(OSError, match="SD card disconnected"):
+        count_expected_files(tmp_path)
+
+
+def test_card_scans_skip_protected_metadata_folders_before_opening(tmp_path, monkeypatch):
+    protected = {".Spotlight-V100", ".Trashes", ".fseventsd", "_metadata"}
+    for name in protected:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "hidden.wav").write_bytes(b"metadata")
+    (tmp_path / "recordings").mkdir()
+    (tmp_path / "recordings" / "one.wav").write_bytes(b"audio")
+    original_scandir = os.scandir
+
+    def guarded_scandir(path):
+        if os.path.basename(os.fspath(path)) in protected:
+            raise PermissionError(1, "Operation not permitted", os.fspath(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+    walked = list(sorted_walk(tmp_path))
+    assert [os.path.basename(root) for root, _dirs, _files in walked] == [tmp_path.name, "recordings"]
+    assert count_expected_files(tmp_path) == 1
+
+
 def test_count_expected_files_matches_classifier(tmp_path):
     (tmp_path / "RCNX0001.JPG").write_bytes(b"x")   # image -> counted
     (tmp_path / "RCNX0002.TIF").write_bytes(b"x")   # image (classifier keeps .tif) -> counted

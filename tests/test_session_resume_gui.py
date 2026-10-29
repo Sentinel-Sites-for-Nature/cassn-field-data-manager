@@ -34,6 +34,20 @@ def windows(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_resume_progress_shows_active_verification_then_returns_to_copying(windows, tmp_path):
+    window = windows()
+    window._create_card_panel("p1_BT", tmp_path)
+    panel = window.card_ingest_panels["p1_BT"]
+    window._on_card_progress("p1_BT", 21, 100, "Checking saved card file 1/21: recording.WAV\n64 / 3721 MB read")
+    assert panel["progress"].minimum() == panel["progress"].maximum() == 0
+    assert "Checking saved files" in panel["status"].text()
+    assert "64 / 3721 MB read" in panel["detail"].text()
+    window._on_card_progress("p1_BT", 22, 100, "next.WAV")
+    assert panel["progress"].maximum() == 100
+    assert panel["progress"].value() == 22
+    assert panel["status"].text() == "Copying and verifying…"
+
+
 def saved_work(window):
     window.validate_and_next()
     labels = [device[3] for device in window.devices]

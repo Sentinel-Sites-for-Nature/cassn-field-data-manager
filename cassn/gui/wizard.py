@@ -124,6 +124,7 @@ from cassn.core.image_metadata import (
 from cassn.core.classification import classify_file, file_size_floor_for, format_size_floor
 from cassn.core.ingest_safety import (
     hold_ingest, source_evidence, require_no_ingest_holds,
+    retained_source_matches, prepare_remounted_source_retry,
 )
 from cassn.core.file_transfer import (
     FileTransferError,
@@ -2111,6 +2112,13 @@ class FieldDataWizard(QMainWindow):
         panel = self.card_ingest_panels.get(device_label)
         if not panel:
             return
+        if filename.startswith("Checking saved "):
+            if item:
+                item.setText(2, "Checking saved files")
+            panel["progress"].setRange(0, 0)
+            panel["status"].setText("Checking saved files before resuming…")
+            panel["detail"].setText(filename)
+            return
         if expected > 0:
             panel["progress"].setRange(0, expected)
             panel["progress"].setValue(min(copied, expected))
@@ -2359,8 +2367,11 @@ class FieldDataWizard(QMainWindow):
         hash_mismatch_names: list[str] = []
         duplicate_names: list[str] = []
 
-        require_no_ingest_holds(self.current_deployment_folder, device=device_label,
-                                checks={"ingest_safety"})
+        recovering_remount = prepare_remounted_source_retry(
+            self.current_deployment_folder, device_label, source_dir, self.file_inventory
+        )
+        if recovering_remount:
+            self.log("  Reconnected card: rechecking saved files before clearing the previous retry error.")
         unknown = reconcile_device_dir(dest_dir, self.file_inventory, device_label)
         if unknown:
             hold_ingest(self.current_deployment_folder, device_label,
@@ -2374,6 +2385,8 @@ class FieldDataWizard(QMainWindow):
         inventoried_sources = inventory_by_source_relpath(
             self.file_inventory, device_label
         )
+        retained_sources = set(inventoried_sources)
+        verified_sources = set()
         inventoried_storage = index_inventory_by_storage_relpath(self.file_inventory)
         file_sequence = next_plain_file_sequence(self.file_inventory, device_label)
 
@@ -2458,9 +2471,21 @@ class FieldDataWizard(QMainWindow):
                 evidence = source_evidence(source_path)
                 prior_entry = inventoried_sources.get(source_relpath)
                 if prior_entry is not None:
-                    incoming = hash_file_with_retries(source_path)
+                    def checking_progress(phase):
+                        def update(read_bytes):
+                            if self._ingest_cancelled():
+                                raise InterruptedError("Card ingest cancelled")
+                            self._ingest_progress(
+                                files_copied,
+                                f"Checking saved {phase} {len(verified_sources) + 1}/{len(retained_sources)}: "
+                                f"{filename}\n{read_bytes / (1024 * 1024):,.1f} / "
+                                f"{evidence['size'] / (1024 * 1024):,.1f} MB read",
+                            )
+                        return update
+
+                    incoming = hash_file_with_retries(source_path, progress=checking_progress("card file"))
                     if (prior_entry.get("deployment_id") != deployment_id
-                            or prior_entry.get("source_evidence") != evidence
+                            or not retained_source_matches(prior_entry.get("source_evidence"), evidence)
                             or source_evidence(source_path) != evidence
                             or incoming.sha256 != prior_entry.get("file_hash_sha256")
                             or incoming.sha1 != prior_entry.get("file_hash_sha1")):
@@ -2485,7 +2510,7 @@ class FieldDataWizard(QMainWindow):
                         and (not expected_size or prior_dest.stat().st_size == expected_size)
                     )
                     if staged_is_complete:
-                        staged_hashes = hash_file_with_retries(prior_dest)
+                        staged_hashes = hash_file_with_retries(prior_dest, progress=checking_progress("local copy"))
                         if (staged_hashes.sha256 != incoming.sha256
                                 or staged_hashes.sha1 != incoming.sha1):
                             hold_ingest(self.current_deployment_folder, device_label,
@@ -2504,6 +2529,7 @@ class FieldDataWizard(QMainWindow):
                                 raise OSError(
                                     "Could not persist repaired audio metadata"
                                 )
+                        verified_sources.add(source_relpath)
                         continue
 
                     expected_sha256 = str(prior_entry.get("file_hash_sha256", ""))
@@ -2529,6 +2555,7 @@ class FieldDataWizard(QMainWindow):
                         )
                     files_copied += 1
                     self._ingest_progress(files_copied, prior_dest.name)
+                    verified_sources.add(source_relpath)
                     continue
 
                 # For images: read EXIF + Reconyx metadata from source before
@@ -2753,6 +2780,22 @@ class FieldDataWizard(QMainWindow):
                         raise FileTransferError(
                             "Collection stopped because session.json could not be saved"
                         )
+
+        missing_sources = retained_sources - verified_sources
+        if missing_sources:
+            hold_ingest(
+                self.current_deployment_folder, device_label,
+                f"{len(missing_sources)} previously copied source file(s) are missing from the card. "
+                "Reconnect the original card; staged copies were preserved."
+            )
+        if recovering_remount:
+            if not self.save_session():
+                raise OSError("Could not save verified card retry; previous safety hold retained")
+            self._append_ingest_qc(
+                self.current_deployment_folder, "ingest_safety", device_label, "pass",
+                f"Reconnected card verified: {len(verified_sources)} retained source files and staged "
+                "copies passed both saved hashes. Previous mount-number rejection resolved."
+            )
 
         expected_floor = (
             file_size_floor_for("audio", dev_code)

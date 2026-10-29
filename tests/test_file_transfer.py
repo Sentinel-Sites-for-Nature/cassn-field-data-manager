@@ -14,6 +14,35 @@ from cassn.core.file_transfer import (
 from cassn.core.hashing import sha256_sha1
 
 
+def test_hash_progress_reports_bytes_without_changing_hashes(tmp_path, monkeypatch):
+    from cassn.core import hashing
+    source = tmp_path / "recording.wav"
+    source.write_bytes(b"audio" * 100000)
+    expected = sha256_sha1(source)
+    ticks = iter(number * 0.3 for number in range(100))
+    monkeypatch.setattr(hashing.time, "monotonic", lambda: next(ticks))
+    progress = []
+    result = hash_file_with_retries(source, progress=progress.append)
+    assert (result.sha256, result.sha1) == expected
+    assert progress[0] == 0
+    assert progress[-1] == source.stat().st_size
+    assert len(progress) > 2
+
+
+def test_hash_progress_cancellation_stops_without_retry(tmp_path):
+    source = tmp_path / "recording.wav"
+    source.write_bytes(b"audio")
+    calls = []
+
+    def cancel(read_bytes):
+        calls.append(read_bytes)
+        raise InterruptedError("cancelled")
+
+    with pytest.raises(InterruptedError, match="cancelled"):
+        hash_file_with_retries(source, progress=cancel, retry_delay=0)
+    assert calls == [0]
+
+
 def test_verified_copy_commits_matching_bytes(tmp_path):
     source = tmp_path / "source.wav"
     destination = tmp_path / "staged.wav"

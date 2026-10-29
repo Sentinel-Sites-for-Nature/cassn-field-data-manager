@@ -556,6 +556,28 @@ def test_disconnected_source_reports_retryable_explanation(tmp_path, monkeypatch
     assert "completed files have been saved" in results[0]["error"]
 
 
+def test_card_replaced_during_copy_cannot_report_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(card_ingest_thread, "ReconyxExtractor", _DummyReconyx)
+    source = tmp_path / "card"
+    source.mkdir()
+
+    def processor(*_args):
+        source.rename(tmp_path / "removed-card")
+        source.mkdir()
+        return 0, 0, 0
+
+    worker = CardIngestThread(
+        processor=processor, source_dir=source, deployment_folder=tmp_path / "event",
+        plot_num=1, plot_label="Plot 1", device_code="ML", device_label="p1_ML",
+        metadata={}, lookups=object(), inventory=[], hash_registry=IngestHashRegistry(),
+    )
+    results = []
+    worker.completed.connect(lambda _label, result: results.append(result))
+    worker.run()
+    assert results[0]["ok"] is False
+    assert "Source card changed or reconnected" in results[0]["error"]
+
+
 def test_two_device_copy_engines_run_concurrently_without_state_collisions(
     tmp_path, monkeypatch
 ):
@@ -1094,6 +1116,126 @@ def test_resume_requires_source_evidence_and_matching_bytes(tmp_path, monkeypatc
     incoming.write_bytes(b"original")
     with pytest.raises(IngestSafetyError):
         _ingest_camera(context, incoming.parent, _DummyReconyx())
+
+
+@pytest.mark.parametrize("legacy_hold", [False, True])
+@pytest.mark.parametrize("staged_state", ["healthy", "missing", "truncated"])
+def test_reinserted_card_resumes_after_mount_number_changes(
+    tmp_path, monkeypatch, legacy_hold, staged_state
+):
+    import cassn.core.ingest_safety as safety
+    import cassn.gui.wizard as wizard_module
+
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    context._ingest_cancelled = lambda: len(context.file_inventory) >= 2
+    with pytest.raises(InterruptedError):
+        _ingest_camera(context, source, reconyx)
+    before = json.loads(json.dumps(context.file_inventory))
+    staged = context.current_deployment_folder / before[-1]["storage_relpath"]
+    if staged_state == "missing":
+        staged.unlink()
+    elif staged_state == "truncated":
+        staged.write_bytes(b"x")
+
+    if legacy_hold:
+        append_qc_report(
+            context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+            f"Cannot establish a retained-source retry for {source / before[0]['source_relpath']}. "
+            "Source evidence is missing or changed. Existing staged bytes were preserved; "
+            "review this acquisition before retrying."
+        )
+    # Do not remount real media: model macOS assigning a new st_dev while
+    # retaining all on-card file details and bytes.
+    def reconnected(path):
+        evidence = source_evidence(path)
+        evidence["device"] += 100
+        return evidence
+
+    monkeypatch.setattr(wizard_module, "source_evidence", reconnected)
+    monkeypatch.setattr(safety, "source_evidence", reconnected)
+    context._ingest_cancelled = lambda: False
+    assert _ingest_camera(context, source, reconyx) == (
+        4 + (staged_state != "healthy"), 0, 0
+    )
+    assert context.file_inventory[:2] == before
+    assert [row["sequence_event_num"] for row in context.file_inventory] == [1, 1, 1, 2, 2, 2]
+    for row in context.file_inventory:
+        assert (context.current_deployment_folder / row["storage_relpath"]).read_bytes() == (
+            source / row["source_relpath"]
+        ).read_bytes()
+    require_no_ingest_holds(context.current_deployment_folder)
+    assert _ingest_camera(context, source, reconyx) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("problem", ["source_bytes", "staged_bytes", "missing_file", "unrelated_hold", "cancelled", "save_failed"])
+def test_remount_recovery_keeps_hold_until_all_files_verified(tmp_path, monkeypatch, problem):
+    import cassn.core.ingest_safety as safety
+    import cassn.gui.wizard as wizard_module
+
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    row = context.file_inventory[-1]
+    append_qc_report(
+        context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+        f"Cannot establish a retained-source retry for {source / row['source_relpath']}. "
+        "Source evidence is missing or changed. Existing staged bytes were preserved; "
+        "review this acquisition before retrying."
+    )
+
+    def reconnected(path):
+        evidence = source_evidence(path)
+        evidence["device"] += 100
+        return evidence
+
+    monkeypatch.setattr(wizard_module, "source_evidence", reconnected)
+    monkeypatch.setattr(safety, "source_evidence", reconnected)
+    incoming = source / row["source_relpath"]
+    staged = context.current_deployment_folder / row["storage_relpath"]
+    if problem == "source_bytes":
+        import os
+        original_stat = incoming.stat()
+        incoming.write_bytes(b"x" * original_stat.st_size)
+        os.utime(incoming, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    elif problem == "staged_bytes":
+        staged.write_bytes(b"x" * staged.stat().st_size)
+    elif problem == "missing_file":
+        incoming.unlink()
+    elif problem == "unrelated_hold":
+        append_qc_report(context.current_deployment_folder, "ingest_safety", "p1_ML", "error",
+                         "Unrecorded staged files require review")
+    elif problem == "cancelled":
+        context._ingest_cancelled = lambda: True
+    elif problem == "save_failed":
+        context.save_session = lambda: False
+    staged_before = staged.read_bytes()
+    with pytest.raises((IngestSafetyError, InterruptedError, OSError)):
+        _ingest_camera(context, source, reconyx)
+    assert staged.read_bytes() == staged_before
+    with pytest.raises(IngestSafetyError):
+        require_no_ingest_holds(context.current_deployment_folder)
+
+
+def test_retry_cannot_complete_when_retained_source_file_is_missing(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    (source / context.file_inventory[-1]["source_relpath"]).unlink()
+    with pytest.raises(IngestSafetyError, match="previously copied source"):
+        _ingest_camera(context, source, reconyx)
+
+
+def test_resume_reports_card_and_local_verification_progress(tmp_path, monkeypatch):
+    source, reconyx = _burst_card(tmp_path, monkeypatch)
+    context = _ProcessContext(tmp_path / "event", IngestHashRegistry())
+    _ingest_camera(context, source, reconyx)
+    messages = []
+    context._ingest_progress = lambda _count, message: messages.append(message)
+    assert _ingest_camera(context, source, reconyx) == (0, 0, 0)
+    assert messages[0].startswith("Checking saved card file 1/6:")
+    assert "0.0 /" in messages[0]
+    assert any(message.startswith("Checking saved local copy 6/6:") for message in messages)
 
 
 def test_repeated_config_destination_preserves_both_sources_and_staged_copy(tmp_path, monkeypatch):
