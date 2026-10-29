@@ -1278,6 +1278,9 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_status_label = QLabel("")
         upload_layout.addWidget(self.upload_status_label)
+        self.upload_metrics_label = QLabel("")
+        self.upload_metrics_label.setWordWrap(True)
+        upload_layout.addWidget(self.upload_metrics_label)
 
         # Cancel button (shown only while an upload is running)
         self.cancel_upload_btn = QPushButton("Cancel Upload")
@@ -3581,6 +3584,8 @@ class FieldDataWizard(QMainWindow):
             box_config=self.box_config,
             valid_site_names=self._valid_site_names(),
         )
+        self.upload_metrics_label.setText("")
+        self.upload_thread.metrics_updated.connect(self.on_upload_metrics)
         self.upload_thread.progress.connect(self.on_upload_progress)
         self.upload_thread.finished.connect(self.on_upload_finished)
         FieldDataWizard._start_owned_box_worker(self, self.upload_thread)
@@ -3616,6 +3621,24 @@ class FieldDataWizard(QMainWindow):
         percent = int((current / total) * 100)
         self.upload_progress_bar.setValue(percent)
         self.upload_status_label.setText(f"Uploading: {filename} ({current}/{total})")
+
+    def on_upload_metrics(self, values):
+        """Show aggregate rates without flooding the per-file progress label."""
+        if not self._box_callback_is_current('upload_thread'):
+            return
+        stage = values.get('stage', 'preparing')
+        names = {'preparing': 'Preparing folders', 'transferring': 'Transferring files',
+                 'verifying_media': 'Checking uploaded media',
+                 'publishing_metadata': 'Publishing metadata',
+                 'checking_presence': 'Checking uploaded paths',
+                 'complete': 'Transfer and publication complete',
+                 'cancelled': 'Cancelled; files retained', 'failed': 'Stopped; files retained'}
+        state = 'Waiting for Box' if values.get('waiting', 0) else names.get(stage, stage)
+        self.upload_metrics_label.setText(
+            f"{state} · {values.get('acknowledged_MB_per_second', 0):.2f} MB/s acknowledged "
+            f"· {values.get('files_per_second', 0):.2f} files/s "
+            f"· {values.get('status_429', 0)} rate-limit responses"
+        )
 
     def on_upload_finished(self, success, message):
         """Handle upload completion"""

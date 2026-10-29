@@ -522,3 +522,20 @@ def test_incomplete_batch_hash_verification_cannot_publish_metadata(tmp_path, mo
     assert not results[-1][0] and "media verification failed" in results[-1][1]
     assert not any(obj["name"] == "audio_file_metadata.csv" for obj in api.objects.values())
     assert json.loads((folder / "qc/box_publication_state.json").read_text())["status"] == "needs_recovery"
+
+
+def test_pending_chunks_block_provenance_publication_before_box_writes(tmp_path,monkeypatch):
+    from cassn.box import threads
+    from cassn.box.upload_state import atomic_json
+    api=FakeBox()
+    csv=tmp_path/'audio_file_metadata.csv'
+    csv.write_bytes(payload([row('new.wav')]))
+    atomic_json(tmp_path/'qc/box_upload_sessions/pending.json',
+                {'version':1,'state':'committing','session_id':'s1'})
+    monkeypatch.setattr(threads,'get_box_client',lambda config:api)
+    worker=threads.ProvenanceUploadThread([csv],'event',box_config=NS(field_data_folder_id='root'))
+    results=[]
+    worker.finished.connect(lambda *args:results.append(args))
+    worker.run()
+    assert not results[-1][0] and 'recovery record' in results[-1][1]
+    assert not api.calls

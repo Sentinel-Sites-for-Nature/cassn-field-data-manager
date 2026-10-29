@@ -325,6 +325,20 @@ Verification distinguishes this batch from recorded earlier files. Cleanup
 checks that accumulated Box metadata covers the local batch; it still requires
 successful publication, passing verification and the existing deletion guards.
 
+Uploads use eight shared network connections, with two parallel parts per large
+file and at most 32 queued or running file jobs. The progress line shows the
+stage, acknowledged MB/s, new files/s and rate-limit responses. These are averages
+over the operation, including waiting; an acknowledged part is not a completed
+file. Live speed improvements have not yet been measured.
+
+After cancellation or a connection failure, rerun the normal upload to reconcile
+saved parts and pending commits. Keep the source and `qc/box_upload_sessions/`
+unchanged. These local recovery records are excluded from uploads; pending or
+unreadable records block publication and staging cleanup. Changed sources,
+expired sessions without a verified final file, or uncertain session creation
+stop for review. Do not delete a record to bypass that hold. Cancellation stops
+new work and waits; requests already in progress can finish or time out.
+
 Readiness requires saved, successful checks for the **current batch**, not just
 an upload manifest, an earlier QC pass, or a check that finished with errors.
 The file-list and hash results in `qc/box_file_list_verification.json` and

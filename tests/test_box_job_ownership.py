@@ -15,6 +15,7 @@ class Worker(QObject):
     upload = Signal(bool, str)
     prepared = Signal(bool, bool, str)
     progress = Signal(int, int, str)
+    metrics_updated = Signal(dict)
 
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -36,7 +37,7 @@ class Harness(QObject):
     # QObject-bound slots preserve the same dispatch and sender semantics as the GUI.
     for name in (
         '_box_callback_is_current', '_on_wi_split_progress', '_on_wi_split_completed',
-        'on_upload_progress', 'on_upload_finished', '_write_upload_provenance',
+        'on_upload_progress', 'on_upload_metrics', 'on_upload_finished', '_write_upload_provenance',
         '_on_provenance_upload_finished', '_start_post_upload_verification',
         '_on_auto_box_verify_finished', '_on_auto_fixity_progress',
         '_on_auto_fixity_finished', '_finish_post_upload_verification',
@@ -67,7 +68,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
-                     'upload_progress_bar', 'upload_status_label', 'hash_group',
+                     'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',
                      '_format_post_upload_issues', 'show_pre_departure_checklist',
@@ -98,6 +99,7 @@ CALLBACKS = [
     ('wi_split_thread', '_on_wi_split_progress', 'progress', (1, 2, 'file')),
     ('wi_split_thread', '_on_wi_split_completed', 'prepared', (True, False, 'prepared')),
     ('upload_thread', 'on_upload_progress', 'progress', (1, 2, 'file')),
+    ('upload_thread', 'on_upload_metrics', 'metrics_updated', ({'stage':'transferring','acknowledged_MB_per_second':2.5},)),
     ('upload_thread', 'on_upload_finished', 'upload', (True, 'uploaded')),
     ('provenance_thread', '_on_provenance_upload_finished', 'upload', (True, 'stamped')),
     ('box_verify_thread', '_on_auto_box_verify_finished', 'result', (True, 'verified', [])),
@@ -131,6 +133,7 @@ def test_queued_stale_callback_has_no_effect(setup, attribute, callback, signal,
     context._start_box_upload_thread.assert_not_called()
     context.hash_progress_bar.setValue.assert_not_called()
     context.upload_progress_bar.setValue.assert_not_called()
+    context.upload_metrics_label.setText.assert_not_called()
     assert context._box_operation_active
     assert not context.fixity_check_run
     assert not context.box_upload_complete
@@ -346,3 +349,18 @@ def test_auto_box_extras_keep_actual_hash_result_without_claiming_completion(set
     assert record['verified'] is False
     assert record['hash_verification']['ok'] is True
     assert not context.box_upload_complete
+
+
+def test_current_upload_metrics_show_waits_and_rates(setup):
+    app,context,qc=setup
+    worker=Worker()
+    context.upload_thread=worker
+    w.FieldDataWizard._start_owned_box_worker(context,worker)
+    worker.metrics_updated.connect(context.on_upload_metrics,Qt.QueuedConnection)
+    worker.metrics_updated.emit({'stage':'transferring','waiting':1,
+                                 'acknowledged_MB_per_second':2.5,'files_per_second':3,
+                                 'status_429':2})
+    app.processEvents()
+    text=context.upload_metrics_label.setText.call_args.args[0]
+    assert 'Waiting for Box' in text and '2.50 MB/s' in text
+    assert '3.00 files/s' in text and '2 rate-limit responses' in text

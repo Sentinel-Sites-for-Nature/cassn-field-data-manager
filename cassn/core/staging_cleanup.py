@@ -22,6 +22,7 @@ from pathlib import Path
 
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
+from cassn.box.upload_state import require_uploads_complete
 from cassn.box.publication import STATE_PATH, batch_remote_path, require_publication_complete
 from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths
 from cassn.box.metadata_merge import CSV_NAMES, merge_csv, merge_event, read_csv, read_object
@@ -298,6 +299,7 @@ def inspect_deployment_for_cleanup(
     try:
         require_no_ingest_holds(deployment)
         require_publication_complete(deployment)
+        require_uploads_complete(deployment)
     except ValueError as exc:
         plan.reasons.append(str(exc))
         return plan
