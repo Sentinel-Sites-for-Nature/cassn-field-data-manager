@@ -219,7 +219,13 @@ class ChunkUploader:
             state = dict(version=1, identity=identity, source_stat=before,
                          state='creating', receipts={}, session_id=None)
             atomic_json(journal, state)  # intent before creating the server session
-            session = self.backend.create(parent, size, name)
+            try:
+                session = self.backend.create(parent, size, name)
+            except Exception as exc:
+                if not uncertain_request(exc):
+                    # Refused or never sent (e.g. lost sign-in): no server session exists.
+                    journal.unlink(missing_ok=True)
+                raise
             state.update(state='uploading', session_id=session.id)
             atomic_json(journal, state)
 

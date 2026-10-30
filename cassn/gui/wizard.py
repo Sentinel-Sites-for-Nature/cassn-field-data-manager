@@ -3663,7 +3663,21 @@ class FieldDataWizard(QMainWindow):
             self.fixity_btn.setEnabled(True)
             self.upload_status_label.setText(f"✗ {message}")
             self.upload_status_label.setStyleSheet("color: red; font-weight: bold;")
-            QMessageBox.warning(self, "Upload Failed", message)
+            if getattr(self.upload_thread, "needs_reconnect", False):
+                self.set_box_connection_state(False)
+                self._offer_box_reconnect(message)
+            else:
+                QMessageBox.warning(self, "Upload Failed", message)
+
+    def _offer_box_reconnect(self, message):
+        """Explain the lost sign-in and let the user reconnect and resume in one step."""
+        dialog = QMessageBox(QMessageBox.Warning, "Box Disconnected", message, QMessageBox.NoButton, self)
+        reconnect = dialog.addButton("Connect and Resume Upload", QMessageBox.AcceptRole)
+        dialog.addButton("Close", QMessageBox.RejectRole)
+        dialog.setDefaultButton(reconnect)
+        dialog.exec()
+        if dialog.clickedButton() is reconnect and self.connect_to_box():
+            self.upload_to_box()
 
     def _write_upload_provenance(self):
         """Set is_uploaded_to_box=True + uploader + timestamp in both metadata CSVs,

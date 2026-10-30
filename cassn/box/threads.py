@@ -100,6 +100,26 @@ def _is_already_exists(exc) -> bool:
     return "already exists" in msg or "item with the same name" in msg
 
 
+def _is_sign_in_loss(exc) -> bool:
+    """True when a Box upload failed because the hosted sign-in ended.
+
+    The hosted auth layer raises ``HostedError('reconnect')`` (or ``'denied'``)
+    from inside the SDK request path, and the transfer layers may wrap it, so
+    the exception chain is walked. Every later file would fail the same way,
+    so the caller stops the batch instead of listing thousands of failures.
+    """
+    from cassn.box.hosted import HostedError
+    seen = 0
+    while exc is not None and seen < 8:
+        if isinstance(exc, HostedError) and exc.kind in ("reconnect", "denied"):
+            return True
+        if "needs a new sign-in" in str(exc):
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
+
+
 class BoxUploadThread(QThread):
     """Background thread for uploading a deployment folder to Box."""
 
@@ -131,6 +151,7 @@ class BoxUploadThread(QThread):
         # Cooperative cancellation flag — set from the GUI thread via cancel()
         self._cancel_event = threading.Event()
         self._state_lock = threading.Lock()  # protects shared upload counters
+        self.needs_reconnect = False  # set when the Box sign-in ended mid-upload
         self.upload_workers = upload_workers
         self.upload_runtime = UploadRuntime(cancel=self._cancel_event, transfers=upload_workers,
                                             part_workers=part_workers)
@@ -294,6 +315,10 @@ class BoxUploadThread(QThread):
                     if _is_already_exists(exc) and "raw_data" in rel_path.parts:
                         metrics.add(skipped_files=1)
                         return ("ok", rel_path.as_posix(), f"skipped: {rel_path}")
+                    if _is_sign_in_loss(exc):
+                        # One lost sign-in fails every later file; stop scheduling.
+                        self.needs_reconnect = True
+                        self._cancel_event.set()
                     metrics.add(failed_files=1)
                     return ("fail", rel_path.as_posix(), str(exc)[:200])
 
@@ -325,6 +350,28 @@ class BoxUploadThread(QThread):
                         failed_uploads.append((rel_path, payload or ""))
                         completed += 1
                         self.progress.emit(completed, total_files, f"failed: {rel_path}")
+
+            if self.needs_reconnect:
+                landed = completed - len(failed_uploads)
+                remaining = total_files - landed
+                publication.fail("Box sign-in ended before metadata publication")
+                append_qc_report(
+                    self.deployment_folder,
+                    "box_upload",
+                    "",
+                    "warning",
+                    f"Box sign-in ended during upload. {landed}/{total_files} on Box, "
+                    f"{remaining} not uploaded. Reconnect and re-run the upload.",
+                )
+                self.finished.emit(
+                    False,
+                    "Box disconnected during the upload. Your Box sign-in ended, so the "
+                    f"upload stopped. {landed} of {total_files} files are on Box; "
+                    f"{remaining} still need to be uploaded. Nothing was lost. "
+                    "Click Connect to Box to sign in again, then run the upload again. "
+                    "Files already on Box will be skipped.",
+                )
+                return
 
             if self._cancel_event.is_set():
                 outcome = 'cancelled'
