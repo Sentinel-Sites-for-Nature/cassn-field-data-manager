@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "CA-SSN Field Data Manager"
+abstract: "Desktop application for the California Sentinel Sites for Nature (CA-SSN) program that ingests camera trap and acoustic recorder SD cards, standardizes file naming, extracts per-file metadata with checksums and provenance, runs data quality checks, and prepares data for Box, Wildlife Insights, and Wildlife SoundHub."
+authors:
+  - family-names: Imperato
+    given-names: John T.
+    orcid: "https://orcid.org/0009-0004-7043-8937"
+    affiliation: "University of California, Davis"
+version: "4.0"
+date-released: "2026-11-02"
+license: MIT
+repository-code: "https://github.com/Sentinel-Sites-for-Nature/cassn-field-data-manager"
+keywords:
+  - camera traps
+  - passive acoustic monitoring
+  - biodiversity monitoring
+  - data management
+  - metadata
