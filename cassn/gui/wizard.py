@@ -233,6 +233,7 @@ class FieldDataWizard(QMainWindow):
         self.box_upload_complete = False  # current batch file list and hashes verified
 
         # Load saved config (staging_root lives alongside the Box credentials)
+        self.wi_upload_helper = None
         self.config_file = CONFIG_JSON
         self._card_disk_threads = set()
         self.load_config()
@@ -345,6 +346,12 @@ class FieldDataWizard(QMainWindow):
             if source.exists():
                 with open(source, "r") as f:
                     config = json.load(f)
+                    helper = config.get("wi_upload_helper")
+                    if (self.box_config.profile == "uc" and source == self.config_file
+                            and isinstance(helper, str)
+                            and Path(helper).is_absolute() and Path(helper).is_file()
+                            and os.access(helper, os.X_OK)):
+                        self.wi_upload_helper = helper
                     if "staging_root" in config:
                         self.staging_root = Path(config["staging_root"])
                     if isinstance(config.get("known_staging_roots"), list):
@@ -753,6 +760,8 @@ class FieldDataWizard(QMainWindow):
         if not hasattr(self, "workspace") or not hasattr(self, "device_tree"):
             return
         self._refresh_soundhub_resume()
+        if getattr(self, "wi_control", None):
+            self.wi_control.refresh()
         metadata = self.metadata
         if self.current_deployment_folder:
             site = metadata.get("site_name", "")
@@ -1392,11 +1401,17 @@ class FieldDataWizard(QMainWindow):
             # The existing SoundHub staging configuration belongs to UC.
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
+        wi_actions = []
+        if self.wi_upload_helper:
+            from cassn.gui.wi_upload import WildlifeInsightsControl
+            self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
+            wi_actions.append(self.wi_control.action)
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._menu_button("Prepare && Upload ▾", [
             self.upload_now_btn,
             None,
             self.soundhub_stage_btn,
+            *wi_actions,
         ]))
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
             self.box_verify_btn,
@@ -4934,6 +4949,8 @@ class FieldDataWizard(QMainWindow):
                 self.log(f"Session summary written to: {summary_path.name}")
             except Exception:
                 pass
+        if getattr(self, "wi_control", None):
+            self.wi_control.close()
         event.accept()
 
     def start_new_deployment(self):
