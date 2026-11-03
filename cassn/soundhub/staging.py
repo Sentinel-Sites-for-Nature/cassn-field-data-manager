@@ -13,13 +13,14 @@ project-level CSVs are rebuilt from — lives beside the project directory under
 ``.cassn_fragments/``, never inside it. That keeps the project directory an
 exact mirror of the bucket prefix.
 
-Source WAVs are never modified. Conversion is idempotent: an existing FLAC whose
-recorded size matches the manifest is left alone, so an interrupted run is
-finished by re-running it.
+Source WAVs are never modified. Unfinished conversions stay in .cassn_work,
+outside the project mirror. Re-running reuses completed FLACs there.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -44,7 +45,7 @@ _DEPLOYMENT_ID_RE = re.compile(
 
 
 class SoundHubStagingError(Exception):
-    """A staging precondition failed. Raised before any file is written."""
+    """Staging needs user attention before it can continue."""
 
 
 def flac_executable() -> str | None:
@@ -71,6 +72,102 @@ def project_root(staging_root) -> Path:
 def fragments_root(staging_root) -> Path:
     """Per-deployment CSV fragments, deliberately outside the project mirror."""
     return Path(staging_root) / ".cassn_fragments"
+
+
+def work_root(staging_root) -> Path:
+    """Completed recordings from unfinished events, outside the upload tree."""
+    return Path(staging_root) / ".cassn_work"
+
+
+def staging_progress(deployment_folder, staging_root) -> tuple[int, int] | None:
+    """Count resumable recordings without reading the audio or contacting Box."""
+    from cassn.soundhub.export import read_bd_audio_rows
+
+    work = work_root(staging_root)
+    if not work.is_dir():
+        return None
+    try:
+        rows = read_bd_audio_rows(deployment_folder)
+    except FileNotFoundError:
+        return None
+    pending = work / "pending.json"
+    pending_ids = set()
+    if pending.exists():
+        pending_ids = {
+            row["deployment_id"] for row in json.loads(pending.read_text())["audio_rows"]
+        }
+    if not any((work / row["deployment_id"]).is_dir()
+               or row["deployment_id"] in pending_ids for row in rows):
+        return None
+    completed = sum(
+        any((base / row["deployment_id"] / (Path(row["filename"]).stem + ".flac")).is_file()
+            for base in (work, project_root(staging_root)))
+        for row in rows
+    )
+    return completed, len(rows)
+
+
+def recover_staging(staging_root) -> dict | None:
+    """Finish a recorded folder promotion and CSV rebuild, always going forward.
+
+    Both normal completion and crash recovery use this sequence. A recorder
+    folder moves in one rename. A previous version is retained until the new
+    batch validates, allowing an existing deployment to be refreshed too.
+    """
+    from cassn.soundhub.export import (
+        refresh_project_csvs, validate_staging_manifests, write_deployment_fragments,
+    )
+
+    work = work_root(staging_root)
+    marker = work / "pending.json"
+    if not marker.exists():
+        return None
+    try:
+        if work.is_symlink() or marker.is_symlink() or project_root(staging_root).is_symlink():
+            raise ValueError("staging recovery paths must not be symlinks")
+        rows = json.loads(marker.read_text(encoding="utf-8"))["audio_rows"]
+        groups: dict[str, list[dict]] = {}
+        for row in rows:
+            groups.setdefault(row["deployment_id"], []).append(row)
+        if not groups:
+            raise ValueError("empty recording list")
+        for group in groups.values():
+            deployment_id = validate_deployment_id(group)
+            if Path(deployment_id).name != deployment_id:
+                raise ValueError("invalid deployment folder")
+        root = project_root(staging_root)
+        root.mkdir(parents=True, exist_ok=True)
+        for deployment_id, group in groups.items():
+            source = work / deployment_id
+            destination = root / deployment_id
+            previous = work / (deployment_id + ".previous")
+            media = source if source.exists() else destination
+            expected = {Path(row["filename"]).stem + ".flac" for row in group}
+            if media.is_symlink() or not media.is_dir():
+                raise ValueError(f"completed recorder folder is missing or unsafe: {media}")
+            if {path.name for path in media.iterdir() if not path.name.startswith(".")} != expected:
+                raise ValueError(f"completed recordings differ from the inventory: {media}")
+            if any(path.is_symlink() or not path.is_file() for path in media.iterdir()):
+                raise ValueError(f"unsafe recording in {media}")
+            if source.exists():
+                if destination.exists():
+                    if destination.is_symlink() or previous.exists():
+                        raise ValueError(f"cannot replace recorder folder: {destination}")
+                    destination.rename(previous)
+                source.rename(destination)
+        write_deployment_fragments(staging_root, rows)
+        csvs = refresh_project_csvs(staging_root)
+        validation = validate_staging_manifests(staging_root)
+        for deployment_id in groups:
+            previous = work / (deployment_id + ".previous")
+            if previous.exists():
+                shutil.rmtree(previous)
+        marker.unlink()
+        return {"csvs": csvs, "validation": validation}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SoundHubStagingError(
+            f"Could not finish SoundHub staging. Retry after correcting this error: {exc}"
+        ) from exc
 
 
 def validate_deployment_id(rows: list[dict]) -> str:
@@ -246,11 +343,10 @@ def convert_wav_to_flac(src: Path, dst: Path, *, level: int = FLAC_COMPRESSION_L
     # Dot-prefixed so a leftover from an interrupted run can never be staged.
     repaired = dst.parent / f".{src.name}.padded"
     encode_src = src
-    if _wav_missing_final_pad(src):
-        _padded_copy(src, repaired)
-        encode_src = repaired
-
     try:
+        if _wav_missing_final_pad(src):
+            _padded_copy(src, repaired)
+            encode_src = repaired
         result = subprocess.run(
             [
                 encoder,
@@ -298,6 +394,7 @@ def stage_deployment(
     SHA-256, and counts of converted/skipped files.
     """
     deployment_folder = Path(deployment_folder)
+    recover_staging(staging_root)
     if not flac_available():
         raise SoundHubStagingError(
             "The 'flac' encoder is not installed. Install it with: brew install flac"
@@ -312,9 +409,35 @@ def stage_deployment(
     # Validate every group before converting anything, so a bad id in the last
     # plot cannot leave the first plot's FLACs half-written.
     deployment_ids = {key: validate_deployment_id(rows) for key, rows in groups.items()}
+    if any(Path(value).name != value for value in deployment_ids.values()):
+        raise SoundHubStagingError("Invalid SoundHub deployment folder name.")
+
+    from cassn.soundhub.export import build_recording_rows, write_deployment_copy
+
+    build_recording_rows(audio_rows)
 
     # Scan the device folders once up front rather than searching per file.
     wav_index = _index_source_wavs(deployment_folder)
+
+    # FLAC size varies with the signal. Use WAV size as the output estimate,
+    # plus one WAV and one FLAC for the largest remaining conversion.
+    remaining_sizes = []
+    for key, rows in groups.items():
+        for row in rows:
+            name = Path(row["filename"]).stem + ".flac"
+            if not any((base / deployment_ids[key] / name).is_file()
+                       for base in (work_root(staging_root), project_root(staging_root))):
+                remaining_sizes.append(_source_wav(deployment_folder, row, wav_index).stat().st_size)
+    work_root(staging_root).mkdir(parents=True, exist_ok=True)
+    required = sum(remaining_sizes) + 2 * max(remaining_sizes, default=0)
+    available = shutil.disk_usage(work_root(staging_root)).free
+    if available < required:
+        raise SoundHubStagingError(
+            f"Not enough disk space for SoundHub staging. Estimated free space needed "
+            f"is {required / 1e9:.2f} GB, including temporary files. "
+            f"Available space is {available / 1e9:.2f} GB. "
+            "Free disk space, then choose Continue SoundHub Staging."
+        )
 
     staged: list[dict] = []
     converted = skipped = 0
@@ -323,7 +446,7 @@ def stage_deployment(
 
     for key, rows in groups.items():
         deployment_id = deployment_ids[key]
-        out_dir = project_root(staging_root) / deployment_id
+        out_dir = work_root(staging_root) / deployment_id
         out_dir.mkdir(parents=True, exist_ok=True)
 
         for row in rows:
@@ -344,11 +467,41 @@ def stage_deployment(
             if progress is not None:
                 progress(index, total, src.name)
 
-            if dst.exists():
+            reused = dst.exists()
+            if reused:
                 skipped += 1
             else:
-                convert_wav_to_flac(src, dst)
-                converted += 1
+                existing = project_root(staging_root) / deployment_id / dst.name
+                if existing.is_file():
+                    # Preserve the current upload tree until the replacement
+                    # folder is complete, without copying large recordings.
+                    try:
+                        os.link(existing, dst)
+                    except OSError:
+                        # Some removable disks cannot create hard links.
+                        # Copy to a temporary name so a full disk is retryable.
+                        partial = dst.with_suffix(".flac.partial")
+                        shutil.copyfile(existing, partial)
+                        partial.replace(dst)
+                    reused = True
+                    skipped += 1
+                else:
+                    convert_wav_to_flac(src, dst)
+                    converted += 1
+
+            if dst.is_symlink() or not dst.is_file():
+                raise SoundHubStagingError(f"Unsafe staged recording: {dst}")
+            if reused:
+                check = subprocess.run(
+                    [flac_executable(), "--test", "--silent", str(dst)],
+                    capture_output=True, text=True,
+                )
+                if check.returncode != 0:
+                    raise SoundHubStagingError(
+                        f"Completed FLAC failed its integrity check: {dst.name}: {check.stderr.strip()}"
+                    )
+            dst.with_suffix(".flac.partial").unlink(missing_ok=True)
+            (out_dir / f".{src.name}.padded").unlink(missing_ok=True)
 
             staged.append(
                 {
@@ -360,6 +513,15 @@ def stage_deployment(
                 }
             )
 
+    write_deployment_copy(deployment_folder, audio_rows)
+    marker = work_root(staging_root) / "pending.json"
+    temporary = marker.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump({"audio_rows": audio_rows}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(marker)
+    completion = recover_staging(staging_root)
     return {
         "deployment_ids": sorted(deployment_ids.values()),
         "cancelled": False,
@@ -367,4 +529,5 @@ def stage_deployment(
         "skipped": skipped,
         "staged": staged,
         "staging_dir": project_root(staging_root),
+        **completion,
     }

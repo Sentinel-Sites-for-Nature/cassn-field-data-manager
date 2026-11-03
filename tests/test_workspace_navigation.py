@@ -351,3 +351,33 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     validate.assert_not_called()
     check_box.assert_not_called()
     window.soundhub_stage_thread = None
+
+
+def test_soundhub_continue_action_restores_saved_counts(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+    from cassn.soundhub.staging import work_root
+
+    _app, window = workspace_window
+    event = tmp_path / "event"
+    event.mkdir()
+    deployment_id = "UC_RanchoMarino_plot2_BD_20260803"
+    (event / "audio_file_metadata.csv").write_text(
+        "filename,deployment_id,device_type,file_type\n"
+        f"{deployment_id}_00001.wav,{deployment_id},BD,audio\n"
+        f"{deployment_id}_00002.wav,{deployment_id},BD,audio\n"
+    )
+    staging = tmp_path / "soundhub"
+    folder = work_root(staging) / deployment_id
+    folder.mkdir(parents=True)
+    (folder / f"{deployment_id}_00001.flac").write_bytes(b"completed")
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: staging)
+    window.current_deployment_folder = event
+    window._refresh_workspace_context()
+    assert window.soundhub_stage_btn.text() == "Continue SoundHub Staging…"
+    assert "1 completed, 1 remaining" in window.soundhub_status_label.text()
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    question = MagicMock(return_value=wizard.QMessageBox.No)
+    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+    window.stage_for_soundhub()
+    assert question.call_args.args[1] == "Continue SoundHub Staging"
+    assert "1 completed, 1 remaining" in question.call_args.args[2]

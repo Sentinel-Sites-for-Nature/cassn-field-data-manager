@@ -67,6 +67,45 @@ def test_new_window_action_creates_independent_lookup_state(manager):
     assert second.workspace.zoom == 100
 
 
+def test_new_window_offers_saved_deployments_without_resetting_active_window(manager, monkeypatch):
+    first = manager.new_window(open_sessions=False)
+    first.metadata["observer"] = "Existing window"
+    first._box_operation_active = True
+    sessions = [{"status": "ok", "data": {"deployment_folder": "/saved/deployment"}}]
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: sessions)
+    offered = []
+    monkeypatch.setattr(
+        FieldDataWizard, "offer_resume_session",
+        lambda self, found: offered.append((self, found)),
+    )
+
+    first.new_window_action.trigger()
+    QApplication.instance().processEvents()
+
+    second = manager.windows[1]
+    assert offered == [(second, sessions)]
+    assert first.metadata["observer"] == "Existing window"
+    assert first._box_operation_active
+    assert second.current_deployment_folder is None
+
+
+def test_ejection_reserves_every_volume_against_other_windows(manager, tmp_path):
+    first, second = manager.new_window(), manager.new_window()
+    volumes = {tmp_path / "card-one", tmp_path / "card-two"}
+    for volume in volumes:
+        volume.mkdir()
+    lease = first._card_eject_lease_factory()(volumes)
+    try:
+        for volume in volumes:
+            assert not second._claim_card_source(volume, "other")
+    finally:
+        lease.release()
+    volume = next(iter(volumes))
+    assert second._claim_card_source(volume, "other")
+    with pytest.raises(RuntimeError, match="Another window"):
+        first._card_eject_lease_factory()(volumes)
+
+
 def test_duplicate_deployment_blocked_before_create_or_restore(manager, tmp_path, monkeypatch):
     first, second = manager.new_window(), manager.new_window()
     first.staging_root = second.staging_root = tmp_path / "staging"

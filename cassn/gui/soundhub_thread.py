@@ -11,10 +11,7 @@ from cassn.soundhub.export import (
     build_recording_rows,
     enrich_audio_rows,
     read_bd_audio_rows,
-    refresh_project_csvs,
     validate_staging_manifests,
-    write_deployment_copy,
-    write_deployment_fragments,
 )
 from cassn.soundhub.lifecycle import (
     plan_completed_batch_cleanup,
@@ -24,6 +21,7 @@ from cassn.soundhub.staging import (
     SoundHubStagingError,
     fragments_root,
     project_root,
+    recover_staging,
     stage_deployment,
 )
 from cassn.soundhub.provenance import DEFAULT_SUBMITTER
@@ -57,6 +55,7 @@ class SoundHubStageThread(QThread):
 
     def _check_existing_batch(self):
         """Keep slow filesystem and Box checks off the GUI thread, before writes."""
+        recover_staging(self.staging_root)
         root = project_root(self.staging_root)
         fragments = fragments_root(self.staging_root)
         has_fragments = fragments.is_dir() and any(
@@ -142,14 +141,7 @@ class SoundHubStageThread(QThread):
                 )
                 return
 
-            # CSVs are written only once every FLAC exists, so a partial staging
-            # tree can never be described by a complete manifest.
-            write_deployment_fragments(self.staging_root, audio_rows)
-            write_deployment_copy(self.deployment_folder, audio_rows)
-            csvs = refresh_project_csvs(self.staging_root)
-            validation = validate_staging_manifests(self.staging_root)
-            result["csvs"] = csvs
-            result["validation"] = validation
+            csvs = result["csvs"]
 
             self.completed.emit(
                 True, False,

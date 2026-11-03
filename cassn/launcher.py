@@ -28,7 +28,7 @@ class OrganizationDialog(QDialog):
         layout.setContentsMargins(32, 32, 32, 24)
         layout.setSpacing(16)
         self.photo_banner = WelcomePhotoBanner(self)
-        layout.addWidget(self.photo_banner)
+        layout.addWidget(self.photo_banner, 1)
         brand = QFrame()
         brand.setObjectName("welcomeBrand")
         brand_row = QHBoxLayout(brand)

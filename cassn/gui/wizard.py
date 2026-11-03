@@ -70,6 +70,7 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
+from cassn.gui.card_eject import CardDiskThread, card_attachment, identify_card, eject_card
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
 from cassn.gui.workspace import (
     ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
@@ -80,7 +81,7 @@ from cassn.soundhub.export import (
     read_bd_audio_rows,
     write_deployment_copy,
 )
-from cassn.soundhub.staging import flac_available, project_root
+from cassn.soundhub.staging import flac_available, project_root, staging_progress
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -233,6 +234,7 @@ class FieldDataWizard(QMainWindow):
 
         # Load saved config (staging_root lives alongside the Box credentials)
         self.config_file = CONFIG_JSON
+        self._card_disk_threads = set()
         self.load_config()
 
         # Check Box authentication
@@ -750,6 +752,7 @@ class FieldDataWizard(QMainWindow):
     def _refresh_workspace_context(self, *_args) -> None:
         if not hasattr(self, "workspace") or not hasattr(self, "device_tree"):
             return
+        self._refresh_soundhub_resume()
         metadata = self.metadata
         if self.current_deployment_folder:
             site = metadata.get("site_name", "")
@@ -1821,7 +1824,7 @@ class FieldDataWizard(QMainWindow):
         if len(self.card_ingest_panels) < 4:
             return
         for label, panel in list(self.card_ingest_panels.items()):
-            if label in self.card_ingest_threads or not panel.get("complete"):
+            if label in self.card_ingest_threads or not panel.get("complete") or panel.get("ejecting"):
                 continue
             self._remove_card_panel(label)
             return
@@ -1838,7 +1841,7 @@ class FieldDataWizard(QMainWindow):
     def _remove_ejected_completed_card_panels(self) -> None:
         """Dismiss finished panels after ejection, even if a mount folder remains."""
         for device_label, panel in list(self.card_ingest_panels.items()):
-            if device_label in self.card_ingest_threads or not panel.get("finished"):
+            if device_label in self.card_ingest_threads or not panel.get("finished") or panel.get("ejecting"):
                 continue
             source_dir = panel.get("source_dir")
             volume = panel.get("source_volume")
@@ -1905,6 +1908,9 @@ class FieldDataWizard(QMainWindow):
         )
         cancel = QPushButton("Cancel card")
         cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
+        eject = QPushButton("Eject card")
+        eject.hide()
+        eject.clicked.connect(lambda: self._eject_card(device_label))
         for widget in (
             source_label,
             status,
@@ -1917,6 +1923,7 @@ class FieldDataWizard(QMainWindow):
         actions.addWidget(details_toggle)
         actions.addStretch()
         actions.addWidget(cancel)
+        actions.addWidget(eject)
         layout.addLayout(actions)
         layout.addWidget(messages)
 
@@ -1930,6 +1937,7 @@ class FieldDataWizard(QMainWindow):
             "warnings": 0,
             "errors": 0,
             "cancel": cancel,
+            "eject": eject,
             "started": time.monotonic(),
             "source_dir": source_dir,
             "source_volume": source_volume,
@@ -1938,6 +1946,128 @@ class FieldDataWizard(QMainWindow):
             "complete": False,
         }
         self._reflow_card_panels()
+        if source_volume is not None and platform.system() == "Darwin":
+            panel = self.card_ingest_panels[device_label]
+            self._identify_panel_card(device_label, panel)
+
+    def _identify_panel_card(self, label, panel):
+        volume, device = panel["source_volume"], panel["source_volume_device"]
+        original = panel.get("original_attachment")
+        panel["identifying"] = True
+
+        def check():
+            attachment = card_attachment(volume, device)
+            if original is not None and attachment != original:
+                raise ValueError("The original card is no longer connected.")
+            try:
+                return attachment, identify_card(volume, device, attachment), ""
+            except Exception as exc:
+                return attachment, None, str(exc)
+
+        def checked(result, error):
+            if self.card_ingest_panels.get(label) is not panel:
+                return
+            panel["identifying"] = False
+            if not error:
+                panel["original_attachment"], identity, error = result
+            else:
+                identity = None
+            if error:
+                panel["identity_error"] = error
+                panel["messages"].append(f"Card identification failed: {error}")
+                self.log(f"[{label}] Card identification failed: {error}")
+            else:
+                self._card_identified(label, panel, identity, "")
+            self._refresh_card_eject(label, panel)
+
+        self._refresh_card_eject(label, panel)
+        self._run_card_disk_operation(check, checked)
+
+    def _refresh_card_eject(self, label, panel):
+        if not panel["complete"] or panel.get("card_identity"):
+            return
+        if panel.get("identifying"):
+            panel["eject"].setText("Checking card…")
+            panel["eject"].setDisabled(True)
+            panel["eject"].show()
+        elif panel.get("identity_error"):
+            if panel.get("original_attachment") and not panel.get("retried"):
+                panel["retried"] = True
+                self._identify_panel_card(label, panel)
+                return
+            can_retry = bool(panel.get("original_attachment"))
+            panel["eject"].setText("Retry card check" if can_retry else "Use Finder to eject")
+            panel["eject"].setEnabled(can_retry)
+            panel["eject"].setToolTip(panel["identity_error"])
+            panel["eject"].show()
+
+    def _run_card_disk_operation(self, operation, callback):
+        worker = CardDiskThread(operation, self)
+        self._card_disk_threads.add(worker)
+        worker.result_ready.connect(callback)
+        worker.finished.connect(lambda: self._release_card_disk_thread(worker))
+        worker.start()
+
+    def _release_card_disk_thread(self, worker):
+        self._card_disk_threads.discard(worker)
+        worker.deleteLater()
+
+    def _card_identified(self, label, panel, identity, error):
+        if self.card_ingest_panels.get(label) is not panel or error:
+            return
+        panel["eject"].setEnabled(True)
+        panel["card_identity"] = identity
+        panel["eject"].setText(f"Eject {identity.name}")
+        panel["eject"].setToolTip(str(identity.volume))
+        panel["eject"].setVisible(panel["complete"])
+
+    def _card_ejection_active(self):
+        return any(
+            panel.get("ejecting")
+            for window in QApplication.topLevelWidgets()
+            if isinstance(window, FieldDataWizard)
+            for panel in window.card_ingest_panels.values()
+        )
+
+    def _card_eject_lease_factory(self):
+        return None
+
+    def _eject_card(self, label):
+        panel = self.card_ingest_panels.get(label)
+        if (panel and panel["complete"] and not panel.get("card_identity")
+                and panel.get("original_attachment") and not panel.get("identifying")):
+            self._identify_panel_card(label, panel)
+            return
+        if (not panel or not panel["complete"] or not panel.get("card_identity")
+                or self._card_ejection_active()):
+            return
+        active_sources = []
+        for window in QApplication.topLevelWidgets():
+            if isinstance(window, FieldDataWizard):
+                workers = set(window.card_ingest_threads.values()) | window._retiring_card_threads
+                active_sources.extend(worker.source_dir for worker in workers)
+        panel["ejecting"] = True
+        panel["eject"].setEnabled(False)
+        panel["eject"].setText("Ejecting…")
+        lease_factory = self._card_eject_lease_factory()
+        self._run_card_disk_operation(
+            lambda: eject_card(panel["card_identity"], active_sources, lease_factory),
+            lambda result, error: self._card_ejected(label, panel, error),
+        )
+
+    def _card_ejected(self, label, panel, error):
+        panel["ejecting"] = False
+        if self.card_ingest_panels.get(label) is not panel:
+            return
+        if error:
+            panel["eject"].setEnabled(True)
+            panel["eject"].setText(f"Eject {panel['card_identity'].name}")
+            panel["messages"].show()
+            panel["messages"].append(f"Could not eject card: {error}")
+            self.log(f"✗ [{label}] Could not eject card: {error}")
+        else:
+            self._remove_card_panel(label)
+            self.log(f"[{label}] Source card ejected; cleared finished job panel.")
 
     def _reflow_card_panels(self) -> None:
         while self.card_jobs_grid.count():
@@ -1952,6 +2082,9 @@ class FieldDataWizard(QMainWindow):
 
     def copy_sd_card_data(self):
         """Select and start one SD card without blocking other device jobs."""
+        if self._card_ejection_active():
+            QMessageBox.information(self, "Card Ejection Running", "Wait for card ejection to finish before starting another copy.")
+            return
         if self._box_operation_active:
             QMessageBox.information(
                 self, "Box Operation Running",
@@ -1992,7 +2125,7 @@ class FieldDataWizard(QMainWindow):
         if not sd_path:
             return
         # A modal file chooser can run queued callbacks; recheck before starting.
-        if self._box_operation_active:
+        if self._box_operation_active or self._card_ejection_active():
             return
         source_dir = Path(sd_path).resolve()
         if source_dir in self._active_card_sources:
@@ -2240,6 +2373,8 @@ class FieldDataWizard(QMainWindow):
             )
             panel["cancel"].hide()
             panel["complete"] = True
+            panel["eject"].setVisible(bool(panel.get("card_identity")))
+            self._refresh_card_eject(device_label, panel)
         self.log(f"✓ [{device_label}] Complete — {total_for_device:,} files inventoried; card is safe to eject.")
 
         # Global products are rebuilt only at a stable boundary. A newly free
@@ -4329,6 +4464,25 @@ class FieldDataWizard(QMainWindow):
                 return True
         return False
 
+    def _refresh_soundhub_resume(self):
+        if not hasattr(self, "soundhub_stage_btn") or self._soundhub_busy():
+            return
+        self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
+        if not self.current_deployment_folder:
+            return
+        try:
+            counts = staging_progress(self.current_deployment_folder, self._soundhub_staging_root())
+        except (OSError, ValueError, KeyError):
+            return
+        if counts is not None:
+            completed, total = counts
+            self.soundhub_stage_btn.setText("Continue SoundHub Staging…")
+            self.soundhub_group.show()
+            self.soundhub_status_label.setText(
+                f"SoundHub staging can continue. {completed} completed, {total - completed} remaining. "
+                "Choose Prepare & Upload → Continue SoundHub Staging."
+            )
+
     def _set_soundhub_actions_enabled(self, enabled: bool):
         self.soundhub_stage_btn.setEnabled(enabled)
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
@@ -4361,9 +4515,20 @@ class FieldDataWizard(QMainWindow):
 
         existing_deployments = row_count("deployment.csv")
         existing_recordings = row_count("recording.csv")
+        try:
+            counts = staging_progress(self.current_deployment_folder, staging_root)
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Cannot Read SoundHub Progress", str(exc))
+            return
+        resume_message = ""
+        if counts is not None:
+            completed, total = counts
+            resume_message = (
+                f"Continue SoundHub staging? {completed} completed, {total - completed} remaining.\n\n"
+            )
         confirm = QMessageBox.question(
-            self, "Add Bird Audio to SoundHub Staging",
-            "Add or refresh this deployment event in the cumulative SoundHub "
+            self, "Continue SoundHub Staging" if counts is not None else "Add Bird Audio to SoundHub Staging",
+            resume_message + "Add or refresh this deployment event in the cumulative SoundHub "
             "staging batch?\n\n"
             f"Currently staged: {existing_deployments} SoundHub deployment(s), "
             f"{existing_recordings} recording(s)\n"
@@ -4544,9 +4709,11 @@ class FieldDataWizard(QMainWindow):
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
+        self._refresh_soundhub_resume()
         self.log(message)
 
         if success:
+            self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
             self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")
@@ -4557,6 +4724,8 @@ class FieldDataWizard(QMainWindow):
             )
             return
 
+        message += "\nChoose Prepare & Upload → Continue SoundHub Staging to retry."
+        self.soundhub_stage_btn.setText("Continue SoundHub Staging…")
         self.soundhub_status_label.setText(f"{'⚠' if cancelled else '✗'} {message}")
         self.soundhub_status_label.setStyleSheet(
             "color: orange;" if cancelled else "color: red; font-weight: bold;"
@@ -4725,6 +4894,10 @@ class FieldDataWizard(QMainWindow):
 
     def closeEvent(self, event):
         """Override close to show pre-departure checklist and write summary when a session is active."""
+        if self._card_disk_threads:
+            QMessageBox.information(self, "Card Operation Running", "Wait for the card check or ejection to finish before closing.")
+            event.ignore()
+            return
         if self._box_operation_active:
             QMessageBox.information(self, "Box Operation Running", "Cancel the Box operation or wait for verification to finish before closing.")
             event.ignore()
@@ -4765,6 +4938,9 @@ class FieldDataWizard(QMainWindow):
 
     def start_new_deployment(self):
         """Reset for new deployment"""
+        if self._card_disk_threads:
+            QMessageBox.information(self, "Card Operation Running", "Wait for the card check or ejection to finish before starting a new deployment.")
+            return
         if self._box_operation_active:
             QMessageBox.information(self, "Box Operation Running", "Wait for Box upload and verification before starting a new deployment.")
             return

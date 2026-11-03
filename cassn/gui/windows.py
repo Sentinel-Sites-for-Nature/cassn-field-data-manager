@@ -82,7 +82,7 @@ class DeploymentWindows:
         self.windows = []
         self.box_authenticated = None
 
-    def new_window(self, *, open_sessions=False):
+    def new_window(self, *, open_sessions=True):
         window = DeploymentWindow(self)
         window.setAttribute(Qt.WA_DeleteOnClose)
         window.closed.connect(self._forget_window)
@@ -294,6 +294,17 @@ class DeploymentWindow(FieldDataWizard):
         self._card_leases[device_label] = (source_dir, lease)
         return True
 
+    def _card_eject_lease_factory(self):
+        directory = self.manager.lock_directory
+
+        def reserve(mounts):
+            try:
+                return ResourceLease(directory, [f"source-card:{mount.resolve()}" for mount in mounts])
+            except ResourceBusy as exc:
+                raise RuntimeError("Another window still uses this card. Wait for it to finish.") from exc
+
+        return reserve
+
     def copy_sd_card_data(self):
         if self._cloud_lease or self._staging_lease:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s cloud operation to finish before copying cards.")
@@ -325,7 +336,7 @@ class DeploymentWindow(FieldDataWizard):
 
     def _work_running(self):
         return bool(
-            self.card_ingest_threads or self._retiring_card_threads
+            self.card_ingest_threads or self._retiring_card_threads or self._card_disk_threads
             or self._box_operation_active or self._soundhub_pending or self._starting_cloud
             or self._staging_pending
             or self._workers_running() or self._callback_depth

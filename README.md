@@ -370,6 +370,10 @@ Choose a site and curated deployment event to populate deployment metadata, sele
 #### Card ingest
 Monitor device status and individual card jobs while files are copied, renamed, and verified; adjust simultaneous cards and expand activity details as needed.
 
+On macOS, a completed card job shows **Eject <card name>** when it is safe to eject.
+The app checks the original card and waits for any other job using that card to finish.
+Successful ejection clears the finished panel. If ejection fails, the panel shows the error and allows another attempt.
+
 ![Card ingest showing completed and active card jobs, concurrency controls, and activity details](screenshots/02-data-collection.png)
 
 #### Review & upload
@@ -541,9 +545,18 @@ landing-zone checks are available through the maintenance CLI below.
    `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
    local staging batch. Existing staged events remain, the two project CSVs are
    rebuilt, and nothing is uploaded. Source WAVs are never touched. Progress is
-   per-file and the job is cancellable; completed files are kept, so re-running
-   resumes. A copy of both CSVs is also written to the event's `soundhub/`
+   per-file and the job is cancellable. A copy of both CSVs is also written to the event's `soundhub/`
    subfolder so the metadata travels to Box alongside the raw data.
+
+After cancellation or failure, reopen the event and choose
+**Prepare & Upload → Continue SoundHub Staging…**. The app shows completed and remaining recording counts.
+It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
+Staging checks available disk space before conversion, including space for temporary files.
+If disk space runs out, free space and continue the same event.
+The app moves each completed recorder folder with one rename.
+It saves a completion marker before the moves and CSV updates.
+Staging, upload, and cleanup finish any marked operation before checking the batch.
+
 **Deployment → Open SoundHub Staging Folder** opens the local batch in Finder.
 Staging does not initiate an upload. CSU does not expose the UC staging destination.
 

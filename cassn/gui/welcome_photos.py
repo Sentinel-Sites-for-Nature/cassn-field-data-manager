@@ -14,18 +14,27 @@ DEFAULT_PHOTOS = (
     ("47647AF5-90AD-459C-989D-1092C83B1099.JPG", .88, .64, .965),
 )
 
+TILE_GAP = 4
+# The original banner measures 696 by 168 in the 760-pixel-wide dialog.
+REFERENCE_PHOTO_WIDTH = 696 - 2 * TILE_GAP
+REFERENCE_HEIGHT = 168
+
 
 class WelcomePhotoBanner(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(168)
-        self.setMaximumHeight(200)
         self.setAccessibleName("Camera-trap wildlife photographs from the CA-SSN field collection")
         self.photos = [(ARTWORK.parent / "welcome" / name, x, y, height)
                        for name, x, y, height in DEFAULT_PHOTOS]
         self._images = [QPixmap(str(photo[0])) for photo in self.photos]
         self._tile_size = None
         self._tiles = {}
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            photo_width = max(0, event.size().width() - 2 * TILE_GAP)
+            self.setMaximumHeight(round(photo_width * REFERENCE_HEIGHT / REFERENCE_PHOTO_WIDTH))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -34,8 +43,7 @@ class WelcomePhotoBanner(QWidget):
         outline = QPainterPath()
         outline.addRoundedRect(QRectF(self.rect()), 10, 10)
         painter.setClipPath(outline)
-        gap = 4
-        available = self.width() - gap * 2
+        available = self.width() - TILE_GAP * 2
         left = round(available * .28)
         center = available - left * 2
         ratio = self.devicePixelRatioF()
@@ -45,7 +53,7 @@ class WelcomePhotoBanner(QWidget):
             self._tile_size = tile_size
         x = 0
         for photo, image, width in zip(self.photos, self._images, (left, center, left)):
-            if not image.isNull():
+            if width > 0 and not image.isNull():
                 key = (photo[0], width)
                 if key not in self._tiles:
                     _, focal_x, focal_y, usable_height = photo
@@ -60,4 +68,4 @@ class WelcomePhotoBanner(QWidget):
                     tile.setDevicePixelRatio(ratio)
                     self._tiles[key] = tile
                 painter.drawPixmap(x, 0, self._tiles[key])
-            x += width + gap
+            x += width + TILE_GAP

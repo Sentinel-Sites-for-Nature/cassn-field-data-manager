@@ -17,7 +17,9 @@ from pathlib import Path
 
 from cassn.config import SOUNDHUB_PROJECT_SHORT_NAME
 from cassn.soundhub.provenance import ProvenancePlan, plan_submission_provenance
-from cassn.soundhub.staging import fragments_root, project_root
+from cassn.soundhub.staging import (
+    SoundHubStagingError, fragments_root, project_root, recover_staging,
+)
 
 
 REPORT_GLOB = "*_soundhub_submission.md"
@@ -175,7 +177,7 @@ def plan_completed_batch_cleanup(
     *,
     force: bool = False,
 ) -> CompletedBatchPlan:
-    """Inspect local targets; force explicitly bypasses submission verification."""
+    """Finish pending local staging, then inspect targets and submission records."""
     original_root = Path(staging_root).expanduser()
     staging_root = original_root.resolve()
     root, fragments, path_errors = _safe_cleanup_paths(staging_root)
@@ -183,6 +185,11 @@ def plan_completed_batch_cleanup(
     if original_root.is_symlink():
         plan.errors.append(f"refusing to clear a symlinked staging root: {original_root}")
     if plan.errors:
+        return plan
+    try:
+        recover_staging(staging_root)
+    except (SoundHubStagingError, OSError) as exc:
+        plan.errors.append(str(exc))
         return plan
     if not root.is_dir() and not (force and fragments.is_dir()):
         plan.errors.append(f"no SoundHub batch is staged at {root}")

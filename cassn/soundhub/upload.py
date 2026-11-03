@@ -36,7 +36,7 @@ from cassn.config import (
     SOUNDHUB_STAGING_DEFAULT,
     SOUNDHUB_UPLOAD_PREFIX,
 )
-from cassn.soundhub.staging import project_root
+from cassn.soundhub.staging import SoundHubStagingError, project_root, recover_staging
 
 try:
     import boto3
@@ -111,6 +111,10 @@ def staged_objects(
     The key is the file's path relative to the project directory, so the local
     tree *is* the key layout — nothing is assembled from name fragments.
     """
+    try:
+        recover_staging(staging_root)
+    except SoundHubStagingError as exc:
+        raise SoundHubUploadError(str(exc)) from exc
     root = project_root(staging_root)
     if not root.exists():
         raise SoundHubUploadError(f"Nothing staged for SoundHub at {root}")
