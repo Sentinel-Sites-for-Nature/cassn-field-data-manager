@@ -60,6 +60,7 @@ class Harness(QObject):
         self.box_upload_complete = False
         self.fixity_check_run = False
         self.card_ingest_threads = {}
+        self._card_disk_threads = set()
         self._post_upload_box_summary = ''
         self._post_upload_box_issues = []
         for name in ('wi_split_thread', 'upload_thread', 'provenance_thread',

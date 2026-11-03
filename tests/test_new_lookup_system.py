@@ -711,6 +711,7 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
+    monkeypatch.setattr(FieldDataWizard, "_soundhub_staging_root", lambda self: tmp_path / "soundhub")
     monkeypatch.setattr(card_thread_module, "ReconyxExtractor", DummyReconyx)
     monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
 

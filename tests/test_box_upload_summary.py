@@ -66,7 +66,7 @@ def test_box_upload_does_not_start_while_ingest_is_active(tmp_path, monkeypatch)
 
 
 def test_card_ingest_is_blocked_during_entire_box_cycle(monkeypatch):
-    context = SimpleNamespace(_box_operation_active=True)
+    context = SimpleNamespace(_box_operation_active=True, _card_ejection_active=lambda: False)
     message = MagicMock()
     chooser = MagicMock()
     monkeypatch.setattr(wizard_module.QMessageBox, "information", message)
@@ -225,7 +225,7 @@ def test_successful_upload_keeps_deployment_controls_locked():
 
 def test_active_box_operation_prevents_switch_reset_and_close(monkeypatch):
     monkeypatch.setattr(wizard_module.QMessageBox, 'information', MagicMock())
-    context = SimpleNamespace(_box_operation_active=True)
+    context = SimpleNamespace(_box_operation_active=True, _card_disk_threads=set())
     FieldDataWizard.open_different_deployment(context)
     FieldDataWizard.start_new_deployment(context)
     event = MagicMock()
