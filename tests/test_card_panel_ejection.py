@@ -21,6 +21,7 @@ RUN_DISK_OPERATION = w.FieldDataWizard._run_card_disk_operation
 @pytest.fixture
 def window(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(w.FieldDataWizard, "_soundhub_staging_root", lambda self: tmp_path / "soundhub")
     monkeypatch.setattr(w.FieldDataWizard, "load_config", lambda self: None)
     monkeypatch.setattr(w.FieldDataWizard, "check_box_auth", lambda self: True)
     monkeypatch.setattr(w.FieldDataWizard, "find_all_sessions", lambda self: [])
