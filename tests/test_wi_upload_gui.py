@@ -98,6 +98,11 @@ def prepare(window):
                 "storage_relpath": f"raw_data/{label}/{label}_{n+1}/image{n}.jpg",
                 "file_type": "image" if code in {"ML","SA"} else "audio",
             })
+    exports = window.current_deployment_folder / "WI_metadata"
+    exports.mkdir(exist_ok=True)
+    for code, project in (("ML", "2010527"), ("SA", "2010517")):
+        (exports / f"wildlife_insights_{code}_deployments.csv").write_text(
+            f"deployment_id,project_id\nfull-deployment-p1_{code},{project}\n")
     window.save_session()
 
 
@@ -110,7 +115,8 @@ def start(control, decision):
             QTimer.singleShot(10, click)
             return
         tree = dlg.findChild(QTreeWidget)
-        inspected.extend(tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount()))
+        inspected.extend((tree.topLevelItem(i).text(0), tree.topLevelItem(i).text(1))
+                         for i in range(tree.topLevelItemCount()))
         dlg.findChild(QDialogButtonBox).button(decision).click()
 
     QTimer.singleShot(10, click)
@@ -127,7 +133,8 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     first.soundhub_group.show()
     first.upload_group.show()
     names = start(control, QDialogButtonBox.Cancel)
-    assert set(names) == {"full-deployment-p1_ML", "full-deployment-p1_SA"}
+    assert dict(names) == {"full-deployment-p1_ML": "UCNRS Mammal",
+                           "full-deployment-p1_SA": "UCNRS Small Animal"}
     folder = first.current_deployment_folder
     assert not read_requests(folder)
     (tmp_path / "lose-reply").touch()

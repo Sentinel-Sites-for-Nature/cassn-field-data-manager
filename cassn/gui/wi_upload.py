@@ -20,6 +20,7 @@ The helper must reject changed selections and preserve original-file claims
 on any replay. Return safe summaries only, never credentials or image lists.
 """
 
+import csv
 import json
 from collections import Counter
 
@@ -37,6 +38,24 @@ from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
     checked_status, complete, read_requests, save_requests, scope_key, validate_scopes,
 )
+
+
+PROJECT_NAMES = {"2010517": "UCNRS Small Animal", "2010527": "UCNRS Mammal"}
+
+
+def _exported_projects(folder):
+    """Read the small deployment exports used by the uploader's preview."""
+    projects = {}
+    for device in ("ML", "SA"):
+        path = folder / "WI_metadata" / f"wildlife_insights_{device}_deployments.csv"
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                for row in csv.DictReader(stream):
+                    name = row["deployment_id"]
+                    projects[name] = row["project_id"] if name not in projects else None
+        except FileNotFoundError:
+            continue
+    return projects
 
 
 class WildlifeInsightsControl(QObject):
@@ -279,21 +298,26 @@ class WildlifeInsightsControl(QObject):
         tree = QTreeWidget()
         tree.setRootIsDecorated(False)
         tree.setAccessibleName("Camera deployments to upload")
-        tree.setHeaderLabels(["Deployment", "Photos", "Status"])
+        tree.setHeaderLabels(["Deployment", "WI project", "Photos"])
         tree.header().setStretchLastSection(False)
         tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        tree.header().setSectionResizeMode(2, QHeaderView.Interactive)
-        tree.setColumnWidth(2, 140)
+        tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        projects = _exported_projects(folder)
         for s in scope_list:
             ready = s.get("ready") is True and not s.get("hold")
-            item = QTreeWidgetItem(tree, [s["deployment"], f"{s['images']:,}",
-                                          "Ready" if ready else s.get("hold") or "Needs review"])
+            name = s["deployment"]
+            project_id = projects.get(name)
+            destination = PROJECT_NAMES.get(project_id, project_id or "Unavailable")
+            detail = name if ready else f"{name}\n{s.get('hold') or 'Needs review'}"
+            item = QTreeWidgetItem(tree, [detail, destination, f"{s['images']:,}"])
             item.setCheckState(0, Qt.Checked if ready else Qt.Unchecked)
             if not ready:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
-            item.setToolTip(0, s["deployment"])
-            item.setToolTip(2, item.text(2))
+            item.setToolTip(0, detail)
+            if project_id:
+                item.setToolTip(1, f"WI project ID: {project_id}")
+            item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(tree)
         summary = workspace_label("", "contextTitle")
         layout.addWidget(summary)
