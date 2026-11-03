@@ -30,6 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from cassn.gui.workspace import UploadProgressBar
+from PySide6.QtWidgets import QFrame, QHeaderView
+
+from cassn.gui.appearance import workspace_label, workspace_stylesheet
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
     checked_status, complete, read_requests, save_requests, scope_key, validate_scopes,
@@ -258,13 +261,28 @@ class WildlifeInsightsControl(QObject):
         folder = self.folder
         dialog = QDialog(self.window)
         dialog.setWindowTitle("Upload images to Wildlife Insights")
+        dialog.setObjectName("fieldWorkspace")
+        dialog.setStyleSheet(workspace_stylesheet(dialog.palette(), self.window.workspace.zoom))
         layout = QVBoxLayout(dialog)
-        label = QLabel(folder.name)
-        label.setTextFormat(Qt.PlainText)
-        layout.addWidget(label)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(14)
+        banner = QFrame()
+        banner.setObjectName("sidebarBrandBlock")
+        heading = QVBoxLayout(banner)
+        heading.setContentsMargins(18, 14, 18, 14)
+        heading.addWidget(workspace_label("Wildlife Insights", "sidebarBrand"))
+        layout.addWidget(banner)
+        layout.addWidget(workspace_label("Select camera deployments", "sectionTitle"))
+        layout.addWidget(workspace_label(folder.name, "muted", wrap=True))
         tree = QTreeWidget()
         tree.setRootIsDecorated(False)
-        tree.setHeaderLabels(["Wildlife Insights deployment", "Photos", "Readiness"])
+        tree.setAccessibleName("Camera deployments to upload")
+        tree.setHeaderLabels(["Deployment", "Photos", "Status"])
+        tree.header().setStretchLastSection(False)
+        tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        tree.header().setSectionResizeMode(2, QHeaderView.Interactive)
+        tree.setColumnWidth(2, 140)
         for s in scope_list:
             ready = s.get("ready") is True and not s.get("hold")
             item = QTreeWidgetItem(tree, [s["deployment"], f"{s['images']:,}",
@@ -272,8 +290,11 @@ class WildlifeInsightsControl(QObject):
             item.setCheckState(0, Qt.Checked if ready else Qt.Unchecked)
             if not ready:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
-        tree.resizeColumnToContents(0)
+            item.setToolTip(0, s["deployment"])
+            item.setToolTip(2, item.text(2))
         layout.addWidget(tree)
+        summary = workspace_label("", "contextTitle")
+        layout.addWidget(summary)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         begin = buttons.button(QDialogButtonBox.Ok)
         begin.setText("Upload images to Wildlife Insights")
@@ -282,12 +303,20 @@ class WildlifeInsightsControl(QObject):
             return [scope for index, scope in enumerate(scope_list)
                     if tree.topLevelItem(index).checkState(0) == Qt.Checked]
 
-        begin.setEnabled(bool(selected()))
-        tree.itemChanged.connect(lambda *_: begin.setEnabled(bool(selected())))
+        begin.setProperty("role", "primary")
+
+        def update_selection():
+            picked = selected()
+            total = sum(scope["images"] for scope in picked)
+            summary.setText(f"Selected deployments: {len(picked)}    ·    Photos: {total:,}")
+            begin.setEnabled(bool(picked))
+
+        update_selection()
+        tree.itemChanged.connect(update_selection)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        dialog.resize(650, 260)
+        dialog.resize(680, 305 + min(len(scope_list), 6) * 30)
         self.timer.stop()
         try:
             if dialog.exec() != QDialog.Accepted or self.window.current_deployment_folder != folder:
