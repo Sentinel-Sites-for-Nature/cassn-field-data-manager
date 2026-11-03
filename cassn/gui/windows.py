@@ -132,6 +132,7 @@ class DeploymentWindow(FieldDataWizard):
         self._staging_lease = None
         self._closed = False
         self._callback_depth = 0
+        self._pending_box_reconnect = None
         self._initializing = True
         super().__init__(lookups=deepcopy(manager.lookups), box_config=manager.box_config)
         self._initializing = False
@@ -179,7 +180,9 @@ class DeploymentWindow(FieldDataWizard):
         def connect():
             if super(DeploymentWindow, self).connect_to_box():
                 self._publish_connection(True)
-        self._run_cloud_operation(connect)
+                return True
+            return False
+        return self._run_cloud_operation(connect)
 
     def disconnect_from_box(self):
         def disconnect():
@@ -351,6 +354,10 @@ class DeploymentWindow(FieldDataWizard):
     _on_box_verify_finished = _guard_callback(FieldDataWizard._on_box_verify_finished)
     _on_fixity_finished = _guard_callback(FieldDataWizard._on_fixity_finished)
 
+    def _offer_box_reconnect(self, message):
+        # The finished signal can arrive before the upload thread exits.
+        self._pending_box_reconnect = (self.upload_thread, self.current_deployment_folder, message)
+
     def _release_idle_cloud(self):
         if self._cloud_lease and not self._cloud_work_running():
             self._cloud_lease.release()
@@ -359,6 +366,12 @@ class DeploymentWindow(FieldDataWizard):
         if self._staging_lease and not self._staging_pending and not (stage and stage.isRunning()):
             self._staging_lease.release()
             self._staging_lease = None
+
+        if self._pending_box_reconnect and not self._cloud_work_running():
+            worker, folder, message = self._pending_box_reconnect
+            self._pending_box_reconnect = None
+            if not self._closed and self.upload_thread is worker and self.current_deployment_folder == folder:
+                super()._offer_box_reconnect(message)
 
     def _cloud_work_running(self):
         """Local SoundHub conversion does not occupy the cloud connection."""
@@ -394,7 +407,7 @@ class DeploymentWindow(FieldDataWizard):
         self._starting_cloud = True
         self._soundhub_pending = soundhub
         try:
-            handler()
+            return handler()
         except Exception as exc:
             if not self._cloud_workers_running():
                 self._soundhub_pending = False

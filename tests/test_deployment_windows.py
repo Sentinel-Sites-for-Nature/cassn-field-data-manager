@@ -527,3 +527,29 @@ def test_connect_box_blocked_during_another_windows_upload(manager, monkeypatch)
         login.assert_not_called()
     finally:
         held.release()
+
+
+@pytest.mark.parametrize("accept,authenticated", [(True, True), (False, True), (True, False)])
+def test_reconnect_waits_for_finished_upload_and_retries_once(manager, monkeypatch, accept, authenticated):
+    window = manager.new_window(open_sessions=False)
+    worker = MagicMock(needs_reconnect=True)
+    worker.isRunning.return_value = True
+    window._run_cloud_operation(lambda: setattr(window, "upload_thread", worker))
+    assert window._cloud_lease is not None
+    auth = MagicMock(return_value=authenticated)
+    retry = MagicMock()
+    monkeypatch.setattr(FieldDataWizard, "connect_to_box", auth)
+    monkeypatch.setattr(FieldDataWizard, "upload_to_box", retry)
+    monkeypatch.setattr(WindowMessageBox, "exec", lambda dialog: 0)
+    monkeypatch.setattr(WindowMessageBox, "clickedButton", lambda dialog: next(
+        b for b in dialog.buttons() if b.text() == ("Connect and Resume Upload" if accept else "Close")
+    ))
+
+    window.on_upload_finished(False, "Box disconnected during the upload.")
+    auth.assert_not_called()
+    retry.assert_not_called()
+    worker.isRunning.return_value = False
+    window._release_idle_cloud()
+    window._release_idle_cloud()
+    assert auth.call_count == int(accept)
+    assert retry.call_count == int(accept and authenticated)
