@@ -67,7 +67,7 @@ class WildlifeInsightsControl(QObject):
         box.addWidget(self.retry_button)
         layout.addWidget(self.group)
         self.group.hide()
-        self.action = window._menu_action("Upload to Wildlife Insights…", self.preview,
+        self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
@@ -257,7 +257,7 @@ class WildlifeInsightsControl(QObject):
         scope_list = sorted(scopes, key=lambda s: s["deployment"])
         folder = self.folder
         dialog = QDialog(self.window)
-        dialog.setWindowTitle("Upload to Wildlife Insights")
+        dialog.setWindowTitle("Upload images to Wildlife Insights")
         layout = QVBoxLayout(dialog)
         label = QLabel(folder.name)
         label.setTextFormat(Qt.PlainText)
@@ -276,7 +276,7 @@ class WildlifeInsightsControl(QObject):
         layout.addWidget(tree)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         begin = buttons.button(QDialogButtonBox.Ok)
-        begin.setText("Start upload")
+        begin.setText("Upload images to Wildlife Insights")
 
         def selected():
             return [scope for index, scope in enumerate(scope_list)
