@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from cassn.box.metadata_merge import (
     CSV_NAMES, SHARED_NAMES, MetadataConflict, merge_csv, merge_event, merge_qc,
-    read_csv, read_object,
+    read_csv, read_object, carry_wi_only_update,
 )
 from cassn.box.metadata_store import BoxFileStore
 
@@ -223,9 +223,30 @@ class EventPublication:
                     source, candidate = Path(str(stem) + ".source"), Path(str(stem) + ".candidate")
                     before = source.read_bytes() if source.exists() else None
                     after = candidate.read_bytes() if candidate.exists() else before
-                    if self.remote.get(name) not in (before, after):
-                        raise ValueError("intervening remote edit")
-                    baseline[name] = after
+                    file_state = state.get("files", {}).get(name, {})
+                    identity = file_state.get("saved") or file_state.get("source")
+                    ref = self.refs.get(name)
+                    if name == "image_file_metadata.csv" and identity and (
+                            ref is None or any(identity.get(key) != getattr(ref, key)
+                                               for key in ("file_id", "parent_id", "name"))):
+                        raise ValueError("changed image metadata identity")
+                    if self.remote.get(name) in (before, after):
+                        baseline[name] = after
+                        continue
+                    # A stamp may land after our CSV write but before the
+                    # event count, or on the old rows before our CSV write.
+                    if name != "image_file_metadata.csv" or not identity:
+                        raise ValueError("intervening remote edit or changed Box identity")
+                    for expected in (after, before):
+                        if expected is None:
+                            continue
+                        try:
+                            baseline[name] = carry_wi_only_update(expected, self.remote[name], after)
+                            break
+                        except MetadataConflict:
+                            continue
+                    else:
+                        raise ValueError("intervening non-WI remote edit")
                 record = read_object(baseline["deployment_event_record.json"])
                 count = sum(len(read_csv(data)[1]) for name in CSV_NAMES
                             if (data := baseline.get(name)) is not None)
@@ -245,46 +266,99 @@ class EventPublication:
     def _recheck(self):
         for name, ref in self.refs.items():
             if ref:
-                self.store.assert_unchanged(ref)
+                if name == "image_file_metadata.csv":
+                    self._recheck_image(ref)
+                else:
+                    self.store.assert_unchanged(ref)
             else:
                 parent = self._parent(name)
                 if parent is not None and self._find(parent, Path(name).name):
                     raise MetadataConflict(f"{name} appeared after preflight; retry the upload to merge it")
 
+    def _recheck_image(self, ref):
+        name = "image_file_metadata.csv"
+        current = self.store.snapshot(ref.file_id)
+        if current == ref:
+            return
+        self._accept_image_update(ref, current, self.remote[name], self.store.read(current))
+
+    def _accept_image_update(self, ref, current, expected, newer):
+        name = "image_file_metadata.csv"
+        if (any(getattr(current, key) != getattr(ref, key)
+                for key in ("file_id", "parent_id", "name", "can_upload"))
+                or self._find(ref.parent_id, ref.name) != ref.file_id):
+            raise MetadataConflict("Image metadata Box identity or permission changed after preflight")
+        candidate = carry_wi_only_update(
+            expected, newer, self.candidates.get(name, expected))
+        self.store.assert_unchanged(current)
+        # Preserve each accepted version alongside the original source and
+        # latest candidate, so a restart can explain a partial publication.
+        updates = self.state["files"][name].setdefault("wi_updates", [])
+        stem = self.attempt_dir / f"{name}.wi-{len(updates) + 1}"
+        Path(str(stem) + ".source").write_bytes(newer)
+        if name in self.candidates:
+            self.candidates[name] = candidate
+            (self.attempt_dir / (name + ".candidate")).write_bytes(candidate)
+        self.remote[name] = newer
+        self.refs[name] = current
+        updates.append({"previous": asdict(ref), "current": asdict(current)})
+        if self.state["files"][name]["status"] == "verified":
+            self.state["files"][name]["saved"] = asdict(current)
+        self._save()
+
     def publish(self):
         self.state["status"] = "publishing"
         self._save()
-        for name, payload in self.candidates.items():
+        for name in self.candidates:
             self._recheck()
-            ref = self.refs[name]
             parent = self._parent(name, create=True)
             self.state["files"][name]["status"] = "write_pending"
-            self._save()  # Durable intent before a possibly ambiguous response.
-            try:
-                if ref:
-                    if self.remote[name] != payload:
-                        self.store.write_metadata(ref, payload)
-                else:
-                    result = self.storage.client.uploads.upload_file(
-                        attributes={"name": Path(name).name, "parent": {"id": parent}},
-                        file=io.BytesIO(payload),
-                    )
-                    if not result.entries or len(result.entries) != 1:
-                        raise MetadataConflict(f"No confirmed file identity returned for {name}")
-                    self.store._verify_write(result.entries[0].id, payload, parent, Path(name).name)
-            except Exception as exc:
-                # A lost ACK or a create conflict is success ONLY if an actual
-                # fresh read proves the exact intended payload is now present.
+            self._save()
+            for attempt in range(3):
+                ref = self.refs[name]
+                payload = self.candidates[name]
+                expected_id = ref.file_id if ref else None
+                error = None
+                try:
+                    if ref:
+                        if self.remote[name] != payload:
+                            self.store.write_metadata(ref, payload)
+                    else:
+                        result = self.storage.client.uploads.upload_file(
+                            attributes={"name": Path(name).name, "parent": {"id": parent}},
+                            file=io.BytesIO(payload),
+                        )
+                        if not result.entries or len(result.entries) != 1:
+                            raise MetadataConflict(f"No confirmed file identity returned for {name}")
+                        expected_id = result.entries[0].id
+                        self.store._verify_write(expected_id, payload, parent, Path(name).name)
+                except Exception as exc:
+                    error = exc  # A lost acknowledgement can still be proved by read-back.
                 file_id = self._find(parent, Path(name).name)
-                if not file_id:
-                    raise MetadataConflict(f"Publication unconfirmed for {name}: {exc}") from exc
+                if not file_id or (expected_id and file_id != expected_id):
+                    raise MetadataConflict(f"Publication unconfirmed for {name}: {error or 'changed identity'}")
                 current = self.store.snapshot(file_id)
-                if self.store.read(current) != payload:
-                    raise MetadataConflict(f"Publication conflict/unconfirmed for {name}: {exc}") from exc
-            file_id = self._find(parent, Path(name).name)
-            current = self.store.snapshot(file_id)
-            if current.parent_id != parent or current.name != Path(name).name or self.store.read(current) != payload:
-                raise MetadataConflict(f"Saved content changed during verification: {name}")
+                actual = self.store.read(current)
+                if current.parent_id != parent or current.name != Path(name).name:
+                    raise MetadataConflict(f"Saved content changed during verification: {name}")
+                if actual == payload:
+                    self.remote[name] = actual
+                    break
+                if name == "image_file_metadata.csv" and expected_id and (not ref or current != ref):
+                    # A stamp can win before If-Match, or after our write but before read-back.
+                    try:
+                        self._accept_image_update(ref or current, current, payload, actual)
+                    except MetadataConflict:
+                        if ref and error and attempt < 2:
+                            try:
+                                self._accept_image_update(ref, current, self.remote[name], actual)
+                            except MetadataConflict:
+                                pass
+                            else:
+                                continue
+                    else:
+                        break
+                raise MetadataConflict(f"Publication conflict/unconfirmed for {name}: {error or 'changed content'}")
             self.refs[name] = current
             self.state["files"][name].update(status="verified", saved=asdict(current))
             self._save()
