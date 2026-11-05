@@ -94,7 +94,7 @@ class WildlifeInsightsControl(QObject):
         self.new_cameras.hide()
         box.addWidget(self.new_cameras)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Deployment", "Progress"])
+        self.tree.setHeaderLabels(["Deployment and destination", "Progress"])
         self._fitting_columns = False
         self.tree.setWordWrap(True)
         self.tree.setRootIsDecorated(False)
@@ -118,6 +118,8 @@ class WildlifeInsightsControl(QObject):
         self.group.hide()
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
+        self.panel_button = self.group.add_action_button("Continue uploads", self.action)
+        self.panel_button.setAccessibleName("Continue Wildlife Insights uploads")
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.poll)
@@ -206,6 +208,7 @@ class WildlifeInsightsControl(QObject):
         finished = self.can_dismiss()
         if not finished:
             self.dismissed = None
+        self.panel_button.setVisible(not finished)
         self.dismiss_button.setVisible(finished)
         self.group.setVisible(bool(self.jobs or new or eligibility_error or self.notice.text()) and self.dismissed != frozenset(self.jobs))
         if any(not complete(j, sources) for j in self.jobs.values()):
@@ -241,27 +244,35 @@ class WildlifeInsightsControl(QObject):
             if stage == "unknown":
                 count = 0
 
-        cell = QWidget()
-        cell.setAutoFillBackground(True)
-        cell.setBackgroundRole(self.tree.viewport().backgroundRole())
-        lines = QVBoxLayout(cell)
+        identity = QWidget()
+        lines = QVBoxLayout(identity)
         lines.setContentsMargins(0, 0, 0, 0)
         lines.setSpacing(2)
         name_label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
         name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lines.addWidget(name_label)
-        project = self._project_label(scope, row, stage, exported_project)
+        project, source = self._project_label(scope, row, stage, exported_project)
         project_label = workspace_label(project, "muted", wrap=True)
+        project_label.setToolTip(source)
         project_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lines.addWidget(project_label)
+        # At narrow widths the entire identity moves above its own progress bar.
+        for column in (0, 1):
+            cell = QWidget()
+            cell.setAutoFillBackground(True)
+            cell.setBackgroundRole(self.tree.viewport().backgroundRole())
+            box = QVBoxLayout(cell)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(2)
+            self.tree.setItemWidget(item, column, cell)
+        self.tree.itemWidget(item, 0).layout().addWidget(identity)
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
         bar.setFormat(label)
         bar.setAccessibleName(label)
         bar.setProperty("wrapProgressText", True)
-        lines.addWidget(bar)
-        self.tree.setItemWidget(item, 1, cell)
+        self.tree.itemWidget(item, 1).layout().addWidget(bar)
 
     @staticmethod
     def _project_label(scope, row, stage, exported_project):
@@ -274,8 +285,8 @@ class WildlifeInsightsControl(QObject):
         for source, value in candidates:
             if type(value) in {str, int} and str(value).strip():
                 value = str(value).strip()
-                return f"{source}: {PROJECT_NAMES.get(value, value)}"
-        return "WI project unavailable"
+                return f"Destination project: {PROJECT_NAMES.get(value, value)}", source
+        return "Destination project: unavailable", "No destination found in the saved records."
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Resize and obj is self._tree_viewport and not self.closed:
@@ -324,26 +335,28 @@ class WildlifeInsightsControl(QObject):
             self.tree.headerItem().setText(1, "Camera progress" if compact else "Progress")
             if not compact:
                 self.tree.setColumnWidth(0, min(420, width - needed))
-            text_width = max(1, self.tree.columnWidth(1) - 14)
-            def text_height(widget, text):
-                return widget.fontMetrics().boundingRect(
-                    QRect(0, 0, text_width, 8192), Qt.TextWordWrap, text).height() + 6
-
+            progress_width = max(1, self.tree.columnWidth(1) - 14)
+            name_width = progress_width if compact else max(1, self.tree.columnWidth(0) - 14)
             for item in items:
-                cell = self.tree.itemWidget(item, 1)
-                if cell is None:
+                left = self.tree.itemWidget(item, 0)
+                right = self.tree.itemWidget(item, 1)
+                if not left or not right:
                     continue
-                name = cell.layout().itemAt(0).widget()
-                name.setVisible(compact)
-                project = cell.layout().itemAt(1).widget()
-                content = cell.layout().itemAt(2).widget()
-                content_height = text_height(content, content.format())
-                if content.minimumHeight() != content_height:
-                    content.setStyleSheet(f"min-height: {content_height}px; max-height: {content_height}px;")
-                row_height = content_height + text_height(project, project.text()) + 19  # Tree cell padding and bottom rule.
-                if compact:
-                    row_height += max(name.heightForWidth(text_width), text_height(name, name.text())) + 2
-                item.setSizeHint(1, QSize(0, row_height))
+                left_box, right_box = left.layout(), right.layout()
+                if compact and left_box.count():
+                    right_box.insertWidget(0, left_box.itemAt(0).widget())
+                elif not compact and not left_box.count():
+                    left_box.addWidget(right_box.itemAt(0).widget())
+                identity = (right_box if compact else left_box).itemAt(0).widget()
+                bar = self.bar_for_item(item)
+                bar_height = bar.fontMetrics().boundingRect(
+                    QRect(0, 0, progress_width, 8192), Qt.TextWordWrap, bar.format()).height() + 6
+                if bar.minimumHeight() != bar_height:
+                    bar.setStyleSheet(f"min-height: {bar_height}px; max-height: {bar_height}px;")
+                identity_height = identity.layout().heightForWidth(name_width)
+                identity.setFixedHeight(identity_height)
+                height = identity_height + 2 + bar_height if compact else max(identity_height, bar_height)
+                item.setSizeHint(1, QSize(0, height + 19))
             self.tree.doItemsLayout()
             visible_height = sum(self.tree.visualItemRect(item).height() for item in items)
             self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + visible_height)

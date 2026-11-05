@@ -7,11 +7,45 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAccessible
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolButton
 
 from cassn.box.auth import hosted_config
 from cassn.gui.wizard import FieldDataWizard
 from cassn.lookups import LookupTables
+
+
+def test_platform_shortcuts_share_menu_actions_and_box_connection_state(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", "/synthetic/helper"))
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: True)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda _: [])
+    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
+    try:
+        assert not window.connect_box_btn.isEnabled()
+        window.set_box_connection_state(False)
+        assert window.connect_box_btn.isEnabled()
+        window.set_box_connection_state(True)
+        assert not window.connect_box_btn.isEnabled()
+        for group, action, label in (
+            (window.upload_group, window.upload_now_btn, "Continue Box upload"),
+            (window.soundhub_group, window.soundhub_stage_btn, "Continue SoundHub staging"),
+            (window.wi_control.group, window.wi_control.action, "Continue uploads"),
+        ):
+            button = next(b for b in group.findChildren(QPushButton) if b.text() == label)
+            action.triggered.disconnect()
+            calls = []
+            action.triggered.connect(lambda: calls.append(True))
+            action.setEnabled(False)
+            assert not button.isEnabled()
+            button.click()
+            assert not calls
+            action.setEnabled(True)
+            button.click()
+            assert calls == [True]
+            assert not group.disclosure.isChecked()
+    finally:
+        window.close()
+        app.processEvents()
 
 
 @pytest.mark.parametrize("zoom", [100, 130, 200])

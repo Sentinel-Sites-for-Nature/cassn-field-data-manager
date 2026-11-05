@@ -1,7 +1,7 @@
 """Keep deployment review and transfer progress reachable on one scrollable page."""
 
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import QScrollArea, QWidget
 
 from cassn.gui.appearance import workspace_label
 
@@ -33,31 +33,19 @@ class ReviewPage(QScrollArea):
                 color: palette(window-text);
             }
         """)
-        self.progress_link = QPushButton("Progress ↓")
-        self.progress_link.clicked.connect(self._scroll_to_progress)
-        self.progress_heading = QWidget()
-        heading = QHBoxLayout(self.progress_heading)
-        heading.setContentsMargins(0, 0, 0, 0)
-        heading.addWidget(workspace_label("Upload and staging progress", "sectionTitle", wrap=True), 1)
-        back = QPushButton("Summary ↑")
-        back.clicked.connect(lambda: self.verticalScrollBar().setValue(0))
-        heading.addWidget(back)
+        self.progress_heading = workspace_label("Upload and staging progress", "sectionTitle", wrap=True)
 
     def watch_progress(self, groups):
         self.groups = groups
         for group in groups:
             group.installEventFilter(self)
-        self._update_links()
+        self._update_heading()
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.ShowToParent, QEvent.HideToParent) and obj in self.groups:
-            self._update_links()
+            self._update_heading()
         return super().eventFilter(obj, event)
 
-    def _update_links(self):
+    def _update_heading(self):
         visible = any(not group.isHidden() for group in self.groups)
-        self.progress_link.setVisible(visible)
         self.progress_heading.setVisible(visible)
-
-    def _scroll_to_progress(self):
-        self.verticalScrollBar().setValue(self.progress_heading.y())

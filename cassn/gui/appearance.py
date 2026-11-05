@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QIcon, QPalette, QPixmap, QRegion
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -222,6 +222,21 @@ class PlatformPanel(QGroupBox):
         self.disclosure.toggled.connect(self._set_expanded)
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
+
+    def add_action_button(self, label, action):
+        button = QPushButton(label)
+        button.clicked.connect(action.trigger)
+
+        def sync():
+            button.setEnabled(action.isEnabled())
+            button.setToolTip(action.toolTip())
+
+        action.changed.connect(sync)
+        action.visibleChanged.connect(lambda: button.setVisible(action.isVisible()))
+        button.setVisible(action.isVisible())
+        sync()
+        self.body.addWidget(button, alignment=Qt.AlignRight)
+        return button
 
     def title(self):
         return self._heading.text()

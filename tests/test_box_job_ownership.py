@@ -69,7 +69,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
-                     'dismiss_box_btn', 'upload_group', 'box_history_label',
+                     'dismiss_box_btn', 'box_panel_button', 'upload_group', 'box_history_label',
                      'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',

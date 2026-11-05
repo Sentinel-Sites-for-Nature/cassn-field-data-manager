@@ -456,16 +456,22 @@ def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, t
     labels = {}
     for item in all_rows:
         cell = ctrl.tree.itemWidget(item, 1)
-        labels[item.text(0)] = [label.text() for label in cell.findChildren(QLabel)]
+        labels[item.text(0)] = [label.text() for col in (0, 1) for label in ctrl.tree.itemWidget(item, col).findChildren(QLabel)]
         assert cell.findChild(UploadProgressBar)
-    assert "Verified project: UCNRS Mammal" in labels["saved-camera-1"]
-    assert "WI project unavailable" in labels["saved-camera-2"]
-    assert "Exported destination: UCNRS Small Animal" in labels["full-deployment-p1_SA"]
+    assert "Destination project: UCNRS Mammal" in labels["saved-camera-1"]
+    assert "Destination project: unavailable" in labels["saved-camera-2"]
+    assert "Destination project: UCNRS Small Animal" in labels["full-deployment-p1_SA"]
     for width, zoom in ((1280, 100), (940, 130), (940, 200)):
         opened.workspace.set_zoom(zoom)
         opened.resize(width, 740)
         for _ in range(3):
             QApplication.processEvents()
+        assert ctrl.tree.headerItem().text(0) == "Deployment and destination"
+        column = 1 if ctrl.tree.isColumnHidden(0) else 0
+        identity_labels = ctrl.tree.itemWidget(all_rows[0], column).findChildren(QLabel)
+        assert identity_labels[0].text().replace("\u200b", "") == all_rows[0].text(0)
+        assert identity_labels[1].text().startswith("Destination project: ")
+        assert identity_labels[1].y() > identity_labels[0].y()
         assert ctrl.tree.verticalScrollBar().maximum() == 0
         assert ctrl.tree.viewport().rect().contains(ctrl.tree.visualItemRect(all_rows[-1]))
     assert (folder / STATE_FILE).read_bytes() == saved
@@ -487,8 +493,8 @@ def test_missing_counter_and_unreadable_export_preserve_status(work, tmp_path):
     for index in range(ctrl.tree.topLevelItemCount()):
         item = ctrl.tree.topLevelItem(index)
         assert "count unavailable" in ctrl.bar_for_item(item).text()
-        labels = [label.text() for label in ctrl.tree.itemWidget(item, 1).findChildren(QLabel)]
-        project = "WI project unavailable" if item.text(0).endswith("ML") else "Exported destination: UCNRS Small Animal"
+        labels = [label.text() for col in (0, 1) for label in ctrl.tree.itemWidget(item, col).findChildren(QLabel)]
+        project = "Destination project: unavailable" if item.text(0).endswith("ML") else "Destination project: UCNRS Small Animal"
         assert project in labels
     assert all("verified_count" not in row for row in read_requests(folder)[key]["rows"])
     assert ctrl.dismiss_button.isHidden()

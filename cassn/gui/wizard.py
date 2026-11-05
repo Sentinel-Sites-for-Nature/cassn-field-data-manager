@@ -308,6 +308,7 @@ class FieldDataWizard(QMainWindow):
 
     def set_box_connection_state(self, connected):
         self.box_authenticated = connected
+        self.connect_box_btn.setEnabled(not connected)
         self.box_connection_label.setText("✓ Connected" if connected else "Box disconnected — connect to upload")
         self.box_connection_label.setStyleSheet("color: green; font-weight: bold;" if connected else "color: #955300;")
         busy = bool(self._box_operation_active or any(
@@ -1047,6 +1048,7 @@ class FieldDataWizard(QMainWindow):
         box_layout.addWidget(upload_note)
 
         self.connect_box_btn = QPushButton("Connect to Box")
+        self.connect_box_btn.setEnabled(not self.box_authenticated)
         self.connect_box_btn.clicked.connect(self.connect_to_box)
         box_layout.addWidget(self.connect_box_btn)
         if self.box_config.provider == "hosted":
@@ -1246,7 +1248,6 @@ class FieldDataWizard(QMainWindow):
 
         heading = QHBoxLayout()
         heading.addWidget(workspace_label("Review & upload", "pageTitle", wrap=True), 1)
-        heading.addWidget(scroll.progress_link)
         layout.addLayout(heading)
 
         # Summary text
@@ -1430,6 +1431,8 @@ class FieldDataWizard(QMainWindow):
             # The existing SoundHub staging configuration belongs to UC.
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
+        self.box_panel_button = self.upload_group.add_action_button("Continue Box upload", self.upload_now_btn)
+        self.soundhub_group.add_action_button("Continue SoundHub staging", self.soundhub_stage_btn)
         platforms = [(self.upload_now_btn, "box"), (self.soundhub_stage_btn, "soundhub")]
         if self.wi_upload_helper:
             from cassn.gui.wi_upload import WildlifeInsightsControl
@@ -3497,6 +3500,7 @@ class FieldDataWizard(QMainWindow):
         self.upload_group.show()
         self.upload_metrics_label.clear()
         self.cancel_upload_btn.hide()
+        self.box_panel_button.setHidden(verified)
         self.dismiss_box_btn.setVisible(verified)
         self.upload_progress_bar.setVisible(verified)
         self.upload_status_label.setToolTip("")
@@ -3532,12 +3536,12 @@ class FieldDataWizard(QMainWindow):
                     and isinstance(state.get("files"), dict) and state["files"]
                     and all(isinstance(ref, dict) and ref.get("status") == "read" for ref in state["files"].values())):
                 self.upload_status_label.setText(
-                    "Ready to continue with the new cards. Choose Prepare & Upload → Upload to Box now.")
+                    "Ready to continue with the new cards.")
                 self.upload_status_label.setToolTip("The previous version stopped before sending new files. " + reason)
             else:
-                self.upload_status_label.setText(f"{reason}\nUse Upload to Box now when ready to retry.")
+                self.upload_status_label.setText(f"{reason}\nChoose Continue Box upload when ready to retry.")
         elif recorded is not None and recorded < total:
-            self.upload_status_label.setText("Choose Prepare & Upload → Upload to Box now.")
+            self.upload_status_label.setText("Ready to upload the remaining event files.")
         else:
             self.upload_status_label.setText("The current file list still needs Box verification.")
 
@@ -4650,8 +4654,7 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_group.show()
             self.soundhub_status_label.setStyleSheet("")
             self.soundhub_status_label.setText(
-                f"SoundHub staging can continue. {completed} completed, {total - completed} remaining. "
-                "Choose Prepare & Upload → Continue SoundHub Staging."
+                f"SoundHub staging can continue. {completed} completed, {total - completed} remaining."
             )
             return
         generation = self._soundhub_generation()
@@ -4668,8 +4671,7 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_group.show()
             self.soundhub_status_label.setStyleSheet("")
             self.soundhub_status_label.setText(
-                f"{summary.staged:,} of {summary.expected:,} bird recordings staged locally. "
-                "Choose Prepare & Upload to prepare the local batch.")
+                f"{summary.staged:,} of {summary.expected:,} bird recordings staged locally.")
         else:
             self._soundhub_dismissed = None
             self.soundhub_group.hide()

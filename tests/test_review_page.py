@@ -57,13 +57,11 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
                 group.initStyleOption(option)
                 title = group.style().subControlRect(QStyle.CC_GroupBox, option, QStyle.SC_GroupBoxLabel, group)
                 assert 0 < title.top() < title.bottom() < group.layout().itemAt(0).geometry().top()
-            page.progress_link.click()
+            page.ensureWidgetVisible(wi.group.disclosure)
             assert page.verticalScrollBar().value() > 0
-            page.progress_heading.findChild(QPushButton).click()
-            assert page.verticalScrollBar().value() == 0
+            assert {b.text() for b in page.findChildren(QPushButton)}.isdisjoint({"Summary ↑", "Progress ↓"})
         for group in groups:
             group.hide()
-        assert page.progress_link.isHidden()
         assert page.progress_heading.isHidden()
     finally:
         window.close()
