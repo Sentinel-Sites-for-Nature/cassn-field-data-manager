@@ -165,6 +165,11 @@ def test_all_burst_findings_and_observed_file_context_survive_report_reload(tmp_
     report = json.loads((tmp_path / "qc/qc_report.json").read_text())
     findings = collection_review_findings(report["current_state"], rows)
     assert len(findings) == 1
+    assert findings[0]["message"].startswith("This usually happens when someone turns off the camera during a burst")
+    legacy, = collection_review_findings([{"check": "sequence_gap", "severity": "warning",
+                                           "message": "Missing frame."}], [])
+    assert legacy["message"].startswith("This usually happens")
+    assert "Missing frame." in legacy["message"]
     assert "Burst #1" in findings[0]["message"] and "Burst #2" in findings[0]["message"]
     assert {f["filename"] for f in findings[0]["files"]} == {"burst1.jpg", "burst2.jpg"}
     # A later pass supersedes the entire finding, while history retains the evidence.

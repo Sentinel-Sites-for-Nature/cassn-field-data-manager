@@ -77,6 +77,17 @@ def quantity(count, unit):
     return f"{count:,} {unit[:-1] if count == 1 and unit.endswith('s') else unit}"
 
 
+def _review_message(code, evidence):
+    if code == "sequence_gap":
+        return (
+            "This usually happens when someone turns off the camera during a burst "
+            "while setting it up or retrieving it. "
+            "Let the camera finish the burst before turning off the power."
+            f"\n\n{evidence}"
+        )
+    return evidence
+
+
 def small_file_findings(entries: list[dict]) -> list[dict]:
     findings = []
     for row in entries:
@@ -174,9 +185,9 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
                     files.clear()
             fallback.append({"severity": entry["severity"], "title": title,
                 "affected": scope, "action": "Review the check details and ingest log before uploading.",
-                "message": f"{scope}: {entry.get('message', '')}" + (
+                "message": _review_message(entry.get("check"), f"{scope}: {entry.get('message', '')}" + (
                     "\n\nCompare the affected recordings with nearby files in their folder." if files
-                    else "\n\nFile details were not retained for this check."),
+                    else "\n\nFile details were not retained for this check.")),
                 "technical": diagnostic, "files": files})
             continue
         for issue in issues:
@@ -222,7 +233,7 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
             for i in issues)
         result.append({"severity": severity, "title": title,
             "affected": f"{quantity(count, unit)} · {quantity(len(devices), 'devices')}",
-            "action": issues[0]["action"], "message": detail + "\n\n" + issues[0]["action"],
+            "action": issues[0]["action"], "message": _review_message(code, detail + "\n\n" + issues[0]["action"]),
             "technical": "\n\n".join(dict.fromkeys(i["technical"] for i in issues)),
             "files": [f for i in issues for f in i["files"]]})
     return sorted(result, key=lambda i: {"error": 0, "warning": 1, "info": 2}[i["severity"]])
