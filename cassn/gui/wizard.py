@@ -3256,13 +3256,19 @@ class FieldDataWizard(QMainWindow):
     def _collection_review_findings(self, coord_warnings: list[str]) -> list[dict]:
         """Combine current QC and device status into actionable, grouped findings."""
         entries = []
+        pending = []
+        staged_devices = {row.get("device_label") for row in self.file_inventory}
         for i in range(self.device_tree.topLevelItemCount()):
             item = self.device_tree.topLevelItem(i)
             status = item.text(2)
+            label = item.data(0, Qt.UserRole) or item.text(0)
+            if status == "Pending" and item.text(3) == "0" and label not in staged_devices:
+                pending.append((label, f"{item.text(0)} · {item.text(1)}"))
+                continue
             if status != "Complete":
                 entries.append({
                     "check": "Device collection status",
-                    "_device": item.data(0, Qt.UserRole) or item.text(0),
+                    "_device": label,
                     "severity": "error" if status in {"Failed", "Incomplete"} else "warning",
                     "message": f"{item.text(0)} · {item.text(1)}: {status}. "
                     + ("This device was skipped." if status == "Skipped" else
@@ -3284,7 +3290,17 @@ class FieldDataWizard(QMainWindow):
                 "message": f"Check the QC report and ingest log before uploading: {exc}"})
         entries.extend({"check": "coordinate_validation", "severity": "warning", "message": message}
                        for message in coord_warnings)
-        return collection_review_findings(entries, self.file_inventory)
+        findings = collection_review_findings(entries, self.file_inventory)
+        if pending:
+            findings.append({
+                "severity": "pending", "title": "Devices with no staged files",
+                "affected": f"{len(pending)} device" + ("s" if len(pending) != 1 else ""),
+                "files": [], "pending_devices": pending,
+                "action": "You can continue with the staged files and collect these devices later.",
+                "message": "Expand this row to see the devices still awaiting card ingest.",
+                "technical": "Each device is Pending with zero copied files and no inventory entries.",
+            })
+        return findings
 
     def _confirm_collection_review(self, coord_warnings: list[str]) -> bool:
         dialog = CollectionReviewDialog(

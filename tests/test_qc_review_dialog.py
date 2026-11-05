@@ -37,12 +37,9 @@ def test_default_view_shows_unusual_evidence_and_hides_policy(app, tmp_path):
         assert "bad.jpg" in dialog.details.toPlainText()
         assert "10 bytes" in dialog.details.toPlainText()
         assert "long policy" not in dialog.details.toPlainText()
-        dialog.technical.click()
-        assert "long policy" in dialog.details.toPlainText()
         dialog.tree.setCurrentItem(dialog.tree.topLevelItem(1))
         assert dialog.file_picker.count() == 0
         assert "100,000" in dialog.tree.currentItem().text(1)
-        dialog.technical.click()
         assert "bad.jpg" not in dialog.details.toPlainText()
         assert not dialog.open_file.isEnabled()
     finally:
@@ -63,6 +60,28 @@ def test_open_uses_current_split_inventory_path_and_requires_explicit_click(app,
         assert dialog.open_file.isEnabled()
         dialog.open_file.click()
         assert opened == [str(path)]
+    finally:
+        dialog.close()
+
+
+def test_early_stop_opens_only_affected_audio_folder(app, tmp_path, monkeypatch):
+    def audio(name, reason):
+        return {"device_label": "p3_BD", "file_type": "audio", "new_filename": name,
+                "storage_relpath": f"raw_data/p3_BD/{name}", "recording_stop_reason": reason}
+
+    rows = [audio("early.wav", "low voltage"), audio("normal.wav", "File size limit")]
+    folder = tmp_path / "raw_data/p3_BD"
+    folder.mkdir(parents=True)
+    entry = {"_device": "p3_BD", "check": "recording_stop_reason", "severity": "warning",
+             "message": "1 recording(s) stopped due to: low voltage"}
+    dialog = CollectionReviewDialog(collection_review_findings([entry], rows), rows, tmp_path)
+    opened = []
+    monkeypatch.setattr("cassn.gui.qc_review.QDesktopServices.openUrl", lambda url: opened.append(url.toLocalFile()) or True)
+    try:
+        assert dialog.file_picker.count() == 1 and "early.wav" in dialog.file_picker.currentText()
+        assert dialog.open_file.text() == "Open folder"
+        dialog.open_file.click()
+        assert opened == [str(folder)]
     finally:
         dialog.close()
 

@@ -12,7 +12,7 @@ import re
 from cassn.core.classification import format_size_floor
 from cassn.core.quality_control import (
     check_camera_serial, check_camera_timezones, check_file_size_floor,
-    check_sequence_integrity, qc_file_reference, qc_issue,
+    check_recording_stop_reasons, check_sequence_integrity, qc_file_reference, qc_issue,
 )
 
 
@@ -167,13 +167,22 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
             entry.get("check") != "camera_timezone_consistency" or i["code"] != "resolved_camera_offset"
         ) for i in issues):
             title = CHECK_TITLES.get(entry.get("check"), entry.get("check") or "QC finding")
+            files = []
+            if entry.get("check") == "recording_stop_reason":
+                messages = check_recording_stop_reasons(by_device[scope], scope, affected_files=files)
+                if "\n".join(messages) != entry.get("message"):
+                    files.clear()
             fallback.append({"severity": entry["severity"], "title": title,
                 "affected": scope, "action": "Review the check details and ingest log before uploading.",
-                "message": f"{scope}: {entry.get('message', '')}\n\nFile details were not retained for this check.",
-                "technical": diagnostic, "files": []})
+                "message": f"{scope}: {entry.get('message', '')}" + (
+                    "\n\nCompare the affected recordings with nearby files in their folder." if files
+                    else "\n\nFile details were not retained for this check."),
+                "technical": diagnostic, "files": files})
             continue
         for issue in issues:
             issue = dict(issue, scope=scope, technical=diagnostic)
+            if issue["code"] == "small_file":
+                issue["action"] = "Compare the affected file with the source card. Size alone does not prove corruption."
             # Bursts are group-level checks: the observed frames are context, not defective files.
             if issue["files"] and issue["code"] != "sequence_gap" and all(f["filename"] for f in issue["files"]):
                 for file in issue["files"]:

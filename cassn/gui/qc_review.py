@@ -1,4 +1,4 @@
-"""A compact collection check summary with selected evidence and optional diagnostics."""
+"""A compact collection check summary with selected evidence."""
 from __future__ import annotations
 
 from collections import Counter
@@ -6,14 +6,23 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from cassn.core.inventory import inventory_storage_relpath
 from cassn.gui.dialogs import WindowDialog, WindowMessageBox
+
+
+# Text identifies each level even when the user cannot distinguish the colors.
+_LEVELS = {
+    "error": ("Investigate", "#aa2828", "#ffaaa6"),
+    "warning": ("Review", "#805100", "#ffd185"),
+    "info": ("Notice", "#195c92", "#9ad2ff"),
+    "pending": ("Pending", "#545c64", "#c3cad1"),
+}
 
 
 class CollectionReviewDialog(WindowDialog):
@@ -51,19 +60,26 @@ class CollectionReviewDialog(WindowDialog):
         self.tree.setObjectName("qcFindings")
         self.tree.setAccessibleName("Card ingest findings")
         self.tree.setHeaderLabels(["Finding", "Affected"])
-        self.tree.setRootIsDecorated(False)
+        self.tree.setRootIsDecorated(any(f.get("pending_devices") for f in findings))
         self.tree.setWordWrap(True)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        labels = {"error": "Investigate", "warning": "Review", "info": "Notice"}
+        dark = self.tree.palette().base().color().lightness() < 128
         for finding in findings:
+            label, light_color, dark_color = _LEVELS[finding["severity"]]
+            color = QColor(dark_color if dark else light_color)
             item = QTreeWidgetItem([
-                f"{labels[finding['severity']]} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
+                f"{label} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
             ])
+            item.setData(0, Qt.DecorationRole, color)
             item.setToolTip(0, finding["title"])
             item.setData(0, Qt.UserRole, finding)
             self.tree.addTopLevelItem(item)
+            for device, description in finding.get("pending_devices", []):
+                child = QTreeWidgetItem(item, [f"Pending · {description}", device])
+                child.setData(0, Qt.DecorationRole, color)
+                child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
         layout.addWidget(self.tree, 2)
         self.next_step = QLabel()
         self.next_step.setWordWrap(True)
@@ -77,7 +93,7 @@ class CollectionReviewDialog(WindowDialog):
         controls = QHBoxLayout()
         self.file_picker = QComboBox()
         self.file_picker.setObjectName("qcAffectedFiles")
-        self.file_picker.setAccessibleName("Affected file to open")
+        self.file_picker.setAccessibleName("Affected file")
         self.file_picker.setMinimumContentsLength(20)
         self.file_picker.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         controls.addWidget(self.file_picker, 1)
@@ -85,11 +101,6 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.setObjectName("qcOpenFile")
         self.open_file.clicked.connect(self._open_file)
         controls.addWidget(self.open_file)
-        self.technical = QToolButton()
-        self.technical.setText("Technical details")
-        self.technical.setCheckable(True)
-        self.technical.toggled.connect(self._show_evidence)
-        controls.addWidget(self.technical)
         layout.addLayout(controls)
         buttons = QDialogButtonBox()
         back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
@@ -107,7 +118,6 @@ class CollectionReviewDialog(WindowDialog):
             self.details.setPlainText("No findings to address.")
             self.file_picker.hide()
             self.open_file.hide()
-            self.technical.hide()
 
     def _select_finding(self, *_):
         self.file_picker.clear()
@@ -126,17 +136,11 @@ class CollectionReviewDialog(WindowDialog):
         self.file_picker.setVisible(bool(seen))
         self.open_file.setVisible(bool(seen))
         self._update_open_button()
-        self._show_evidence()
+        self.details.setPlainText(finding["message"])
 
-    def _show_evidence(self, *_):
-        item = self.tree.currentItem()
-        if not item:
-            return
-        finding = item.data(0, Qt.UserRole)
-        text = finding["message"]
-        if self.technical.isChecked():
-            text += "\n\nTechnical details\n" + finding["technical"]
-        self.details.setPlainText(text)
+    def _audio_selected(self):
+        row = self._inventory.get(self.file_picker.currentData(), {})
+        return row.get("file_type") == "audio" or Path(row.get("new_filename", "")).suffix.lower() in {".wav", ".flac"}
 
     def _selected_path(self):
         key = self.file_picker.currentData()
@@ -149,19 +153,24 @@ class CollectionReviewDialog(WindowDialog):
                 return None
             path = (self._folder / relative).resolve()
             path.relative_to(self._folder.resolve())
+            if self._audio_selected():
+                folder = (self._folder / relative).parent.resolve()
+                folder.relative_to(self._folder.resolve())
+                return folder
             return path
         except (ValueError, OSError):
             return None
 
     def _update_open_button(self, *_):
         path = self._selected_path()
+        self.open_file.setText("Open folder" if self._audio_selected() else "Open file")
         self.open_file.setEnabled(path is not None)
         self.open_file.setToolTip(str(path) if path else "No matching inventory path is available. See the ingest log.")
 
     def _open_file(self):
         path = self._selected_path()
-        if path is None or not path.is_file():
-            WindowMessageBox.information(self, "File unavailable", "The retained file path is unavailable. Check the ingest log and storage location.")
+        if path is None or not (path.is_dir() if self._audio_selected() else path.is_file()):
+            WindowMessageBox.information(self, "Location unavailable", "Check the ingest log and storage location.")
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            WindowMessageBox.information(self, "Could not open file", f"Open this file manually:\n{path}")
+            WindowMessageBox.information(self, "Could not open location", f"Open this location manually:\n{path}")

@@ -698,7 +698,7 @@ def camera_date_discrepancies(
     return findings
 
 
-def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
+def check_recording_stop_reasons(entries: list, device_label: str, *, affected_files: list | None = None) -> list[str]:
     """Flag audio recordings that ended for a concerning reason.
 
     AudioMoth records why each recording stopped. "File size limit" is normal for
@@ -716,6 +716,8 @@ def check_recording_stop_reasons(entries: list, device_label: str) -> list[str]:
         reason = (e.get('recording_stop_reason') or '').strip()
         if reason and any(term in reason.lower() for term in concerning):
             counts[reason] += 1
+            if affected_files is not None and e.get("new_filename"):
+                affected_files.append(qc_file_reference(e))
     return [f"{n} recording(s) stopped due to: {reason}" for reason, n in counts.items()]
 
 

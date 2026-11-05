@@ -139,7 +139,8 @@ def test_collection_checks_require_explicit_continue(
         findings = [tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(tree.topLevelItemCount())]
         text = "\n".join(finding["message"] for finding in findings)
         assert "Old copy failure" not in text
-        for expected in ("p1_ML", "Small image", "Invalid offset", "Pending", "Missing latitude", "Missing elevation"):
+        assert tree.topLevelItem(tree.topLevelItemCount() - 1).text(0).startswith("Pending")
+        for expected in ("p1_ML", "Small image", "Invalid offset", "Missing latitude", "Missing elevation"):
             assert expected in text
         buttons = dialog.findChild(QDialogButtonBox)
         target = "Continue to review" if accept else "Back to card ingest"
@@ -313,6 +314,36 @@ def test_unreadable_collection_qc_report_remains_visible(workspace_window, tmp_p
     (tmp_path / "qc/qc_report.json").write_text(contents)
     findings = window._collection_review_findings([])
     assert any(f["severity"] == "error" and f["title"] == "QC report could not be read" for f in findings)
+
+
+def test_review_groups_only_empty_pending_devices(workspace_window, tmp_path):
+    from PySide6.QtWidgets import QLabel, QTreeWidgetItem
+    from cassn.gui.qc_review import CollectionReviewDialog
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    window.file_inventory = [{"device_label": "p3_SA", "new_filename": "one.jpg"}]
+    for device, status, count in [
+        ("p1_ML", "Pending", "0"), ("p2_ML", "Pending", "0"),
+        ("p3_SA", "Pending", "0"), ("p3_ML", "Incomplete", "1"),
+    ]:
+        row = QTreeWidgetItem(window.device_tree, [device, "Camera", status, count])
+        row.setData(0, Qt.UserRole, device)
+    dialog = CollectionReviewDialog(window._collection_review_findings([]), window.file_inventory, tmp_path)
+    try:
+        assert dialog.findChild(QLabel, "qcSummary").text() == "Needs investigation: 1 · To review: 1 · Notices: 0"
+        tree = dialog.tree
+        assert tree.currentItem().text(1) == "p3_ML"
+        assert tree.topLevelItem(1).text(1) == "p3_SA"
+        parent = tree.topLevelItem(2)
+        assert parent.childCount() == 2 and not parent.isExpanded()
+        assert [parent.child(i).text(1) for i in range(2)] == ["p1_ML", "p2_ML"]
+        assert len({tree.topLevelItem(i).data(0, Qt.DecorationRole).name() for i in range(3)}) == 3
+        parent.setExpanded(True)
+        tree.setCurrentItem(parent.child(0))
+        assert dialog.details.toPlainText() == "p1_ML has no staged files."
+    finally:
+        dialog.close()
 
 
 def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_window, tmp_path, monkeypatch):

@@ -819,9 +819,10 @@ to interpret it.
 Before leaving **Card ingest**, the checks dialog groups findings by the action
 needed. Unusual findings retain affected filenames and evidence; when the same
 file is unusually small and lacks a capture time or serial, its symptoms appear
-together. Select a finding to see next steps, measured sizes or burst context,
-and use **Open file** to inspect an available staged file. **Technical details**
-expands the original diagnostic and check explanation.
+together. Select a finding to see the next step, measured sizes or burst details.
+For an image, **Open file** opens the selected image. For audio, **Open folder**
+shows the directory containing the selected recording so you can compare its size
+with nearby recordings. Pending devices with zero staged files share one collapsed row.
 
 Resolved camera timezone-offset discrepancies appear as one notice with photo
 and device counts, without an exhaustive filename list. This means the timezone
