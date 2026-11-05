@@ -116,3 +116,42 @@ def test_unreadable_existing_session_is_never_overwritten(windows, monkeypatch):
     assert window.current_deployment_folder is None
     assert window.tabs.currentIndex() == 0
     assert path.read_text() == '{"interrupted":'
+
+
+def test_box_dismiss_restores_from_current_proof_and_never_hides_an_unverified_batch(windows):
+    from cassn.core.verification_evidence import verification_context, write_result
+
+    source = windows()
+    source.box_config = BoxConfig(field_data_folder_id="test-root")
+    _, session = saved_work(source)
+    folder = source.current_deployment_folder
+    context = verification_context(folder, source.file_inventory, source.metadata, source.box_config)
+    for kind in ("box", "hash"):
+        write_result(folder, kind, context, ok=True, summary="passed")
+    combined = folder / "qc/box_upload_verification.json"
+    evidence = combined.read_bytes()
+    reopened = windows()
+    reopened.box_config = source.box_config
+    def reopen():
+        reopened.restore_session(json.loads(session.read_text()))
+
+    reopen()
+    assert reopened.box_upload_complete and not reopened.dismiss_box_btn.isHidden()
+    assert not reopened.upload_group.isHidden() and reopened.hash_group.isHidden()
+    reopened.dismiss_box_btn.click()
+    assert reopened.upload_group.isHidden() and combined.read_bytes() == evidence
+    # Reopening the same event reconstructs its result. The display dismissal
+    # cannot suppress a later run, even if an old click is still queued.
+    reopen()
+    reopened._box_operation_active = True
+    reopened.dismiss_box_btn.click()
+    assert not reopened.upload_group.isHidden()
+    reopened._box_operation_active = False
+    reopened.file_inventory[0]["file_size_bytes"] = 1000
+    reopened.dismiss_box_btn.click()
+    assert reopened.dismiss_box_btn.isHidden() and not reopened.upload_group.isHidden()
+    assert not reopened.box_upload_complete
+    write_result(folder, "hash", context, ok=False, summary="hash mismatch")
+    reopen()
+    assert reopened.dismiss_box_btn.isHidden() and not reopened.upload_group.isHidden()
+    assert not reopened.box_upload_complete

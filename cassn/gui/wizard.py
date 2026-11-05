@@ -699,6 +699,7 @@ class FieldDataWizard(QMainWindow):
                 )
                 self.device_tree.topLevelItem(i).setText(3, str(actual_count))
 
+        self._restore_box_result()
         self.tabs.setCurrentIndex(1)
         self.log(f"Resumed session: {len(self.file_inventory)} files already in inventory.")
         if removed_duplicates:
@@ -1300,6 +1301,12 @@ class FieldDataWizard(QMainWindow):
         )
         self.cancel_upload_btn.hide()
         upload_layout.addWidget(self.cancel_upload_btn, alignment=Qt.AlignRight)
+
+        self.dismiss_box_btn = QPushButton("Dismiss")
+        self.dismiss_box_btn.setToolTip("Hide this verified Box result in this window.")
+        self.dismiss_box_btn.clicked.connect(self._dismiss_verified_box)
+        self.dismiss_box_btn.hide()
+        upload_layout.addWidget(self.dismiss_box_btn, alignment=Qt.AlignRight)
 
         self.upload_group.setLayout(upload_layout)
         self.upload_group.hide()
@@ -3333,6 +3340,11 @@ class FieldDataWizard(QMainWindow):
 
     def update_review_tab(self):
         """Present the inventory as a readable summary without enumerating media."""
+        if not self.dismiss_box_btn.isHidden() and not self._box_operation_active:
+            _, verified = readiness(self.current_deployment_folder, self.file_inventory,
+                                    self.metadata, self.box_config)
+            if not verified:
+                self._show_saved_box_result(False)
         metadata = self.metadata
         counts = Counter(row.get("device_label", "") for row in self.file_inventory)
         types = Counter(row.get("file_type", "") for row in self.file_inventory)
@@ -3482,9 +3494,51 @@ class FieldDataWizard(QMainWindow):
     # Box upload + post-upload verification
     # ------------------------------------------------------------------
 
+    def _show_saved_box_result(self, verified):
+        self.box_upload_complete = verified
+        self.upload_group.setTitle("Box Upload Complete" if verified else "Box Upload Needs Review")
+        self.upload_group.show()
+        self.upload_metrics_label.clear()
+        self.cancel_upload_btn.hide()
+        self.dismiss_box_btn.setVisible(verified)
+        self.upload_progress_bar.setVisible(verified)
+        self.upload_status_label.setStyleSheet("color: green; font-weight: bold;" if verified else "")
+        if verified:
+            self.upload_progress_bar.setRange(0, 100)
+            self.upload_progress_bar.setValue(100)
+            self.upload_status_label.setText("✓ Upload complete. Box file list and hashes verified.")
+        else:
+            self.upload_status_label.setText("Check the upload and verification results for the current batch.")
+
+    def _restore_box_result(self):
+        """A reopened session can show success only from matching persisted evidence."""
+        self.dismiss_box_btn.hide()
+        self.upload_group.hide()
+        self.hash_group.hide()
+        self.box_upload_complete = False
+        from cassn.box.publication import STATE_PATH
+        if (self.current_deployment_folder / STATE_PATH).is_file() or has_box_upload_history(self.current_deployment_folder):
+            _, verified = readiness(self.current_deployment_folder, self.file_inventory,
+                                    self.metadata, self.box_config)
+            self._show_saved_box_result(verified)
+
+    def _dismiss_verified_box(self):
+        if self._box_operation_active:
+            return
+        _, verified = readiness(self.current_deployment_folder, self.file_inventory,
+                                self.metadata, self.box_config)
+        if not self.box_upload_complete or not verified:
+            self._show_saved_box_result(False)
+            return
+        self.dismiss_box_btn.hide()
+        self.upload_group.hide()
+
     def _set_box_controls_busy(self, busy: bool):
         """Keep one deployment selected until its Box operation is complete."""
         if busy:
+            self.dismiss_box_btn.hide()
+            if self.box_upload_complete:
+                self._show_saved_box_result(False)
             self._box_operation_token = object()
         self._box_operation_active = busy
         for button in (self.open_btn, self.switch_deployment_btn, self.new_btn, self.exit_btn):
@@ -3516,7 +3570,8 @@ class FieldDataWizard(QMainWindow):
             FieldDataWizard._set_box_controls_busy(self, False)
             self.cancel_upload_btn.hide()
             if isinstance(exc, OSError):
-                self.hash_status_label.setText(f"Verification could not start: {exc}")
+                target = self.upload_status_label if self.hash_group.isHidden() else self.hash_status_label
+                target.setText(f"Verification could not start: {exc}")
                 QMessageBox.warning(self, "Verification Could Not Start",
                                     f"Could not save verification evidence. No check started. {exc}")
                 return False
@@ -3600,6 +3655,11 @@ class FieldDataWizard(QMainWindow):
         self._box_operation_token = object()
         self._box_operation_active = True
         self._update_copy_action()
+        self.box_upload_complete = False
+        self.dismiss_box_btn.hide()
+        self.hash_group.hide()
+        self.upload_metrics_label.clear()
+        self.upload_group.setTitle("Box Upload Progress")
         self.upload_group.show()
         self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
@@ -3804,9 +3864,10 @@ class FieldDataWizard(QMainWindow):
         self.cancel_upload_btn.hide()
 
         if success:
-            self.upload_progress_bar.setValue(100)
-            self.upload_status_label.setText(f"✓ {message}")
-            self.upload_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.upload_group.setTitle("Box Metadata Publication")
+            self.upload_metrics_label.clear()
+            self.upload_progress_bar.setRange(0, 0)
+            self.upload_status_label.setText("Media transfer complete. Publishing event metadata before verification…")
             self.box_upload_complete = False  # Provenance publication is still pending.
             # Update provenance in both metadata CSVs
             self._write_upload_provenance()
@@ -3914,14 +3975,15 @@ class FieldDataWizard(QMainWindow):
 
         self._post_upload_box_summary = ""
         self._post_upload_box_issues = []
-        self.hash_group.setTitle("Post-upload Verification Progress")
-        self.hash_group.show()
-        self.hash_progress_bar.setRange(0, 100)
-        self.hash_progress_bar.setValue(0)
-        self.hash_status_label.setStyleSheet("")
-        self.hash_status_label.setText("Starting post-upload verification...")
+        self.upload_group.setTitle("Box Upload Verification")
+        self.upload_group.show()
+        self.dismiss_box_btn.hide()
+        self.cancel_upload_btn.hide()
+        self.hash_group.hide()
+        self.upload_metrics_label.clear()
+        self.upload_progress_bar.setRange(0, 100)
+        self.upload_progress_bar.show()
         self.upload_status_label.setStyleSheet("")
-        self.upload_status_label.setText("Upload complete. Running post-upload verification...")
         self.log("Starting automatic post-upload verification...")
 
         self.upload_now_btn.setEnabled(False)
@@ -3929,8 +3991,8 @@ class FieldDataWizard(QMainWindow):
         self.fixity_btn.setEnabled(False)
         self.new_btn.setEnabled(False)
 
-        self.hash_progress_bar.setValue(5)
-        self.hash_status_label.setText("Checking Box file list and folder contents...")
+        self.upload_progress_bar.setValue(5)
+        self.upload_status_label.setText("Checking Box file list and folder contents...")
         self.box_verify_thread = BoxVerifyThread(
             self.current_deployment_folder,
             self.file_inventory,
@@ -3958,8 +4020,8 @@ class FieldDataWizard(QMainWindow):
             self._finish_post_upload_verification(False, "Post-upload verification failed during Box file-list check.", [])
             return
 
-        self.hash_progress_bar.setValue(10)
-        self.hash_status_label.setText("Box file list checked. Starting Box ↔ local hash verification...")
+        self.upload_progress_bar.setValue(10)
+        self.upload_status_label.setText("Box file list checked. Starting Box ↔ local hash verification...")
         self.log("Starting automatic Box ↔ local hash verification...")
 
         self.fixity_thread = FixityCheckThread(
@@ -3979,19 +4041,19 @@ class FieldDataWizard(QMainWindow):
             return
         if total <= 0:
             if filename:
-                self.hash_status_label.setText(filename)
+                self.upload_status_label.setText(filename)
                 self.log(f"  Hash verify: {filename}")
             return
 
         hash_percent = int((checked / total) * 90)
         percent = min(100, 10 + hash_percent)
-        self.hash_progress_bar.setValue(percent)
+        self.upload_progress_bar.setValue(percent)
         if filename:
-            self.hash_status_label.setText(
+            self.upload_status_label.setText(
                 f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%) — {filename}"
             )
         else:
-            self.hash_status_label.setText(
+            self.upload_status_label.setText(
                 f"Verifying Box ↔ local hashes: {checked}/{total} ({percent}%)"
             )
 
@@ -4063,22 +4125,23 @@ class FieldDataWizard(QMainWindow):
 
         self._box_operation_active = False
         self._update_copy_action()
-        self.hash_progress_bar.setValue(100 if hash_ok else self.hash_progress_bar.value())
+        self.dismiss_box_btn.hide()
+        if self.upload_progress_bar.maximum() == 0:
+            self.upload_progress_bar.setRange(0, 100)
+            self.upload_progress_bar.setValue(0)
+        self.upload_progress_bar.setValue(100 if hash_ok else self.upload_progress_bar.value())
         final_summary = (
             "Post-upload verification complete.\n"
             f"Box file list: {self._post_upload_box_summary or 'Not run'}\n"
             f"Box/local hashes: {hash_summary}"
         )
         if all_ok:
-            self.hash_status_label.setText("✓ Post-upload verification complete: Box file list and hashes verified.")
-            self.hash_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.upload_status_label.setText("✓ Upload and post-upload verification complete.")
+            self._show_saved_box_result(True)
             QMessageBox.information(self, "Post-upload Verification Complete", final_summary)
             return
 
         if has_box_warning and hash_ok and not box_missing and not hash_issues:
-            self.hash_status_label.setText("⚠ Post-upload verification complete with Box extras.")
-            self.hash_status_label.setStyleSheet("color: orange; font-weight: bold;")
+            self.upload_status_label.setStyleSheet("color: orange; font-weight: bold;")
             self.upload_status_label.setText("⚠ Upload verified with Box extras.")
             msg = QMessageBox(self)
             msg.setWindowTitle("Post-upload Verification Warning")
@@ -4088,8 +4151,7 @@ class FieldDataWizard(QMainWindow):
             msg.exec()
             return
 
-        self.hash_status_label.setText("✗ Post-upload verification found issues.")
-        self.hash_status_label.setStyleSheet("color: red; font-weight: bold;")
+        self.upload_status_label.setStyleSheet("color: red; font-weight: bold;")
         self.upload_status_label.setText("✗ Upload completed, but post-upload verification found issues.")
         msg = QMessageBox(self)
         msg.setWindowTitle("Post-upload Verification Issues")
@@ -4313,6 +4375,9 @@ class FieldDataWizard(QMainWindow):
             "color: green; font-weight: bold;" if ok else "color: red; font-weight: bold;"
         )
 
+        if self.box_upload_complete:
+            self._show_saved_box_result(True)
+
         # Aggregate fixity_check entry covering the whole run
         severity = "pass" if ok else "error"
         append_qc_report(deployment_folder, "file_hash_verification_run", "", severity, summary)
@@ -4396,6 +4461,8 @@ class FieldDataWizard(QMainWindow):
         FieldDataWizard._set_box_controls_busy(self, False)
         self.box_verify_btn.setText("Verify Box Upload")
         self.log(operation_message(summary, ok, warning=ok and bool(issues)))
+        if self.box_upload_complete:
+            self._show_saved_box_result(True)
 
         # Aggregate result
         severity = "pass" if ok and not issues else ("warning" if ok else "error")

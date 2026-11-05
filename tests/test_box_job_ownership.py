@@ -40,7 +40,7 @@ class Harness(QObject):
         'on_upload_progress', 'on_upload_metrics', 'on_upload_finished', '_write_upload_provenance',
         '_on_provenance_upload_finished', '_start_post_upload_verification',
         '_on_auto_box_verify_finished', '_on_auto_fixity_progress',
-        '_on_auto_fixity_finished', '_finish_post_upload_verification',
+        '_on_auto_fixity_finished', '_finish_post_upload_verification', '_show_saved_box_result',
         '_on_fixity_progress', '_on_fixity_finished', '_on_box_verify_finished',
         'run_fixity_check', 'run_box_verify', 'open_different_deployment',
         'start_new_deployment', 'closeEvent',
@@ -69,6 +69,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
+                     'dismiss_box_btn', 'upload_group',
                      'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',
@@ -184,6 +185,9 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
     assert context._box_operation_active
     verify = context.box_verify_thread
     assert verify.started
+    context.upload_group.setTitle.assert_called_with("Box Upload Verification")
+    context.hash_group.show.assert_not_called()
+    context.dismiss_box_btn.hide.assert_called()
     verify.result.emit(True, 'listed', [])
     assert context._box_operation_active
     fixity = context.fixity_thread
@@ -193,6 +197,7 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
     assert context.fixity_check_run
     assert all(call.args[0] == context.current_deployment_folder for call in qc.call_args_list)
     assert (context.current_deployment_folder / 'qc/box_upload_verification.json').is_file()
+    context.dismiss_box_btn.setVisible.assert_called_with(True)
 
 
 def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
