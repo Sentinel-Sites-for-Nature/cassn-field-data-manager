@@ -1,6 +1,6 @@
 """Keep deployment review and transfer progress reachable on one scrollable page."""
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QScrollArea, QWidget
 
 from cassn.gui.appearance import workspace_label
@@ -9,7 +9,6 @@ from cassn.gui.appearance import workspace_label
 class ReviewPage(QScrollArea):
     def __init__(self):
         super().__init__()
-        self.groups = []
         self.setWidgetResizable(True)
         self.setFrameShape(QScrollArea.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -33,19 +32,4 @@ class ReviewPage(QScrollArea):
                 color: palette(window-text);
             }
         """)
-        self.progress_heading = workspace_label("Upload and staging progress", "sectionTitle", wrap=True)
-
-    def watch_progress(self, groups):
-        self.groups = groups
-        for group in groups:
-            group.installEventFilter(self)
-        self._update_heading()
-
-    def eventFilter(self, obj, event):
-        if event.type() in (QEvent.ShowToParent, QEvent.HideToParent) and obj in self.groups:
-            self._update_heading()
-        return super().eventFilter(obj, event)
-
-    def _update_heading(self):
-        visible = any(not group.isHidden() for group in self.groups)
-        self.progress_heading.setVisible(visible)
+        self.progress_heading = workspace_label("Upload and Stage Data", "sectionTitle", wrap=True)

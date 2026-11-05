@@ -4,8 +4,8 @@ from pathlib import Path
 import re
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt
-from PySide6.QtGui import QIcon, QPalette, QPixmap, QRegion
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QPalette, QPixmap, QRegion
+from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -71,9 +71,6 @@ QLabel[role="platformLogo"] {{ background: transparent; padding: 2px 4px; }}
 QFrame#platformHeader QLabel[role="platformLogo"] {{ padding: 2px 0; }}
 QToolButton#progressDisclosure {{ padding: 5px; border: none; background: transparent; color: #163f31; }}
 QToolButton#progressDisclosure:hover, QToolButton#progressDisclosure:focus {{ background: #c1d9cb; }}
-QToolButton#prepareUpload {{ background: {accent}; color: {on_accent}; border-color: {accent}; padding: 10px 16px; font-weight: 600; }}
-QToolButton#prepareUpload::menu-indicator {{ image: none; width: 0; height: 0; }}
-QToolButton#prepareUpload:pressed {{ background: {"#a4dccc" if dark else "#174c3c"}; color: {on_accent}; }}
 QGroupBox[role="cardJob"] QPushButton, QGroupBox[role="cardJob"] QToolButton {{ padding: 5px 9px; }}
 QLineEdit, QComboBox, QDateEdit, QSpinBox {{ background: {panel}; color: {text}; border: 1px solid {line}; border-radius: 5px; padding: 7px; selection-background-color: {accent}; selection-color: {on_accent}; }}
 QLineEdit:read-only, QDateEdit:read-only {{ background: {background}; }}
@@ -223,7 +220,7 @@ class PlatformPanel(QGroupBox):
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
 
-    def add_action_button(self, label, action):
+    def add_action_button(self, label, action, *, details=False):
         button = QPushButton(label)
         button.clicked.connect(action.trigger)
 
@@ -235,7 +232,7 @@ class PlatformPanel(QGroupBox):
         action.visibleChanged.connect(lambda: button.setVisible(action.isVisible()))
         button.setVisible(action.isVisible())
         sync()
-        self.body.addWidget(button, alignment=Qt.AlignRight)
+        (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
         return button
 
     def title(self):
@@ -291,60 +288,3 @@ class PlatformPanel(QGroupBox):
         if event.type() in (QEvent.FontChange, QEvent.DevicePixelRatioChange):
             self._size_header()
         return super().eventFilter(obj, event)
-
-
-class PlatformMenu(QMenu):
-    """Native actions handle selection, keyboard navigation, tooltips and disabled states."""
-
-    # The Sound Hub artwork has white margins. Give it more height than the other marks.
-    _logo_heights = {"box": 32, "soundhub": 60, "wildlife_insights": 36}
-
-    def __init__(self, entries, parent):
-        super().__init__(parent)
-        self._logos = {}
-        for action, platform in entries:
-            action.setIcon(QIcon(str(ARTWORK / _PLATFORMS[platform][1])))
-            # Keep the wordmark wide and expose its name as a real accessible label.
-            action.setIconVisibleInMenu(False)
-            self.addAction(action)
-            logo = platform_logo(platform, height=self._logo_heights[platform])
-            logo.setParent(self)
-            logo.setAlignment(Qt.AlignCenter)
-            logo.setAttribute(Qt.WA_TransparentForMouseEvents)
-            opacity = QGraphicsOpacityEffect(logo)
-            logo.setGraphicsEffect(opacity)
-            self._logos[action] = logo
-            action.changed.connect(self._place_logos)
-        self.setToolTipsVisible(True)
-        self.aboutToShow.connect(self._fit_rows)
-        self._fit_rows()
-
-    def _fit_rows(self):
-        unit = self.fontMetrics().height()
-        column = min(10 * unit, 216)
-        logo_height = min(4 * unit, 96)
-        self.setStyleSheet(f"""
-            QMenu::item {{ padding: {logo_height // 2}px {unit}px {logo_height // 2}px {column + unit}px; }}
-        """)
-        for logo in self._logos.values():
-            logo.setFixedSize(column, logo_height)
-            logo._refresh()
-        self._place_logos()
-
-    def _place_logos(self):
-        for action, logo in self._logos.items():
-            rect = self.actionGeometry(action)
-            logo.setVisible(action.isVisible() and rect.isValid())
-            if action.isVisible() and rect.isValid():
-                logo.move(rect.left() + self.fontMetrics().height() // 2,
-                          rect.center().y() - logo.height() // 2)
-                logo.setEnabled(action.isEnabled())
-                logo.graphicsEffect().setOpacity(1 if action.isEnabled() else 0.5)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place_logos()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._place_logos()

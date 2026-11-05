@@ -139,7 +139,8 @@ def test_box_dismiss_restores_from_current_proof_and_never_hides_an_unverified_b
     assert reopened.box_upload_complete and not reopened.dismiss_box_btn.isHidden()
     assert not reopened.upload_group.isHidden() and reopened.hash_group.isHidden()
     reopened.dismiss_box_btn.click()
-    assert reopened.upload_group.isHidden() and combined.read_bytes() == evidence
+    assert not reopened.upload_group.isHidden() and not reopened.upload_group.disclosure.isChecked()
+    assert combined.read_bytes() == evidence
     # Reopening the same event reconstructs its result. The display dismissal
     # cannot suppress a later run, even if an old click is still queued.
     reopen()

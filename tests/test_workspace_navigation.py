@@ -34,23 +34,19 @@ def workspace_window(monkeypatch, request):
 
 @pytest.mark.parametrize("workspace_window", [hosted_config("uc"), hosted_config("csu"), BoxConfig()], indirect=True)
 def test_review_exposes_uc_staging_without_soundhub_upload(workspace_window):
-    from PySide6.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QPushButton, QToolButton
 
     _app, window = workspace_window
     uc = window.box_config.profile != "csu"
     assert window.soundhub_stage_btn.isVisible() == uc
     assert window.open_soundhub_btn.isVisible() == uc
-    buttons = [button for button in window.tabs.widget(2).findChildren(QToolButton) if button.menu()]
-    # Qt requires && to render a literal ampersand instead of a mnemonic.
-    prepare = next(button for button in buttons if button.text() == "Prepare && Upload ▾")
-    assert window.upload_now_btn in prepare.menu().actions()
-    assert window.soundhub_stage_btn in prepare.menu().actions()
-    menus = [button.menu() for button in buttons]
-    visible = [action for menu in menus for action in menu.actions() if action.isVisible()]
-    assert (window.soundhub_stage_btn in visible) == uc
-    assert (window.open_soundhub_btn in visible) == uc
-    assert not any("Upload Bird Data to SoundHub" in action.text() or "SoundHub Landing Zone" in action.text()
-                   for action in visible)
+    window.tabs.setCurrentIndex(2)
+    assert window.soundhub_group.isHidden() != uc
+    assert window.soundhub_panel_button.text() == "Stage bird audio"
+    assert not any(button.menu() for button in window.tabs.widget(2).findChildren(QToolButton))
+    actions = window.soundhub_group.findChildren(QPushButton)
+    assert not any("Upload Bird Data to SoundHub" in button.text() or "SoundHub Landing Zone" in button.text()
+                   for button in actions)
 
 
 @pytest.mark.parametrize("workspace_window", [hosted_config("uc")], indirect=True)
@@ -471,7 +467,8 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     before = session.read_bytes()
     window.dismiss_soundhub_btn.click()
     window._refresh_soundhub_resume()
-    assert window.soundhub_group.isHidden() and session.read_bytes() == before
+    assert not window.soundhub_group.isHidden() and not window.soundhub_group.disclosure.isChecked()
+    assert session.read_bytes() == before
     window.restore_session(json.loads(before))
     window.tabs.setCurrentIndex(2)
     assert not window.soundhub_group.isHidden() and not window.dismiss_soundhub_btn.isHidden()

@@ -84,11 +84,12 @@ class WildlifeInsightsControl(QObject):
         self.next_job = 0
         self.read_error = False
         self._unproven_verified = False
+        self.has_selection = False
         self.group = PlatformPanel("wildlife_insights")
         box = self.group.body
         self.verified_summary = workspace_label("", "contextTitle", wrap=True)
         box.addWidget(self.verified_summary)
-        self.active_summary = workspace_label("", "contextTitle", wrap=True)
+        self.active_summary = workspace_label("No camera images are ready to upload.", "contextTitle", wrap=True)
         box.addWidget(self.active_summary)
         self.new_cameras = workspace_label("", "muted", wrap=True)
         self.new_cameras.hide()
@@ -113,13 +114,12 @@ class WildlifeInsightsControl(QObject):
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.clicked.connect(self.dismiss)
         self.dismiss_button.hide()
-        box.addWidget(self.dismiss_button, alignment=Qt.AlignRight)
+        self.group.details.addWidget(self.dismiss_button, alignment=Qt.AlignRight)
         layout.addWidget(self.group)
-        self.group.hide()
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
-        self.panel_button = self.group.add_action_button("Continue uploads", self.action)
-        self.panel_button.setAccessibleName("Continue Wildlife Insights uploads")
+        self.panel_button = self.group.add_action_button("Upload images", self.action)
+        self.panel_button.setAccessibleDescription("Review camera deployments for Wildlife Insights.")
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.poll)
@@ -146,8 +146,12 @@ class WildlifeInsightsControl(QObject):
                 self.read_error = True
                 self.notice.setText(str(exc))
             self.render()
-        self.action.setEnabled(bool(folder and not self.read_error and (not self.process or self.process.property("operation") == "status")
+        self._refresh_action()
+
+    def _refresh_action(self):
+        self.action.setEnabled(bool(self.folder and not self.read_error and (not self.process or self.process.property("operation") == "status")
                                     and not self.window.card_ingest_threads))
+        self.panel_button.setEnabled(self.has_selection and self.action.isEnabled())
 
     def render(self):
         self.tree.clear()
@@ -193,8 +197,11 @@ class WildlifeInsightsControl(QObject):
         for stage, count in states.items():
             noun = "camera" if count == 1 else "cameras"
             summary.append(f"{count} {noun} {descriptions[stage]}")
-        self.active_summary.setText(" · ".join(summary))
-        self.active_summary.setVisible(bool(summary))
+        self.has_selection = bool(self.jobs or new or eligibility_error)
+        self._refresh_action()
+        idle = not (self.has_selection or self.notice.text())
+        self.active_summary.setText("No camera images are ready to upload." if idle else " · ".join(summary))
+        self.active_summary.setVisible(bool(summary) or idle)
         self.new_cameras.setVisible(bool(new or eligibility_error))
         if eligibility_error:
             self.new_cameras.setText(f"Cannot check newly staged cameras. {eligibility_error}")
@@ -209,8 +216,8 @@ class WildlifeInsightsControl(QObject):
         if not finished:
             self.dismissed = None
         self.panel_button.setVisible(not finished)
-        self.dismiss_button.setVisible(finished)
-        self.group.setVisible(bool(self.jobs or new or eligibility_error or self.notice.text()) and self.dismissed != frozenset(self.jobs))
+        self.panel_button.setText("Continue uploads" if self.jobs else "Upload images")
+        self.dismiss_button.setVisible(finished and self.dismissed != frozenset(self.jobs))
         if any(not complete(j, sources) for j in self.jobs.values()):
             self.timer.start()
         else:
@@ -378,7 +385,8 @@ class WildlifeInsightsControl(QObject):
     def dismiss(self):
         if self.can_dismiss():
             self.dismissed = frozenset(self.jobs)
-            self.group.hide()
+            self.group.disclosure.setChecked(False)
+            self.dismiss_button.hide()
 
     def call(self, operation, payload, receive):
         if self.closed or self.process or not self.folder:
@@ -711,7 +719,7 @@ class WildlifeInsightsControl(QObject):
                 self.unavailable.add(key)
                 self.render()
                 self.delivery_keys.add(key)
-                self.message("Use Prepare & Upload to resume the saved selection.")
+                self.message("Choose Continue uploads to resume the saved selection.")
             else:
                 self.accept_status(key, result)
 

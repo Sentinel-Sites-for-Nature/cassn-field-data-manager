@@ -24,7 +24,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
         window.tabs.setCurrentIndex(2)
         window.show()
         page = window.tabs.widget(2)
-        assert page.progress_heading.isHidden()
+        assert not page.progress_heading.isHidden()
         groups = [window.upload_group, window.hash_group, window.soundhub_group, window.wi_control.group]
         for group in groups:
             group.show()
@@ -62,7 +62,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             assert {b.text() for b in page.findChildren(QPushButton)}.isdisjoint({"Summary ↑", "Progress ↓"})
         for group in groups:
             group.hide()
-        assert page.progress_heading.isHidden()
+        assert not page.progress_heading.isHidden()
     finally:
         window.close()
         app.processEvents()

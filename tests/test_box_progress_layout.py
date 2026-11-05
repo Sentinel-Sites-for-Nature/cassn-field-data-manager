@@ -5,8 +5,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAccessible
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolButton
 
 from cassn.box.auth import hosted_config
@@ -14,7 +12,7 @@ from cassn.gui.wizard import FieldDataWizard
 from cassn.lookups import LookupTables
 
 
-def test_platform_shortcuts_share_menu_actions_and_box_connection_state(monkeypatch):
+def test_platform_buttons_use_guarded_actions_and_box_connection_state(monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", "/synthetic/helper"))
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: True)
@@ -27,9 +25,9 @@ def test_platform_shortcuts_share_menu_actions_and_box_connection_state(monkeypa
         window.set_box_connection_state(True)
         assert not window.connect_box_btn.isEnabled()
         for group, action, label in (
-            (window.upload_group, window.upload_now_btn, "Continue Box upload"),
-            (window.soundhub_group, window.soundhub_stage_btn, "Continue SoundHub staging"),
-            (window.wi_control.group, window.wi_control.action, "Continue uploads"),
+            (window.upload_group, window.upload_now_btn, "Upload to Box"),
+            (window.soundhub_group, window.soundhub_stage_btn, "Stage bird audio"),
+            (window.wi_control.group, window.wi_control.action, "Upload images"),
         ):
             button = next(b for b in group.findChildren(QPushButton) if b.text() == label)
             action.triggered.disconnect()
@@ -62,6 +60,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         window.current_deployment_folder = tmp_path
         monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "audio")
         window.upload_group.show()
+        window.upload_progress_bar.show()  # The transfer worker has started.
         window.cancel_upload_btn.show()
         window.hash_group.show()
         window.soundhub_group.show()
@@ -172,51 +171,28 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         window.close()
         app.processEvents()
 
-@pytest.mark.parametrize("zoom", [100, 130, 200])
-def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch, zoom):
+@pytest.mark.parametrize(("profile", "helper"), [("uc", "/test/helper"), ("uc", ""), ("csu", "")])
+def test_platform_panels_are_present_before_work_and_match_the_project(monkeypatch, profile, helper):
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: setattr(self, "wi_upload_helper", "/synthetic/helper"))
-    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
-    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
-    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", helper))
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: False)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda _: [])
+    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config(profile))
     try:
         window.tabs.setCurrentIndex(2)
-        window.resize(930, 740)
-        window.workspace.set_zoom(zoom)
         window.show()
-        prepare = window.findChild(QToolButton, "prepareUpload")
-        menu = prepare.menu()
-        menu.popup(prepare.mapToGlobal(prepare.rect().bottomLeft()))
         app.processEvents()
-        actions = menu.actions()
-        assert actions == [window.upload_now_btn, window.soundhub_stage_btn, window.wi_control.action]
-        assert [action.text() for action in actions] == [
-            "Upload to Box now", "Prepare and stage bird audio for Wildlife Sound Hub",
-            "Upload images to Wildlife Insights",
-        ]
-        logos = menu.findChildren(QLabel)
-        assert [QAccessible.queryAccessibleInterface(logo).text(QAccessible.Name) for logo in logos] == [
-            "Box logo", "Wildlife Sound Hub logo", "Wildlife Insights logo",
-        ]
-        assert menu.width() <= window.width()
-        for action, logo, minimum_width in zip(actions, logos, [55, 120, 135]):
-            assert logo.isVisible() and not logo.pixmap().isNull()
-            assert logo.pixmap().deviceIndependentSize().width() >= minimum_width
-            assert menu.actionGeometry(action).contains(logo.geometry())
-            assert logo.testAttribute(Qt.WA_TransparentForMouseEvents)
-        window.soundhub_stage_btn.setEnabled(False)
-        assert not logos[1].isEnabled()
-        window.soundhub_stage_btn.setText("Bird Audio Already Staged")
-        assert menu.actions()[1].text() == "Bird Audio Already Staged"
-        # Activating through the logo uses the original action exactly once.
-        clicked = []
-        window.upload_now_btn.triggered.disconnect()
-        window.upload_now_btn.triggered.connect(lambda: clicked.append(True))
-        window.upload_now_btn.setEnabled(True)
-        QTest.mouseClick(menu, Qt.LeftButton, pos=logos[0].geometry().center())
-        assert clicked == [True]
+        assert window.upload_group.isVisible()
+        assert window.soundhub_group.isVisible() == (profile == "uc")
+        assert not window.findChild(QToolButton, "prepareUpload")
+        assert window.tabs.widget(2).progress_heading.text() == "Upload and Stage Data"
+        if helper:
+            assert window.wi_control.group.isVisible() and not window.wi_control.action.isEnabled()
+        else:
+            assert not getattr(window, "wi_control", None)
+        assert window.switch_deployment_btn in window.file_menu.actions()
+        assert window.new_btn in window.file_menu.actions()
     finally:
-        window.current_deployment_folder = None
         window.close()
         app.processEvents()
 

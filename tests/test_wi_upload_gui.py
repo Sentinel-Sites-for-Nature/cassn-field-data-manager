@@ -397,7 +397,8 @@ def test_dismiss_only_verified_wi_panel_and_restore(work, tmp_path):
     calls = (tmp_path / "calls").read_text()
     ctrl.dismiss_button.click()
     ctrl.render()
-    assert ctrl.group.isHidden()
+    assert not ctrl.group.isHidden() and ctrl.dismiss_button.isHidden()
+    assert not ctrl.group.disclosure.isChecked()
     assert (folder / STATE_FILE).read_bytes() == before
     assert (tmp_path / "calls").read_text() == calls
 
