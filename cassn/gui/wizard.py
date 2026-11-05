@@ -1266,6 +1266,11 @@ class FieldDataWizard(QMainWindow):
         # files from raw_data device folders.
         tree_group = QGroupBox("Staged Deployment Event")
         tree_layout = QVBoxLayout()
+        self.open_event_folder_btn = QPushButton("Open in Finder" if platform.system() == "Darwin" else "Open Folder")
+        self.open_event_folder_btn.setToolTip("Open this event’s local staging folder.")
+        self.open_event_folder_btn.setEnabled(False)
+        self.open_event_folder_btn.clicked.connect(self.open_staging_folder)
+        tree_layout.addWidget(self.open_event_folder_btn, alignment=Qt.AlignRight)
         self.staged_event_tree = QTreeWidget()
         self.staged_event_tree.setHeaderLabels(["Folder / File", "Contents"])
         self.staged_event_tree.setMinimumHeight(self.summary_text.minimumHeight())
@@ -3397,6 +3402,8 @@ class FieldDataWizard(QMainWindow):
         tree = self.staged_event_tree
         tree.clear()
         root = Path(self.current_deployment_folder) if self.current_deployment_folder else None
+        folder_exists = root is not None and root.is_dir()
+        self.open_event_folder_btn.setEnabled(folder_exists)
         if root is None:
             tree.addTopLevelItem(QTreeWidgetItem(["No staging folder selected", ""]))
             return
@@ -3412,7 +3419,7 @@ class FieldDataWizard(QMainWindow):
         root_item.setToolTip(0, str(root))
         tree.addTopLevelItem(root_item)
 
-        if not root.is_dir():
+        if not folder_exists:
             root_item.addChild(QTreeWidgetItem(["Folder not found", ""]))
             root_item.setExpanded(True)
             return
@@ -4577,6 +4584,10 @@ class FieldDataWizard(QMainWindow):
 
     def open_staging_folder(self):
         """Open staging folder in file explorer"""
+        if not self.current_deployment_folder or not Path(self.current_deployment_folder).is_dir():
+            self.open_event_folder_btn.setEnabled(False)
+            QMessageBox.information(self, "Staged Deployment Event", "The event’s local staging folder is unavailable.")
+            return
         if platform.system() == 'Darwin':
             subprocess.run(['open', str(self.current_deployment_folder)])
         elif platform.system() == 'Windows':
