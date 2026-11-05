@@ -182,7 +182,7 @@ def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
     assert dialog.hold_all.height() == dialog.proceed.height()
     button = dialog.hold_all
     try:
-        assert button.timer.interval() == 2000
+        assert button.duration_ms == 2000
         QTest.mouseClick(button, Qt.LeftButton)
         assert not saves and not button.timer.isActive()
         QTest.mousePress(button, Qt.LeftButton)
@@ -190,12 +190,46 @@ def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
         assert not button.timer.isActive()
         QTest.mouseRelease(button, Qt.LeftButton)
         QTest.mousePress(button, Qt.LeftButton)
-        QTest.qWait(2100)
+        QTest.qWait(350)
+        assert 0 < button.progress < 1 and not dialog.proceed.isEnabled()
+        QTest.qWait(1750)
+        assert button.progress == 1 and button.text() == "✓ All acknowledged"
+        assert dialog.proceed.isEnabled() and len(saves) == 1  # Still pressing.
         QTest.mouseRelease(button, Qt.LeftButton)
         assert len(saves) == 1 and len(saves[0]) == 2
         assert dialog.proceed.isEnabled()
         assert dialog.tree.topLevelItem(0).text(2) == "Acknowledged"
         assert dialog.tree.topLevelItem(1).text(2) == "No action needed"
+    finally:
+        dialog.close()
+
+
+def test_keyboard_hold_retries_after_save_failure(app, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    attempts = []
+    def save(keys):
+        attempts.append(keys)
+        return len(attempts) == 2
+
+    dialog = CollectionReviewDialog(findings(), [], tmp_path, save_acknowledgements=save)
+    dialog.show()
+    button = dialog.hold_all
+    button.setFocus()
+    app.processEvents()
+    try:
+        QTest.keyPress(button, Qt.Key_Space)
+        QTest.qWait(100)
+        QTest.keyRelease(button, Qt.Key_Space)
+        assert button.progress == 0 and not attempts
+        for expected in (False, True):
+            QTest.keyPress(button, Qt.Key_Space)
+            QTest.qWait(2100)
+            assert dialog.proceed.isEnabled() == expected
+            assert button.progress == int(expected)
+            assert dialog.save_error.isVisible() != expected
+            QTest.keyRelease(button, Qt.Key_Space)
+        assert len(attempts) == 2
     finally:
         dialog.close()
 

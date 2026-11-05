@@ -4,8 +4,8 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPalette
+from PySide6.QtCore import QElapsedTimer, QEvent, QRectF, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPalette
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QTextEdit, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -41,35 +41,114 @@ class FindingsTable(SeverityTree):
 class HoldToAcknowledge(QPushButton):
     held = Signal()
 
+    duration_ms = 2000
+    idle_text = "Acknowledge all (hold 2 s)"
+
     def __init__(self):
-        super().__init__("Acknowledge all (hold 2 s)")
+        super().__init__(self.idle_text)
         self.setAutoDefault(False)
         self.setToolTip("Hold the mouse button or Space for two seconds. Release early to cancel.")
+        self.elapsed = QElapsedTimer()
+        self.progress = 0
+        self.finished = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.setInterval(2000)
-        self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self._finish)
-        self.pressed.connect(self._start)
-        self.released.connect(self._cancel)
+        self.timer.setInterval(25)
+        self.timer.timeout.connect(self._tick)
 
     def _start(self):
-        self.setText("Keep holding…")
+        if self.finished or self.elapsed.isValid():
+            return
+        self.setDown(True)
+        self.elapsed.start()
         self.timer.start()
+        self._tick()
+
+    def _tick(self):
+        elapsed = self.elapsed.elapsed()
+        self.progress = min(elapsed / self.duration_ms, 1)
+        if elapsed >= self.duration_ms:
+            self.timer.stop()
+            self.elapsed.invalidate()
+            self.setDown(False)
+            self.held.emit()
+        else:
+            tenths = (self.duration_ms - elapsed + 99) // 100
+            self.setText(f"Holding · {tenths / 10:.1f} s")
+        self.update()
 
     def _cancel(self):
         self.timer.stop()
-        self.setText("Acknowledge all (hold 2 s)")
+        self.elapsed.invalidate()
+        self.setDown(False)
+        if not self.finished:
+            self.progress = 0
+            self.setText(self.idle_text)
+        self.update()
 
-    def _finish(self):
-        if self.isDown() and self.isEnabled() and self.isVisible():
-            self.held.emit()
+    def show_result(self, saved):
+        self.finished = saved
         self._cancel()
+        if saved:
+            self.progress = 1
+            self.setText("✓ All acknowledged")
+            QTimer.singleShot(900, self, self.hide)
+            self.update()
+
+    def _release(self):
+        # A release may arrive between the two-second mark and the next repaint.
+        if self.elapsed.isValid() and self.elapsed.elapsed() >= self.duration_ms:
+            self._tick()
+        self._cancel()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._start()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._release()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if not event.isAutoRepeat():
+                self._start()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if not event.isAutoRepeat():
+                self._release()
+            event.accept()
+        else:
+            super().keyReleaseEvent(event)
 
     def event(self, event):
         if event.type() in (QEvent.Leave, QEvent.Hide, QEvent.FocusOut, QEvent.WindowDeactivate):
             self._cancel()
         return super().event(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.progress:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            track = QRectF(6, self.height() - 6, self.width() - 12, 4)
+            dark = self.palette().color(QPalette.Window).lightness() < 128
+            painter.setBrush(QColor("#384f48" if dark else "#dae7e1"))
+            painter.drawRoundedRect(track, 2, 2)
+            track.setWidth(track.width() * self.progress)
+            painter.setBrush(QColor("#8ed0bd" if dark else "#216e62"))
+            painter.drawRoundedRect(track, 2, 2)
 
 
 class CollectionReviewDialog(WindowDialog):
@@ -196,7 +275,7 @@ class CollectionReviewDialog(WindowDialog):
         self.acknowledge.setProperty("role", "primary")
         self.acknowledge.clicked.connect(self._acknowledge_current)
         self.hold_all = HoldToAcknowledge()
-        self.hold_all.held.connect(lambda: self._save_reviewed(self._required))
+        self.hold_all.held.connect(lambda: self._save_reviewed(self._required, bulk=True))
         self.hold_all.setVisible(bool(self._required - self._acknowledged))
         back = QPushButton("Back to card ingest")
         back.setDefault(True)
@@ -260,10 +339,12 @@ class CollectionReviewDialog(WindowDialog):
             return
         self._save_reviewed({key})
 
-    def _save_reviewed(self, keys):
+    def _save_reviewed(self, keys, *, bulk=False):
         updated = (self._acknowledged | keys) & self._required
         if self._save_acknowledgements and not self._save_acknowledgements(updated):
             self.save_error.show()
+            if bulk:
+                self.hold_all.show_result(False)
             return
         self.save_error.hide()
         self._acknowledged = updated
@@ -273,7 +354,10 @@ class CollectionReviewDialog(WindowDialog):
                 item.setText(2, "Acknowledged")
         self.acknowledge.hide()
         complete = self._required <= updated
-        self.hold_all.setVisible(not complete)
+        if bulk:
+            self.hold_all.show_result(complete)
+        else:
+            self.hold_all.setVisible(not complete)
         self.proceed.setEnabled(complete)
         if complete:
             self.proceed.setProperty("role", "primary")
