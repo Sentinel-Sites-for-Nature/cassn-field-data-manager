@@ -112,7 +112,7 @@ def test_acknowledgement_persists_only_for_unchanged_evidence(app, tmp_path):
     reopened = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved)
     assert reopened.proceed.isEnabled()
     reopened.close()
-    rows[0]["message"] += " A second file now needs review."
+    rows[0]["evidence_key"] = "different-file"
     changed = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved,
                                     save_acknowledgements=lambda keys: False)
     assert not changed.proceed.isEnabled()
@@ -132,3 +132,26 @@ def test_low_voltage_groups_devices_and_keeps_their_files(app, tmp_path):
     assert finding["title"] == "Recording stopped early due to low voltage"
     assert finding["affected"] == "p1_BD, p2_BD, p3_BD"
     assert len(finding["files"]) == 3
+    reordered, = collection_review_findings(list(reversed(entries)), list(reversed(inventory)))
+    assert reordered["evidence_key"] == finding["evidence_key"]
+    inventory[0]["new_filename"] = "replacement.wav"
+    changed, = collection_review_findings(entries, inventory)
+    assert changed["evidence_key"] != finding["evidence_key"]
+
+
+def test_file_acknowledgement_uses_check_evidence_and_ignores_copy_order():
+    files = [{"device_label": "p1_BD", "filename": name} for name in ("a.wav", "b.wav")]
+    issue = qc_issue("small_file", "warning", "Small file", "Only 10 bytes.", "Inspect.", files=files)
+    entry = dict(check="file_size_floor", severity="warning", _device="p1_BD", findings=[issue])
+
+    def key():
+        row, = collection_review_findings([entry], [])
+        return row["evidence_key"]
+
+    original = key()
+    issue["action"] = "Open the file to inspect it."
+    issue["title"] = "Unusually small file"
+    issue["files"].reverse()
+    assert key() == original
+    issue["message"] = "Only 6 bytes."
+    assert key() != original

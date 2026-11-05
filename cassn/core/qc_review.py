@@ -7,6 +7,8 @@ Legacy and unknown checks always have a visible diagnostic fallback.
 from __future__ import annotations
 
 from collections import defaultdict
+import hashlib
+import json
 import re
 
 from cassn.core.classification import format_size_floor
@@ -130,6 +132,14 @@ def _valid_findings(value):
     return True
 
 
+def _evidence_key(severity, causes, files):
+    # Keep the reported cause tied to the device or file. Exclude presentation
+    # copy, timestamps, display ordering and optional instructions.
+    identities = sorted({(f.get("device_label", ""), f["filename"]) for f in files})
+    evidence = [severity, sorted(causes), identities]
+    return hashlib.sha256(json.dumps(evidence, ensure_ascii=False).encode()).hexdigest()
+
+
 def collection_review_findings(entries: list[dict], inventory: list[dict]) -> list[dict]:
     """Group report findings for review; counts refer to displayed rows, never unique files."""
     by_device = defaultdict(list)
@@ -158,16 +168,18 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
             files = []
             if entry.get("check") == "recording_stop_reason":
                 messages = check_recording_stop_reasons(by_device[scope], scope, affected_files=files)
-                if "\n".join(messages) != entry.get("message"):
+                if sorted(messages) != sorted(entry.get("message", "").splitlines()):
                     files.clear()
                 reasons = entry.get("message", "").splitlines()
                 if reasons and entry["severity"] == "warning" and all(
                     re.fullmatch(r"\d+ recording\(s\) stopped due to: (?:low voltage|low battery)", reason, re.I)
                     for reason in reasons
                 ):
-                    low_voltage.append((scope, diagnostic, files))
+                    low_voltage.append((scope, entry["message"], files))
                     continue
+            cause = (entry.get("check", ""), scope, sorted(entry.get("message", "").splitlines()))
             fallback.append({"severity": entry["severity"], "title": title,
+                "evidence_key": _evidence_key(entry["severity"], [cause], files),
                 "affected": scope, "action": "Review the check details and ingest log before uploading.",
                 "message": _review_message(entry.get("check"), f"{scope}: {entry.get('message', '')}" + (
                     "\n\nOpen the folder below to inspect the affected recordings." if files
@@ -196,13 +208,15 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
     if low_voltage:
         devices = ", ".join(sorted({scope for scope, _, _ in low_voltage}))
         files = [file for _, _, refs in low_voltage for file in refs]
+        causes = [("recording_stop_reason", scope, sorted(reason.splitlines())) for scope, reason, _ in low_voltage]
+        detail = "\n".join(f"{scope}: {reason}" for scope, reason, _ in low_voltage)
         result.append({
+            "evidence_key": _evidence_key("warning", causes, files),
             "title": "Recording stopped early due to low voltage", "severity": "warning",
             "affected": devices, "explanation": "The recorders reported low voltage and stopped recording early.",
             "action": "Open the folder below to inspect the recordings if you wish." if files else
                       "Review the recorder details below.",
-            "message": "\n".join(diagnostic for _, diagnostic, _ in low_voltage),
-            "technical": "\n".join(diagnostic for _, diagnostic, _ in low_voltage), "files": files,
+            "message": detail, "technical": detail, "files": files,
         })
     for signature, affected in combinations.items():
         severity = "error" if any(level == "error" for _, level, _ in signature) else "warning"
@@ -213,7 +227,10 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
         for (device, filename), symptoms in affected:
             detail.append(f"{device} · {filename}\n" + "\n".join(
                 f"• {issue['title']}: {issue['message']}" for issue in symptoms))
-        result.append({"severity": severity, "title": " + ".join(issue["title"] for issue in issues),
+        causes = [(device, name, i["code"], i["severity"], i["message"])
+                  for (device, name), symptoms in affected for i in symptoms]
+        result.append({"severity": severity, "evidence_key": _evidence_key(severity, causes, files),
+            "title": " + ".join(issue["title"] for issue in issues),
             "affected": f"{quantity(len(files), 'files')} · {quantity(len({f['device_label'] for f in files}), 'devices')}",
             "action": "Inspect the affected file(s) and original metadata." if len(issues) > 1 else actions[0],
             "message": "\n\n".join(detail) + "\n\nNext steps\n" + "\n".join(actions),
@@ -234,9 +251,20 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
         elif code == "sequence_gap":
             explanation = _review_message(code, "").strip()
             action = "Review the observed images if you wish."
+        files = [f for i in issues for f in i["files"]]
+        causes = []
+        for issue in issues:
+            cause = issue["message"]
+            if code == "mixed_camera_card":
+                # The check samples the first image for each serial. That example
+                # may change when the same inventory is read in another order.
+                cause = re.sub(r" \(example: [^)]*\)", "", cause)
+            causes.append((code, issue["scope"], issue["count"], cause,
+                           sorted(f["filename"] for f in issue["files"])))
         result.append({"severity": severity, "title": title, "explanation": explanation,
+            "evidence_key": _evidence_key(severity, causes, files),
             "affected": f"{quantity(count, unit)} · {quantity(len(devices), 'devices')}",
             "action": action, "message": detail,
             "technical": "\n\n".join(dict.fromkeys(i["technical"] for i in issues)),
-            "files": [f for i in issues for f in i["files"]]})
+            "files": files})
     return sorted(result, key=lambda i: {"error": 0, "warning": 1, "info": 2}[i["severity"]])

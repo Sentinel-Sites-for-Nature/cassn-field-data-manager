@@ -163,7 +163,7 @@ def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, mo
     window = windows()
     _, path = saved_work(window)
     finding = dict(title="Recording stopped early", message="One file", action="Check the folder",
-                   severity="warning", files=[], affected="p1_BD", technical="low voltage")
+                   severity="warning", files=[], affected="p1_BD", technical="low voltage", evidence_key="one-file")
     monkeypatch.setattr(FieldDataWizard, "_collection_review_findings", lambda self, _: [finding])
 
     def accept(dialog):
@@ -183,5 +183,6 @@ def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, mo
     monkeypatch.setattr(CollectionReviewDialog, "exec", inspect)
     assert reopened._confirm_collection_review([])
     finding["message"] = "Two files"
+    finding["evidence_key"] = "two-files"
     assert not reopened._confirm_collection_review([])
     assert json.loads(path.read_text())["qc_acknowledgements"] == []

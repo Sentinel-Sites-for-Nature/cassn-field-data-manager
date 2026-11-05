@@ -1,8 +1,6 @@
 """A compact collection check summary with selected evidence."""
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import Counter
 from html import escape
 from pathlib import Path
@@ -32,8 +30,7 @@ _LEVELS = {
 def acknowledgement_key(finding):
     if finding["severity"] not in {"error", "warning"}:
         return None
-    encoded = json.dumps(finding, sort_keys=True, ensure_ascii=False).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    return finding["evidence_key"]
 
 
 class CollectionReviewDialog(WindowDialog):
