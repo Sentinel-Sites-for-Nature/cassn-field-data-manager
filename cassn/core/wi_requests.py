@@ -33,6 +33,7 @@ def validate_scopes(scopes):
         if (not isinstance(name, str) or not name or name in seen
                 or type(item.get("images")) is not int or item["images"] < 1
                 or not isinstance(item.get("selection_sha256"), str)
+                or ("retry_of" in item and not re.fullmatch(r"[a-f0-9]{64}", str(item["retry_of"])))
                 or not re.fullmatch(r"[a-f0-9]{64}", item["selection_sha256"])):
             raise ValueError("Invalid or duplicate Wildlife Insights deployment.")
         seen.add(name)
@@ -53,6 +54,15 @@ def checked_status(scopes, rows):
                 or not 0 <= row["confirmed"] <= scope["images"]):
             raise ValueError("Wildlife Insights status differs from the approved selection.")
         manifest = row.get("manifest_sha256")
+        if "request_sha" in row and not re.fullmatch(r"[a-f0-9]{64}", str(row["request_sha"])):
+            raise ValueError("Invalid uploader request identity.")
+        if scope.get("retry_of") and scope["retry_of"] == row.get("request_sha"):
+            raise ValueError("The replacement reused the held request.")
+        if "hold_reason" in row and (not isinstance(row["hold_reason"], str) or len(row["hold_reason"]) > 1024):
+            raise ValueError("Invalid uploader hold reason.")
+        if "retry_of" in row and (row["stage"] != "held" or manifest or row["confirmed"] or
+                                   not row.get("request_sha") or row["retry_of"] != row["request_sha"]):
+            raise ValueError("Retry reference differs from the held request.")
         if manifest is not None or row["confirmed"] > 0 or row["stage"] == "verified":
             if not isinstance(manifest, str) or not re.fullmatch(r"[a-f0-9]{64}", manifest):
                 raise ValueError("Missing admitted Wildlife Insights manifest.")
@@ -109,13 +119,36 @@ def save_requests(folder, jobs):
         atomic_json(folder / STATE_FILE, {"version": 1, "requests": jobs})
 
 
-def complete(job):
-    return bool(job.get("rows")) and all(row["stage"] == "verified" for row in job["rows"])
+def replacement_sources(jobs):
+    """Exact held inbox files superseded by an explicitly saved replacement intent."""
+    return {(s["deployment"], s["images"], s["retry_of"])
+            for job in jobs.values() for s in job["scopes"] if "retry_of" in s}
+
+
+def superseded(scope, row, sources):
+    return (row.get("stage") == "held" and not row.get("manifest_sha256") and not row.get("confirmed")
+            and (scope["deployment"], scope["images"], row.get("request_sha")) in sources)
+
+
+def complete(job, sources=()):
+    rows = {r["deployment"]: r for r in job.get("rows", [])}
+    return all(rows.get(s["deployment"], {}).get("stage") == "verified"
+               or superseded(s, rows.get(s["deployment"], {}), sources) for s in job["scopes"])
 
 
 def require_wi_complete(folder):
     try:
-        if any(not complete(job) for job in read_requests(folder).values()):
+        jobs = read_requests(folder)
+        # Work backwards from verified replacements only. A queued or held
+        # replacement must never release its predecessor's staged originals.
+        verified_sources = set()
+        while True:
+            resolved = {key: job for key, job in jobs.items() if complete(job, verified_sources)}
+            sources = replacement_sources(resolved)
+            if sources == verified_sources:
+                break
+            verified_sources = sources
+        if len(resolved) != len(jobs):
             raise ValueError("Retain staged originals until Wildlife Insights verification finishes.")
     except OSError as exc:
         raise ValueError("Cannot check the saved Wildlife Insights requests.") from exc

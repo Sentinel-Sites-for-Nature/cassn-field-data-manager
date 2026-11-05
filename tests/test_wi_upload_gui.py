@@ -26,6 +26,10 @@ out={k:req.get(k) for k in ('version','event','request_id')}
 out['fresh']=not (root/'stale').exists()
 if op=='preview':
     out['scopes']=[dict(s,ready=True,selection_sha256=hashlib.sha256(s['deployment'].encode()).hexdigest()) for s in req['deployments']]
+    if (root/'retry-preview').exists():
+        previous=json.loads((root/'retry-preview').read_text())
+        for s in out['scopes']:
+            if s['deployment'] in previous:s['retry_of']=previous[s['deployment']]
 elif op=='status' and not (root/req['request_id']).exists():
     out['missing']=True
 else:
@@ -36,6 +40,10 @@ else:
     rows=[]
     for s in req['scopes']:
         row=dict(deployment=s['deployment'],selection_sha256=s['selection_sha256'],manifest_sha256='a'*64,stage=stage,confirmed=s['images'])
+        if stage=='held':
+            sha=hashlib.sha256((req['request_id']+s['deployment']).encode()).hexdigest()
+            row=dict(deployment=s['deployment'],selection_sha256=s['selection_sha256'],request_sha=sha,
+                     retry_of=sha,stage='held',confirmed=0,hold_reason='Expected one exact camera; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
         rows.append(row)
@@ -106,7 +114,7 @@ def prepare(window):
     window.save_session()
 
 
-def start(control, decision):
+def start(control, decision, *, retry_held=False):
     inspected = []
 
     def click():
@@ -120,7 +128,10 @@ def start(control, decision):
         dlg.findChild(QDialogButtonBox).button(decision).click()
 
     QTimer.singleShot(10, click)
-    control.action.trigger()
+    if retry_held:
+        control.held_button.click()
+    else:
+        control.action.trigger()
     wait_for(lambda: inspected and control.process is None)
     return inspected
 
@@ -272,3 +283,52 @@ def test_retry_after_unacknowledged_request_uses_original_key(work, tmp_path):
     wait_for(lambda: ctrl.process is None)
     assert (tmp_path / key).exists()
     assert list(read_requests(win.current_deployment_folder)) == [key]
+
+
+def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp_path):
+    from cassn.core.wi_requests import require_wi_complete
+
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / "stage").write_text("held")
+    start(ctrl, QDialogButtonBox.Ok)
+    original, = ctrl.jobs
+    old_job = ctrl.jobs[original]
+    previous = {r["deployment"]: r["retry_of"] for r in old_job["rows"]}
+    (tmp_path / "retry-preview").write_text(json.dumps(previous))
+    assert "Expected one exact camera; found 0" in ctrl.tree.topLevelItem(0).text(1)
+    assert not ctrl.held_button.isHidden()
+    start(ctrl, QDialogButtonBox.Cancel, retry_held=True)
+    assert list(ctrl.jobs) == [original]
+    (tmp_path / "stage").write_text("uploading")
+    start(ctrl, QDialogButtonBox.Ok, retry_held=True)
+    replacement, = set(ctrl.jobs) - {original}
+    assert ctrl.jobs[original] == old_job
+    assert all(s["retry_of"] == previous[s["deployment"]] for s in ctrl.jobs[replacement]["scopes"])
+    assert ctrl.tree.topLevelItemCount() == 2
+    assert ctrl.selection() == {}
+    with pytest.raises(ValueError, match="Retain"):
+        require_wi_complete(window.current_deployment_folder)
+    (tmp_path / "stage").write_text("verified")
+    ctrl.poll()
+    wait_for(lambda: ctrl.process is None)
+    require_wi_complete(window.current_deployment_folder)
+    assert set(read_requests(window.current_deployment_folder)) == {original, replacement}
+
+
+def test_partial_retry_cannot_clear_another_held_deployment(tmp_path):
+    from cassn.core.wi_requests import require_wi_complete, save_requests, scope_key
+
+    scopes = [dict(deployment=n, images=2, selection_sha256=k*64) for n, k in [("ML","a"), ("SA","b")]]
+    held = [dict(deployment=s["deployment"], selection_sha256=s["selection_sha256"], confirmed=0,
+                 stage="held", request_sha=k*64) for s,k in zip(scopes, ("c","d"))]
+    replacement = [dict(scopes[0], retry_of=held[0]["request_sha"])]
+    verified = dict(deployment="ML", selection_sha256="a"*64, stage="verified", confirmed=2,
+                    manifest_sha256="e"*64, integrity=dict(kind="integrity_verified_image_batch",
+                    manifest_sha256="e"*64, image_count=2, receipt_sha256="f"*64))
+    jobs = {scope_key(tmp_path.name, scopes): dict(scopes=scopes, rows=held),
+            scope_key(tmp_path.name, replacement): dict(scopes=replacement, rows=[verified])}
+    save_requests(tmp_path, jobs)
+    with pytest.raises(ValueError, match="Retain"):
+        require_wi_complete(tmp_path)

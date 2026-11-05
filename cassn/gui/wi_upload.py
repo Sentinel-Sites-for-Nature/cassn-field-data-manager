@@ -18,6 +18,10 @@ receipt_sha256}, checked against the exact admitted project/deployment. Status
 may return fresh=true, missing=true only after reconciling a durable absence.
 The helper must reject changed selections and preserve original-file claims
 on any replay. Return safe summaries only, never credentials or image lists.
+Held rows may include a hold_reason and request_sha. For an eligible
+pre-admission hold, preview and status return retry_of (its inbox SHA).
+The confirmed replacement includes retry_of in its scopes and request_id.
+An ordinary lost-reply replay keeps its existing request_id.
 """
 
 import csv
@@ -36,7 +40,8 @@ from PySide6.QtWidgets import QFrame, QHeaderView
 from cassn.gui.appearance import workspace_label, workspace_stylesheet
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
-    checked_status, complete, read_requests, save_requests, scope_key, validate_scopes,
+    checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
+    superseded, validate_scopes,
 )
 
 
@@ -75,6 +80,7 @@ class WildlifeInsightsControl(QObject):
         box = QVBoxLayout(self.group)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Deployment", "Progress"])
+        self.tree.setWordWrap(True)
         self.tree.setRootIsDecorated(False)
         self.tree.header().setStretchLastSection(True)
         self.tree.setMaximumHeight(165)
@@ -87,6 +93,10 @@ class WildlifeInsightsControl(QObject):
         self.retry_button.hide()
         self.retry_button.clicked.connect(self.retry)
         box.addWidget(self.retry_button)
+        self.held_button = QPushButton("Review and retry held cameras…")
+        self.held_button.clicked.connect(lambda: self.preview(held_only=True))
+        box.addWidget(self.held_button)
+        self.held_button.hide()
         layout.addWidget(self.group)
         self.group.hide()
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
@@ -116,14 +126,18 @@ class WildlifeInsightsControl(QObject):
             self.render()
         self.action.setEnabled(bool(folder and not self.read_error and not self.process
                                     and not self.window.card_ingest_threads))
+        self.held_button.setEnabled(self.action.isEnabled())
 
     def render(self):
         self.tree.clear()
+        sources = replacement_sources(self.jobs)
         for key, job in self.jobs.items():
             rows = {r["deployment"]: r for r in job.get("rows", [])}
             for scope in job["scopes"]:
                 name, total = scope["deployment"], scope["images"]
                 row = rows.get(name, {})
+                if superseded(scope, row, sources):
+                    continue
                 stage = row.get("stage", "unknown")
                 count = row.get("confirmed", 0)
                 if key in self.unavailable and stage != "verified":
@@ -138,7 +152,11 @@ class WildlifeInsightsControl(QObject):
                     "verified": f"Wildlife Insights upload verified · {total:,} of {total:,}",
                     "uploading": f"Uploading {count:,} of {total:,}",
                 }
-                if stage == "verifying":
+                if stage == "held":
+                    reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
+                    item.setText(1, f"Needs review · {reason}")
+                    item.setToolTip(1, item.text(1))
+                elif stage == "verifying":
                     self.tree.setItemWidget(item, 1, QLabel(labels[stage]))
                 else:
                     bar = UploadProgressBar()
@@ -150,7 +168,8 @@ class WildlifeInsightsControl(QObject):
         self.tree.resizeColumnToContents(0)
         self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), 420))
         self.group.setVisible(bool(self.jobs or self.notice.text()))
-        if any(not complete(j) for j in self.jobs.values()):
+        self.held_button.setVisible(bool(self.retryable()))
+        if any(not complete(j, sources) for j in self.jobs.values()):
             self.timer.start()
         else:
             self.timer.stop()
@@ -233,7 +252,21 @@ class WildlifeInsightsControl(QObject):
         deadline.start(30000)
         process.start()
 
-    def selection(self):
+    def retryable(self):
+        sources = replacement_sources(self.jobs)
+        eligible = {}
+        for key, job in self.jobs.items():
+            if key in self.unavailable:
+                continue
+            for row in job.get("rows", []):
+                name = row["deployment"]
+                if row.get("retry_of"):
+                    scope = next(s for s in job["scopes"] if s["deployment"] == name)
+                    if not superseded(scope, row, sources):
+                        eligible[name] = row["retry_of"]
+        return eligible
+
+    def selection(self, *, held_only=False):
         require_no_ingest_holds(self.folder)
         if self.window.metadata.get("deployment_event_id") != self.folder.name:
             raise ValueError("The selected event does not match the local staging folder.")
@@ -249,19 +282,28 @@ class WildlifeInsightsControl(QObject):
                 if not name:
                     raise ValueError("A selected image has no deployment ID.")
                 counts[name] += 1
+        sources = replacement_sources(self.jobs)
+        eligible = self.retryable()
         for job in self.jobs.values():
+            rows = {row["deployment"]: row for row in job.get("rows", [])}
             for scope in job["scopes"]:
-                count = counts.pop(scope["deployment"], None)
+                name = scope["deployment"]
+                count = counts.get(name)
                 if count is not None and count != scope["images"]:
                     raise ValueError("A previously submitted deployment changed. Review it before continuing.")
+                row = rows.get(name, {})
+                if not superseded(scope, row, sources) and not (name in eligible and row.get("retry_of") == eligible[name]):
+                    counts.pop(name, None)
+        if held_only:
+            counts = {name: count for name, count in counts.items() if name in eligible}
         return dict(sorted(counts.items()))
 
-    def preview(self):
+    def preview(self, *, held_only=False):
         self.refresh()
         if not self.action.isEnabled():
             return
         try:
-            counts = self.selection()
+            counts = self.selection(held_only=held_only)
         except (OSError, ValueError) as exc:
             self.message(str(exc))
             return
@@ -269,13 +311,16 @@ class WildlifeInsightsControl(QObject):
             self.message("No new completed camera deployments to submit.")
             return
         specs = [dict(deployment=k, images=v) for k, v in counts.items()]
-        self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts))
+        self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts, held_only=held_only))
 
-    def confirm(self, result, counts):
+    def confirm(self, result, counts, *, held_only=False):
         scopes = result["scopes"]
         validate_scopes(scopes)
         if {s["deployment"]: s["images"] for s in scopes} != counts:
             raise ValueError("Preview does not match the selected camera deployments.")
+        retries = self.retryable()
+        if any(s.get("ready") and s.get("retry_of") != retries.get(s["deployment"]) for s in scopes):
+            raise ValueError("The held request changed. Refresh its status and review the selection again.")
         scope_list = sorted(scopes, key=lambda s: s["deployment"])
         folder = self.folder
         dialog = QDialog(self.window)
@@ -319,6 +364,9 @@ class WildlifeInsightsControl(QObject):
                 item.setToolTip(1, f"WI project ID: {project_id}")
             item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(tree)
+        layout.addWidget(workspace_label(
+            "Confirming allows Wildlife Insights to register a missing camera for each selected deployment.",
+            "muted", wrap=True))
         summary = workspace_label("", "contextTitle")
         layout.addWidget(summary)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -347,9 +395,9 @@ class WildlifeInsightsControl(QObject):
         try:
             if dialog.exec() != QDialog.Accepted or self.window.current_deployment_folder != folder:
                 return
-            if self.selection() != counts:
+            if self.selection(held_only=held_only) != counts:
                 raise ValueError("Selection changed. Open the preview again.")
-            approved = [{k: s[k] for k in ("deployment", "images", "selection_sha256")}
+            approved = [{k: s[k] for k in ("deployment", "images", "selection_sha256", "retry_of") if k in s}
                         for s in selected()]
             if not approved:
                 return
@@ -372,6 +420,8 @@ class WildlifeInsightsControl(QObject):
         previous = {r["deployment"]: r for r in job.get("rows", [])}
         for row in rows:
             old = previous.get(row["deployment"], {})
+            if old.get("request_sha") and old["request_sha"] != row.get("request_sha"):
+                raise ValueError("The uploader request identity changed.")
             if old.get("manifest_sha256") and old["manifest_sha256"] != row.get("manifest_sha256"):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
             if old.get("stage") == "verified" and (
@@ -391,7 +441,8 @@ class WildlifeInsightsControl(QObject):
 
     def poll(self):
         self.refresh()
-        pending = [k for k, job in self.jobs.items() if not complete(job)]
+        sources = replacement_sources(self.jobs)
+        pending = [k for k, job in self.jobs.items() if not complete(job, sources)]
         if self.closed or self.process or not pending or self.read_error:
             return
         key = pending[self.next_job % len(pending)]
