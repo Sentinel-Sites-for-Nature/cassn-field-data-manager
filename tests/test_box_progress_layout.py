@@ -115,8 +115,9 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                         rects.append(rect)
             assert page.widget().width() == page.viewport().width()
             assert page.horizontalScrollBar().maximum() == 0
-            assert window.upload_progress_bar.value() == 25 * count
-            assert status.text().endswith(f"{path} ({count}/4)")
+            assert window.upload_progress_bar.text() == f"{count} of 4 files checked this transfer · {25 * count}%"
+            assert window.box_history_label.text() == window.upload_progress_bar.text()
+            assert status.text() == path
             assert f"{count}.00 files/s" in window.upload_metrics_label.text()
             for label in (status, window.upload_metrics_label, window.hash_status_label):
                 assert label.height() >= label.heightForWidth(label.width())
@@ -248,7 +249,9 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
             assert window.upload_progress_bar.value() == 1
         for _ in range(2):
             window.on_upload_progress(3, 4, "uploaded: raw_data/p1_ML/new.jpg")
-            assert window.upload_progress_bar.value() == 2
+            assert window.upload_progress_bar.text() == "2 of 2 event files · 100%"
+            assert window.box_history_label.text() == window.upload_progress_bar.text()
+            assert window.upload_status_label.text() == "Uploaded: raw_data/p1_ML/new.jpg"
             assert not window.box_upload_complete
 
         window._soundhub_event_progress = EventProgress(3, {"p2/new.flac", "p2/last.flac"},

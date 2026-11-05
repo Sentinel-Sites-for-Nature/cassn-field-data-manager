@@ -3793,9 +3793,9 @@ class FieldDataWizard(QMainWindow):
         except (OSError, ValueError, KeyError, TypeError):
             self._box_event_progress = None
         self.upload_progress_bar.show()
-        progress = self._box_event_progress
-        if progress:
-            event_bar(self.upload_progress_bar, progress.done, progress.total, "event files")
+        self.box_history_label.hide()
+        if self._box_event_progress:
+            self._show_box_transfer_count(0, 0)
         else:
             self.upload_progress_bar.setRange(0, 100)
             self.upload_progress_bar.setFormat("This transfer · %p%")
@@ -3855,21 +3855,30 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_to_box()
 
-    def on_upload_progress(self, current, total, filename):
-        """Update upload progress"""
-        if not self._box_callback_is_current('upload_thread'):
-            return
+    def _show_box_transfer_count(self, current, total):
         progress = self._box_event_progress
         if progress:
-            action, _, path = filename.partition(": ")
-            if action in {"uploaded", "skipped", "versioned"}:
-                progress.remaining.discard(path)
             event_bar(self.upload_progress_bar, progress.done, progress.total, "event files")
-            self.box_history_label.setText(f"{progress.done:,} of {progress.total:,} event files accounted for during upload.")
-            self.box_history_label.show()
         elif total:
-            self.upload_progress_bar.setValue(round(100 * current / total))
-        self.upload_status_label.setText(f"Uploading: {filename} ({current}/{total})")
+            event_bar(self.upload_progress_bar, current, total, "files checked this transfer")
+        else:
+            return
+        # The collapsed summary and the expanded bar describe the same work.
+        self.box_history_label.setText(self.upload_progress_bar.text())
+        self.box_history_label.show()
+
+    def on_upload_progress(self, current, total, filename):
+        if not self._box_callback_is_current('upload_thread'):
+            return
+        action, _, path = filename.partition(": ")
+        progress = self._box_event_progress
+        if progress and action in {"uploaded", "skipped", "versioned"}:
+            progress.remaining.discard(path)
+        self._show_box_transfer_count(current, total)
+        labels = {"uploaded": "Uploaded", "skipped": "Already on Box",
+                  "versioned": "Updated on Box", "failed": "Failed"}
+        status = f"{labels[action]}: {path}" if action in labels and path else filename
+        self.upload_status_label.setText(status)
 
     def on_upload_metrics(self, values):
         """Show aggregate rates without flooding the per-file progress label."""
