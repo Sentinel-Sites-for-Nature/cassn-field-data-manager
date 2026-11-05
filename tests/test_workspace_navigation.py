@@ -462,7 +462,8 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     window.metadata["site_short_name"] = "example"
     window.save_session()
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "staging")
-    monkeypatch.setattr(wizard, "event_audio_is_staged", lambda *args: True)
+    from cassn.soundhub.export import EventStagingSummary
+    monkeypatch.setattr(wizard, "event_staging_summary", lambda *_: EventStagingSummary(1, 1, True))
     monkeypatch.setattr(wizard.QMessageBox, "information", lambda *args: None)
     monkeypatch.setattr(wizard.QMessageBox, "warning", lambda *args: None)
 

@@ -64,7 +64,7 @@ QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px;
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
 QGroupBox[role="cardJob"] {{ padding: 0px 8px 8px; }}
 QGroupBox[role="platformPanel"] {{ margin-top: 0; padding: 8px; }}
-QLabel[role="platformLogo"] {{ background: white; border-radius: 3px; padding: 2px 4px; }}
+QLabel[role="platformLogo"] {{ background: transparent; padding: 2px 4px; }}
 QToolButton#prepareUpload {{ background: {accent}; color: {on_accent}; border-color: {accent}; padding: 10px 16px; font-weight: 600; }}
 QToolButton#prepareUpload::menu-indicator {{ image: none; width: 0; height: 0; }}
 QToolButton#prepareUpload:pressed {{ background: {"#a4dccc" if dark else "#174c3c"}; color: {on_accent}; }}
@@ -171,7 +171,10 @@ class PlatformPanel(QGroupBox):
         self.setProperty("role", "platformPanel")
         self.body = QVBoxLayout(self)
         header = QHBoxLayout()
-        header.addWidget(platform_logo(platform), alignment=Qt.AlignVCenter)
+        height = 31 if platform == "wildlife_insights" else 20
+        logo = platform_logo(platform, height=height)
+        logo.setMaximumWidth(170)
+        header.addWidget(logo, alignment=Qt.AlignVCenter)
         self._heading = workspace_label("", "sectionTitle", wrap=True)
         header.addWidget(self._heading, 1)
         self.body.addLayout(header)

@@ -81,6 +81,21 @@ class WildlifeInsightsControl(QObject):
         self.read_error = False
         self.group = PlatformPanel("wildlife_insights", "Upload progress")
         box = self.group.body
+        self.verified_line = QWidget()
+        line = QHBoxLayout(self.verified_line)
+        line.setContentsMargins(0, 0, 0, 0)
+        self.verified_summary = workspace_label("", "contextTitle", wrap=True)
+        line.addWidget(self.verified_summary, 1)
+        self.show_verified = QPushButton("Details")
+        self.show_verified.setAccessibleName("Show verified camera details")
+        self.show_verified.setCheckable(True)
+        self.show_verified.clicked.connect(self.render)
+        line.addWidget(self.show_verified)
+        self.verified_line.hide()
+        box.addWidget(self.verified_line)
+        self.new_cameras = workspace_label("", "muted", wrap=True)
+        self.new_cameras.hide()
+        box.addWidget(self.new_cameras)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Deployment", "Progress"])
         self._fitting_columns = False
@@ -115,6 +130,7 @@ class WildlifeInsightsControl(QObject):
         folder = self.window.current_deployment_folder
         if folder != self.folder:
             self.folder = folder
+            self.show_verified.setChecked(False)
             self.dismissed = None
             self.jobs = {}
             self.read_error = False
@@ -134,6 +150,7 @@ class WildlifeInsightsControl(QObject):
 
     def render(self):
         self.tree.clear()
+        verified = {}
         sources = replacement_sources(self.jobs)
         for key, job in self.jobs.items():
             rows = {r["deployment"]: r for r in job.get("rows", [])}
@@ -151,6 +168,9 @@ class WildlifeInsightsControl(QObject):
                 if key in self.unavailable and stage not in {"verified", "held"}:
                     stage = "unknown"
                 item = QTreeWidgetItem(self.tree, [name])
+                if stage == "verified":
+                    verified[name] = total
+                    item.setHidden(not self.show_verified.isChecked())
                 item.setToolTip(0, name)
                 labels = {
                     "queued": "Queued", "waiting_retry": "Waiting to retry",
@@ -188,6 +208,14 @@ class WildlifeInsightsControl(QObject):
                     bar.setProperty("wrapProgressText", True)
                     lines.addWidget(bar)
                 self.tree.setItemWidget(item, 1, cell)
+        self.verified_line.setVisible(bool(verified))
+        cameras = "camera" if len(verified) == 1 else "cameras"
+        self.verified_summary.setText(f"{len(verified)} {cameras} verified · {sum(verified.values()):,} photos")
+        self.refresh_new_cameras()
+        self.show_verified.setText("Hide" if self.show_verified.isChecked() else "Details")
+        self.show_verified.setAccessibleName("Hide verified camera details" if self.show_verified.isChecked()
+                                            else "Show verified camera details")
+        self.tree.setVisible(any(not self.tree.topLevelItem(i).isHidden() for i in range(self.tree.topLevelItemCount())))
         self._fit_progress_column()
         finished = self.can_dismiss()
         if not finished:
@@ -208,6 +236,26 @@ class WildlifeInsightsControl(QObject):
         cell = self.tree.itemWidget(item, 1)
         return cell.findChild(UploadProgressBar) if cell else None
 
+    def refresh_new_cameras(self):
+        self.new_cameras.hide()
+        if not self.jobs or not self.folder or self.read_error:
+            return
+        try:
+            available = self.selection()
+        except (OSError, ValueError):
+            return
+        requested = {s["deployment"] for job in self.jobs.values() for s in job["scopes"]}
+        new = available.keys() - requested
+        if new:
+            cameras = "camera" if len(new) == 1 else "cameras"
+            photos = sum(available[name] for name in new)
+            unit = "photo" if photos == 1 else "photos"
+            self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {photos:,} {unit}")
+            self.new_cameras.show()
+            self.dismissed = None
+            self.dismiss_button.hide()
+            self.group.show()
+
     def _fit_progress_column(self):
         """Stack names above bars when both columns cannot fit at the current zoom."""
         if self._fitting_columns:
@@ -216,6 +264,7 @@ class WildlifeInsightsControl(QObject):
         try:
             width = self.tree.viewport().width()
             items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+            items = [item for item in items if not item.isHidden()]
             needed = width // 2
             for item in items:
                 bar = self.bar_for_item(item)
@@ -260,7 +309,8 @@ class WildlifeInsightsControl(QObject):
         self.group.show()
 
     def can_dismiss(self):
-        return bool(self.jobs and not self.read_error and not self.panel_error and all_requests_verified(self.jobs))
+        return bool(self.jobs and self.new_cameras.isHidden() and not self.read_error
+                    and not self.panel_error and all_requests_verified(self.jobs))
 
     def dismiss(self):
         if self.can_dismiss():

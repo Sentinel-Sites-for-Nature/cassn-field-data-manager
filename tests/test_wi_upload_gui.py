@@ -185,6 +185,10 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
     assert "upload verified" in ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format()
+    assert ctrl.verified_summary.text() == "2 cameras verified · 4 photos"
+    assert ctrl.tree.isHidden()
+    ctrl.show_verified.click()
+    assert not ctrl.tree.isHidden()
     assert inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     again.wi_control.preview()
     assert "No new" in ctrl.notice.text()
@@ -196,6 +200,9 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     again._device_item("p2_ML").setText(2, "Complete")
     again.file_inventory.append(dict(device_label="p2_ML", file_type="image", deployment_id="new-deployment"))
     assert ctrl.selection() == {"new-deployment": 1}
+    ctrl.refresh_new_cameras()
+    assert ctrl.new_cameras.text() == "1 new camera in staging · 1 photo"
+    assert ctrl.dismiss_button.isHidden()
 
 
 @pytest.mark.parametrize("bad", ["missing", "count", "manifest", "duplicate"])

@@ -873,3 +873,28 @@ def test_wi_manual_inputs_ready_before_media_and_accumulate_across_plots(tmp_pat
     with pytest.raises(MetadataConflict, match="Box WI input differs"):
         start([camera(4, "ML")])
     assert b"manual-edit" in api.objects[ml]["payload"]
+
+
+def test_display_counts_only_current_files_in_readback_verified_box_records(tmp_path):
+    from cassn.box.upload_history import previously_uploaded
+
+    event_folder = tmp_path / "event"
+    api = FakeBox()
+    old = row("old.wav", deployment_event_id="event")
+    batch = prepare(api, event_folder, [old])
+    batch.mark_media_verified()
+    batch.publish()
+    stamped = dict(old, is_uploaded_to_box="True", box_uploader="Operator", box_upload_datetime="2026-10-23")
+    publication = prepare(api, event_folder, [stamped], provenance=True)
+    publication.publish()
+    inventory = [{"deployment_id": old["deployment_id"], "new_filename": n,
+                  "file_hash_sha256": old["file_hash_sha256"], "file_size_bytes": int(old["file_size_bytes"])}
+                 for n in ("old.wav", "new.wav")]
+    assert previously_uploaded(event_folder, inventory) == 1
+    prepare(api, event_folder, [row("new.wav", deployment_event_id="event")]).fail("interrupted")
+    assert previously_uploaded(event_folder, inventory) == 1
+    inventory[0]["file_hash_sha256"] = "f" * 64
+    assert previously_uploaded(event_folder, inventory) == 0
+    candidate = publication.attempt_dir / "audio_file_metadata.csv.candidate"
+    candidate.write_bytes(candidate.read_bytes() + b"\n")
+    assert previously_uploaded(event_folder, inventory) is None

@@ -48,7 +48,9 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             for group in [window.review_splitter.widget(i) for i in range(2)] + groups:
                 if isinstance(group, PlatformPanel):
                     header = group.body.itemAt(0).geometry()
-                    assert 0 < header.top() < header.bottom() < group.body.itemAt(1).geometry().top()
+                    body = next(group.body.itemAt(i) for i in range(1, group.body.count())
+                                if not group.body.itemAt(i).isEmpty())
+                    assert 0 < header.top() < header.bottom() < body.geometry().top()
                     assert group._heading.geometry().height() >= group._heading.fontMetrics().height()
                     continue
                 option = QStyleOptionGroupBox()

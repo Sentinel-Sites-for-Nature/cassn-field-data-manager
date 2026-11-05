@@ -542,16 +542,19 @@ def test_stage_splits_plots_into_separate_deployments(deployment, tmp_path):
 
 @needs_flac
 def test_event_staged_status_follows_current_recordings(deployment, tmp_path):
-    from cassn.soundhub.export import event_audio_is_staged
+    from cassn.soundhub.export import event_audio_is_staged, event_staging_summary
 
     staging = tmp_path / "staging"
     rows = read_bd_audio_rows(deployment)
     assert not event_audio_is_staged(deployment, staging)
     stage_deployment(deployment, rows, staging)
     assert event_audio_is_staged(deployment, staging)
+    total = len(rows)
+    assert event_staging_summary(deployment, staging).staged == total
     flac = next(project_root(staging).glob("*/*.flac"))
     flac.rename(flac.with_suffix(".missing"))
     assert not event_audio_is_staged(deployment, staging)
+    assert event_staging_summary(deployment, staging).staged == total - 1
     flac.with_suffix(".missing").rename(flac)
     with (deployment / "audio_file_metadata.csv").open() as stream:
         fields = csv.DictReader(stream).fieldnames
@@ -560,6 +563,8 @@ def test_event_staged_status_follows_current_recordings(deployment, tmp_path):
             audio_row("UC_StrathearnRanch_plot3_BD_20260714", "00001")
         )
     assert not event_audio_is_staged(deployment, staging)
+    summary = event_staging_summary(deployment, staging)
+    assert (summary.staged, summary.expected) == (total, total + 1)
 
 
 @needs_flac

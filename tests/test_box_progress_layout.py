@@ -109,7 +109,8 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         control.render()
         window._show_saved_box_result(True)
         monkeypatch.setattr("cassn.gui.wizard.staging_progress", lambda *_: None)
-        monkeypatch.setattr("cassn.gui.wizard.event_audio_is_staged", lambda *_: True)
+        from cassn.soundhub.export import EventStagingSummary
+        monkeypatch.setattr("cassn.gui.wizard.event_staging_summary", lambda *_: EventStagingSummary(1, 1, True))
         window._refresh_soundhub_resume()
         window.resize(930, 740)
         for _ in range(3):
