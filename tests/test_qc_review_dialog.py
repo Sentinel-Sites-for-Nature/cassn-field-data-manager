@@ -118,6 +118,10 @@ def test_acknowledgement_persists_only_for_unchanged_evidence(app, tmp_path):
     assert not changed.proceed.isEnabled()
     changed.acknowledge.click()
     assert not changed.proceed.isEnabled()
+    assert not changed.save_error.isHidden()
+    changed._save_reviewed(changed._required)
+    assert not changed.proceed.isEnabled()
+    assert changed.tree.topLevelItem(0).text(2) == "To review"
     changed.close()
 
 
@@ -155,3 +159,48 @@ def test_file_acknowledgement_uses_check_evidence_and_ignores_copy_order():
     assert key() == original
     issue["message"] = "Only 6 bytes."
     assert key() != original
+
+
+def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtTest import QTest
+    rows = findings()
+    rows.append(dict(rows[0], evidence_key="another-warning"))
+    saves = []
+    dialog = CollectionReviewDialog(rows, [], tmp_path,
+                                    save_acknowledgements=lambda keys: saves.append(keys) or True)
+    dialog.show()
+    app.processEvents()
+    button = dialog.hold_all
+    try:
+        assert button.timer.interval() == 2000
+        QTest.mouseClick(button, Qt.LeftButton)
+        assert not saves and not button.timer.isActive()
+        QTest.mousePress(button, Qt.LeftButton)
+        app.sendEvent(button, QEvent(QEvent.Leave))
+        assert not button.timer.isActive()
+        QTest.mouseRelease(button, Qt.LeftButton)
+        QTest.mousePress(button, Qt.LeftButton)
+        QTest.qWait(2100)
+        QTest.mouseRelease(button, Qt.LeftButton)
+        assert len(saves) == 1 and len(saves[0]) == 2
+        assert dialog.proceed.isEnabled()
+        assert dialog.tree.topLevelItem(0).text(2) == "Acknowledged"
+        assert dialog.tree.topLevelItem(1).text(2) == ""
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("zoom", [80, 100, 130, 200])
+def test_status_column_reserves_the_whole_word(app, tmp_path, zoom):
+    from types import SimpleNamespace
+    from PySide6.QtWidgets import QWidget
+    parent = QWidget()
+    parent.workspace = SimpleNamespace(zoom=zoom)
+    dialog = CollectionReviewDialog(findings(), [], tmp_path, parent)
+    dialog.show()
+    app.processEvents()
+    dialog.acknowledge.click()
+    assert dialog.tree.columnWidth(2) >= dialog.tree.fontMetrics().horizontalAdvance("Acknowledged") + 10
+    assert dialog.acknowledge.isVisibleTo(dialog)
+    dialog.close()

@@ -90,6 +90,7 @@ def test_resolved_offsets_retain_counts_without_unbounded_file_lists():
     assert findings[0]["severity"] == "info"
     assert findings[0]["affected"] == "2,000 photos · 2 devices"
     assert "expected-" not in findings[0]["message"]
+    assert findings[0]["detail_title"] == "Camera time zone corrected"
     assert findings[0]["action"] == "No action needed."
 
 
@@ -157,6 +158,7 @@ def test_all_burst_findings_and_observed_file_context_survive_report_reload(tmp_
     report = json.loads((tmp_path / "qc/qc_report.json").read_text())
     findings = collection_review_findings(report["current_state"], rows)
     assert len(findings) == 1
+    assert findings[0]["detail_title"] == "3-photo burst sequence is incomplete"
     assert findings[0]["explanation"].startswith("This usually happens when someone turns off the camera during a burst")
     legacy, = collection_review_findings([{"check": "sequence_gap", "severity": "warning",
                                            "message": "Missing frame."}], [])

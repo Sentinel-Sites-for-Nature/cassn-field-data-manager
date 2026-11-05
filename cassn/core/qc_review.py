@@ -132,6 +132,26 @@ def _valid_findings(value):
     return True
 
 
+def _burst_heading(issues):
+    bursts = set()
+    incomplete = {}
+    for issue in issues:
+        event = re.match(r"Burst #(\d+):", issue["message"])
+        if not event:
+            return "Burst sequence needs review"
+        key = (issue["scope"], event[1])
+        bursts.add(key)
+        match = re.search(r"expected (\d+) frames, found (\d+)", issue["message"])
+        if match and int(match[2]) < int(match[1]):
+            incomplete[key] = int(match[1])
+    if bursts != incomplete.keys():
+        return "Burst sequence needs review"
+    sizes = set(incomplete.values())
+    if len(sizes) == 1:
+        return f"{sizes.pop()}-photo burst sequence is incomplete"
+    return "Burst sequence is incomplete"
+
+
 def _evidence_key(severity, causes, files):
     # Keep the reported cause tied to the device or file. Exclude presentation
     # copy, timestamps, display ordering and optional instructions.
@@ -244,12 +264,22 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
             + ("\nObserved files:\n" + "\n".join(f["filename"] or "Unnamed file" for f in i["files"]) if i["files"] else "")
             for i in issues)
         action = issues[0]["action"]
-        explanation = title
+        detail_title = title
+        explanation = ""
         if code == "resolved_camera_offset":
-            explanation = "Processing used the local Pacific time offset for these images."
+            detail_title = "Camera time zone corrected"
+            explanation = (
+                "The camera’s time zone was missing or incorrect. The app kept the time on the camera clock "
+                "and used Pacific daylight or standard time for the date of each photo."
+            )
             action = "No action needed."
         elif code == "sequence_gap":
-            explanation = _review_message(code, "").strip()
+            detail_title = _burst_heading(issues)
+            if "incomplete" in detail_title:
+                explanation = ("This usually happens when someone turns off the camera during a burst "
+                               "while setting it up or retrieving it. This is usually harmless.")
+            else:
+                explanation = "The recorded photo order, count, or timing differs from the expected burst pattern."
             action = "Review the observed images if you wish."
         files = [f for i in issues for f in i["files"]]
         causes = []
@@ -261,7 +291,7 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
                 cause = re.sub(r" \(example: [^)]*\)", "", cause)
             causes.append((code, issue["scope"], issue["count"], cause,
                            sorted(f["filename"] for f in issue["files"])))
-        result.append({"severity": severity, "title": title, "explanation": explanation,
+        result.append({"severity": severity, "title": title, "detail_title": detail_title, "explanation": explanation,
             "evidence_key": _evidence_key(severity, causes, files),
             "affected": f"{quantity(count, unit)} · {quantity(len(devices), 'devices')}",
             "action": action, "message": detail,
