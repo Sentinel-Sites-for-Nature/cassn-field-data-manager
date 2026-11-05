@@ -159,6 +159,30 @@ def test_box_lock_releases_after_verification(tmp_path, monkeypatch):
     context._update_copy_action.assert_called_once()
 
 
+def test_verified_upload_reports_success_in_box_panel_without_popup(tmp_path, monkeypatch):
+    dialog = MagicMock()
+    monkeypatch.setattr(wizard_module, "QMessageBox", dialog)
+    monkeypatch.setattr(wizard_module, "readiness", lambda *args: (True, True))
+    monkeypatch.setattr("cassn.box.publication.require_publication_complete", lambda folder: None)
+    window = MagicMock()
+    window.current_deployment_folder = tmp_path
+    window.file_inventory = [{}, {}]
+    window._post_upload_box_issues = []
+    window._post_upload_box_summary = "2 of 2 files present"
+
+    FieldDataWizard._finish_post_upload_verification(window, True, "2 hashes match", [])
+
+    assert window.box_upload_complete
+    window._show_saved_box_result.assert_called_once_with(True)
+    window.upload_status_label.setText.assert_called_with(
+        "✓ Upload complete. File list and hashes verified for 2 event files."
+    )
+    window.upload_metrics_label.setText.assert_called_with(
+        "Box file list: 2 of 2 files present\nFile hashes: 2 hashes match"
+    )
+    assert not dialog.mock_calls
+
+
 def test_box_preparation_acquires_guard_before_worker_starts(tmp_path, monkeypatch):
     context = MagicMock()
     context.current_deployment_folder = tmp_path

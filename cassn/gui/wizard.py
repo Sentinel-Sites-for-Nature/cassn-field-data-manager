@@ -4205,7 +4205,12 @@ class FieldDataWizard(QMainWindow):
         )
         if all_ok:
             self._show_saved_box_result(True)
-            QMessageBox.information(self, "Post-upload Verification Complete", final_summary)
+            total = len(self.file_inventory)
+            noun = "file" if total == 1 else "files"
+            self.upload_status_label.setText(f"✓ Upload complete. File list and hashes verified for {total:,} event {noun}.")
+            self.upload_metrics_label.setText(
+                f"Box file list: {self._post_upload_box_summary}\nFile hashes: {hash_summary}"
+            )
             return
 
         if has_box_warning and hash_ok and not box_missing and not hash_issues:
