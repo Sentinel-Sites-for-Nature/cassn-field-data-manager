@@ -30,7 +30,7 @@ def test_one_poll_updates_every_unfinished_request_including_multicamera_selecti
     assert (tmp_path / "calls").read_text().splitlines() == ["status"] * 3
     assert all(row["confirmed"] == 10 and row["stage"] == "uploading"
                for job in control.jobs.values() for row in job["rows"])
-    assert not control.can_dismiss()
+    assert not control.selection_complete()
     control.timer.stop()
 
     # An older but valid snapshot retains the previously seen journal count.

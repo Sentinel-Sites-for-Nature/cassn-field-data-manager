@@ -42,7 +42,7 @@ def test_review_exposes_uc_staging_without_soundhub_upload(workspace_window):
     assert window.open_soundhub_btn.isVisible() == uc
     window.tabs.setCurrentIndex(2)
     assert window.soundhub_group.isHidden() != uc
-    assert window.soundhub_panel_button.text() == "Stage bird audio"
+    assert window.soundhub_panel_button.text() == "Stage Bird Audio"
     assert not any(button.menu() for button in window.tabs.widget(2).findChildren(QToolButton))
     actions = window.soundhub_group.findChildren(QPushButton)
     assert not any("Upload Bird Data to SoundHub" in button.text() or "SoundHub Landing Zone" in button.text()
@@ -447,7 +447,7 @@ def test_activity_log_shows_device_severity_and_complete_diagnostic(workspace_wi
     assert entry.child(0).text(0) == "Copy stopped.\nDetails: <card unavailable>"
 
 
-def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeypatch):
+def test_soundhub_completed_and_failed_restore(workspace_window, tmp_path, monkeypatch):
     from cassn.gui import wizard
 
     _, window = workspace_window
@@ -470,13 +470,12 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     })
     session = event / "session.json"
     before = session.read_bytes()
-    window.dismiss_soundhub_btn.click()
     window._refresh_soundhub_resume()
     assert not window.soundhub_group.isHidden() and not window.soundhub_group.disclosure.isChecked()
     assert session.read_bytes() == before
     window.restore_session(json.loads(before))
     window.tabs.setCurrentIndex(2)
-    assert not window.soundhub_group.isHidden() and not window.dismiss_soundhub_btn.isHidden()
+    assert not window.soundhub_group.isHidden() and not window.soundhub_panel_button.isEnabled()
     assert "recording.csv: 26 added · 0 updated" in window.soundhub_history_label.text()
     assert "Entire local batch: 57 deployments · 788 recordings" in window.soundhub_history_label.text()
     assert "26 newly converted · 13 already present" in window.soundhub_history_label.text()
@@ -484,9 +483,8 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     window.on_soundhub_stage_complete(False, False, "Disk full", {})
     window.restore_session(json.loads(session.read_text()))
     window.tabs.setCurrentIndex(2)
-    assert not window.soundhub_group.isHidden() and window.dismiss_soundhub_btn.isHidden()
+    assert not window.soundhub_group.isHidden() and window.soundhub_panel_button.isEnabled()
     assert "Disk full" in window.soundhub_status_label.text()
-    window._dismiss_soundhub_progress()
     assert not window.soundhub_group.isHidden()
 
 

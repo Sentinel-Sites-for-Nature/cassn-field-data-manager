@@ -24,10 +24,12 @@ def test_platform_buttons_use_guarded_actions_and_box_connection_state(monkeypat
         assert window.connect_box_btn.isEnabled()
         window.set_box_connection_state(True)
         assert not window.connect_box_btn.isEnabled()
+        window.file_inventory = [{"filename": "test.jpg"}]
+        window.wi_control.has_selection = True
         for group, action, label in (
             (window.upload_group, window.upload_now_btn, "Upload to Box"),
-            (window.soundhub_group, window.soundhub_stage_btn, "Stage bird audio"),
-            (window.wi_control.group, window.wi_control.action, "Upload images"),
+            (window.soundhub_group, window.soundhub_stage_btn, "Stage Bird Audio"),
+            (window.wi_control.group, window.wi_control.action, "Upload to Wildlife Insights"),
         ):
             button = next(b for b in group.findChildren(QPushButton) if b.text() == label)
             action.triggered.disconnect()
@@ -78,9 +80,6 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         control.jobs = {"synthetic": {"scopes": scopes, "rows": rows}}
         control.render()
         control.timer.stop()
-        assert control.dismiss_button.isHidden()
-        assert window.dismiss_box_btn.isHidden()
-        assert window.dismiss_soundhub_btn.isHidden()
         panels = [window.upload_group, window.hash_group, window.soundhub_group, control.group]
         for panel in panels:
             assert not panel.disclosure.isChecked()
@@ -100,10 +99,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             for _ in range(3):
                 app.processEvents()
 
-            start, cancel = window.box_panel_button.geometry(), window.cancel_upload_btn.geometry()
-            horizontal_gap = start.left() - cancel.right() - 1
-            vertical_gap = cancel.top() - start.bottom() - 1
-            assert max(horizontal_gap, vertical_gap) >= 12
+            assert not window.upload_group.footer.isAncestorOf(window.cancel_upload_btn)
             for panel in (window.upload_group, window.soundhub_group):
                 assert panel._detail_area.geometry().bottom() < panel.footer.y()
                 rects = []
@@ -161,7 +157,6 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
 
         rows[0].update(stage="held", confirmed=0, hold_reason="Missing camera")
         control.render()
-        assert control.dismiss_button.isHidden()
         assert "Missing camera" in control.tree.topLevelItem(0).text(1)
         for scope, row in zip(scopes, rows):
             row.update(stage="verified", confirmed=scope["images"], manifest_sha256="c"*64,
@@ -176,10 +171,26 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         window.resize(930, 740)
         for _ in range(3):
             app.processEvents()
-        for button in (window.dismiss_box_btn, window.dismiss_soundhub_btn, control.dismiss_button):
-            assert button.isVisible()
-            page.ensureWidgetVisible(button)
-            assert page.viewport().rect().contains(button.mapTo(page.viewport(), button.rect().center()))
+        for panel, main, open_label in (
+            (window.upload_group, window.box_panel_button, "Open in Box"),
+            (window.soundhub_group, window.soundhub_panel_button, "Open Staging Folder"),
+            (control.group, control.panel_button, "Open Wildlife Insights"),
+        ):
+            footer_buttons = panel.footer.findChildren(QPushButton)
+            assert len(footer_buttons) == 2
+            opener = next(button for button in footer_buttons if button.text() == open_label)
+            assert main.isVisible() and not main.isEnabled()
+            assert opener.isVisible()
+            panel.disclosure.setChecked(False)
+            app.processEvents()
+            positions = (opener.geometry().topLeft(), main.geometry().topLeft())
+            panel.disclosure.setChecked(True)
+            app.processEvents()
+            assert positions == (opener.geometry().topLeft(), main.geometry().topLeft())
+        for label in (window.upload_status_label, window.soundhub_status_label, control.verified_summary):
+            assert label.property("platformStatus") == "complete"
+            assert label.font().bold()
+            assert label.palette().color(label.foregroundRole()) == window.upload_status_label.palette().color(window.upload_status_label.foregroundRole())
     finally:
         window.current_deployment_folder = None
         window.close()
@@ -237,7 +248,6 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         assert window.upload_progress_bar.text() == "1 of 2 files uploaded · 50%"
         assert "Ready to continue" in window.upload_status_label.text()
         assert "Legacy" not in window.upload_status_label.text()
-        assert window.dismiss_box_btn.isHidden()
         state["error"] = "A Box file changed during publication"
         state_path.write_text(json.dumps(state))
         window._show_saved_box_result(False)

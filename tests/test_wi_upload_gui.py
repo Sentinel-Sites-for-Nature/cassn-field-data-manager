@@ -151,7 +151,7 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     first._set_box_controls_busy(True)
     first.soundhub_group.show()
     first.upload_group.show()
-    assert control.panel_button.text() == "Upload images"
+    assert control.panel_button.text() == "Upload to Wildlife Insights"
     names = start(control, QDialogButtonBox.Cancel)
     assert dict(names) == {"full-deployment-p1_ML": "UCNRS Mammal",
                            "full-deployment-p1_SA": "UCNRS Small Animal"}
@@ -172,8 +172,8 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     again.validate_and_next()
     ctrl = again.wi_control
     assert ctrl.tree.topLevelItemCount() == 2
-    assert ctrl.panel_button.text() == "Continue WI uploads"
-    assert ctrl.dismiss_button.isHidden()
+    assert ctrl.panel_button.text() == "Upload to Wildlife Insights"
+    assert not ctrl.selection_complete()
     (tmp_path / "stage").write_text("verifying")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
@@ -184,7 +184,7 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
         ctrl.poll()
         wait_for(lambda: ctrl.process is None)
         assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).text() == "Verifying 2 of 2 photos · 100%"
-        assert ctrl.dismiss_button.isHidden()
+        assert not ctrl.selection_complete()
         assert not inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     (tmp_path / "stage").write_text("verified")
     ctrl.poll()
@@ -207,7 +207,9 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     assert ctrl.selection() == {"new-deployment": 1}
     ctrl.refresh_new_cameras()
     assert ctrl.new_cameras.text() == "1 new camera in staging · 1 photo"
-    assert ctrl.dismiss_button.isHidden()
+    assert ctrl.panel_button.isEnabled() and ctrl.panel_button.text() == "Upload to Wildlife Insights"
+    assert ctrl.verified_summary.property("platformStatus") != "complete"
+    assert not ctrl.selection_complete()
 
 
 @pytest.mark.parametrize("bad", ["missing", "count", "manifest", "duplicate"])
@@ -347,7 +349,7 @@ def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
     require_wi_complete(window.current_deployment_folder)
-    assert not ctrl.dismiss_button.isHidden()
+    assert not ctrl.panel_button.isEnabled()
     assert set(read_requests(window.current_deployment_folder)) == {original, replacement}
 
 
@@ -384,25 +386,24 @@ def test_interrupted_inbox_delivery_replays_saved_identity(work, tmp_path):
     assert all(r["stage"] == "verified" for r in ctrl.jobs[key]["rows"])
 
 
-def test_dismiss_only_verified_wi_panel_and_restore(work, tmp_path):
+def test_completed_wi_action_disables_and_restores(work, tmp_path):
     window = work()
     prepare(window)
     ctrl = window.wi_control
     (tmp_path / "stage").write_text("held")
     start(ctrl, QDialogButtonBox.Ok)
-    assert ctrl.dismiss_button.isHidden() and not ctrl.group.isHidden()
-    ctrl.dismiss()
+    assert not ctrl.selection_complete() and not ctrl.group.isHidden()
     assert not ctrl.group.isHidden()
     (tmp_path / "stage").write_text("verified")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert not ctrl.dismiss_button.isHidden()
+    assert not ctrl.panel_button.isEnabled()
     folder = window.current_deployment_folder
     before = (folder / STATE_FILE).read_bytes()
     calls = (tmp_path / "calls").read_text()
-    ctrl.dismiss_button.click()
+    assert not ctrl.panel_button.isHidden()
     ctrl.render()
-    assert not ctrl.group.isHidden() and ctrl.dismiss_button.isHidden()
+    assert not ctrl.group.isHidden() and ctrl.selection_complete()
     assert not ctrl.group.disclosure.isChecked()
     assert (folder / STATE_FILE).read_bytes() == before
     assert (tmp_path / "calls").read_text() == calls
@@ -410,7 +411,7 @@ def test_dismiss_only_verified_wi_panel_and_restore(work, tmp_path):
     reopened = work()
     reopened.validate_and_next()
     assert not reopened.wi_control.group.isHidden()
-    assert not reopened.wi_control.dismiss_button.isHidden()
+    assert not reopened.wi_control.panel_button.isEnabled()
 
 
 def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, tmp_path):
@@ -455,7 +456,7 @@ def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, t
     assert "1 camera held for review" in ctrl.active_summary.text()
     assert "1 camera with unknown status" in ctrl.active_summary.text()
     assert ctrl.new_cameras.text() == "2 new cameras in staging · 4 photos"
-    assert ctrl.dismiss_button.isHidden()
+    assert not ctrl.selection_complete()
     ctrl.group.disclosure.click()
     assert ctrl.tree.topLevelItemCount() == 6
     all_rows = [ctrl.tree.topLevelItem(i) for i in range(6)]
@@ -504,7 +505,7 @@ def test_missing_counter_and_unreadable_export_preserve_status(work, tmp_path):
         project = "Destination project: unavailable" if item.text(0).endswith("ML") else "Destination project: UCNRS Small Animal"
         assert project in labels
     assert all("verified_count" not in row for row in read_requests(folder)[key]["rows"])
-    assert ctrl.dismiss_button.isHidden()
+    assert not ctrl.selection_complete()
 
 
 def test_only_staged_cameras_render_without_creating_requests(work, tmp_path):
@@ -515,7 +516,7 @@ def test_only_staged_cameras_render_without_creating_requests(work, tmp_path):
     assert not ctrl.group.isHidden() and not ctrl.group.disclosure.isChecked()
     assert ctrl.tree.topLevelItemCount() == 2
     assert ctrl.new_cameras.text() == "2 new cameras in staging · 4 photos"
-    assert ctrl.verified_summary.isHidden() and ctrl.dismiss_button.isHidden()
+    assert ctrl.verified_summary.isHidden() and not ctrl.selection_complete()
     assert not ctrl.timer.isActive()
     assert not (ctrl.folder / STATE_FILE).exists()
     assert not (tmp_path / "calls").exists()
@@ -539,7 +540,7 @@ def test_web_button_selects_the_exported_project_without_submitting(work, tmp_pa
     assert not (tmp_path / "calls").exists()
 
 
-def test_verified_without_a_receipt_cannot_be_dismissed(work):
+def test_verified_without_a_receipt_is_not_complete(work):
     window = work()
     prepare(window)
     ctrl = window.wi_control
@@ -550,4 +551,4 @@ def test_verified_without_a_receipt_cannot_be_dismissed(work):
     ctrl.render()
     assert ctrl.verified_summary.isHidden()
     assert ctrl.active_summary.text() == "2 cameras with unknown status"
-    assert not ctrl.can_dismiss()
+    assert not ctrl.selection_complete()

@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QPalette, QPixmap, QRegion
-from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -39,6 +39,9 @@ QLabel[role="subtitle"] {{ margin-bottom: 10px; }}
 QLabel[role="pageTitle"] {{ font-size: 25px; font-weight: 600; margin-top: 2px; }}
 QLabel[role="sectionTitle"] {{ font-size: 15px; font-weight: 600; }}
 QLabel[role="contextTitle"] {{ font-weight: 600; font-size: 14px; }}
+QLabel[platformStatus="complete"] {{ color: {accent}; font-weight: 700; font-size: 14px; }}
+QLabel[platformStatus="warning"] {{ color: {"#f2ce84" if dark else "#805411"}; font-weight: 600; }}
+QLabel[platformStatus="error"] {{ color: {"#ffb5ae" if dark else "#a03431"}; font-weight: 700; }}
 QLabel[role="connected"] {{ color: {accent}; }}
 QLabel#workspaceEmptyCards {{ color: {muted}; background: {panel}; border: 1px dashed {line}; border-radius: 10px; padding: 24px; }}
 QPushButton, QToolButton {{ background: {panel}; border: 1px solid {line}; border-radius: 6px; padding: 8px 12px; }}
@@ -124,6 +127,15 @@ def style_cancel_button(button: QPushButton) -> QPushButton:
                                border-color: palette(mid); }
     """)
     return button
+
+
+def set_platform_status(label, state=""):
+    if label.property("platformStatus") != state:
+        label.setProperty("platformStatus", state)
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.updateGeometry()
+        label.update()
 
 
 def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
@@ -299,7 +311,6 @@ class PlatformPanel(QGroupBox):
         self.details.setContentsMargins(14, 0, 14, 12)
         layout.addWidget(self._detail_area)
         self.footer = None
-        self._expanded_controls = []
         if purpose in ("box", "soundhub", "wildlife_insights"):
             self.footer = QFrame()
             self.footer.setObjectName("platformActions")
@@ -312,48 +323,31 @@ class PlatformPanel(QGroupBox):
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
 
-    def add_action_button(self, label, action, *, details=False, cancel=None, primary=False):
+    def add_action_button(self, label, action, *, primary=False, available=None):
         button = QPushButton(label)
         button.clicked.connect(action.trigger)
 
         def sync():
-            button.setEnabled(action.isEnabled())
+            button.setEnabled(action.isEnabled() and (available is None or available()))
             button.setToolTip(action.toolTip())
 
         action.changed.connect(sync)
         action.visibleChanged.connect(lambda: button.setVisible(action.isVisible()))
         button.setVisible(action.isVisible())
         sync()
-        if self.footer is None:
-            (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
-        else:
-            if primary or cancel is not None:
-                self.actions.primary = button
-            if cancel is not None:
-                self.actions.addWidget(cancel)
-            self.add_footer_button(button, details_only=details)
+        if primary:
+            self.actions.primary = button
+        self.add_footer_button(button)
         return button
 
-    def add_footer_button(self, button, *, details_only=False):
-        if not details_only:
-            self.actions.addWidget(button)
-            return
-        # Hide the wrapper when collapsed. The button retains its own job-specific state.
-        wrapper = QWidget()
-        row = QHBoxLayout(wrapper)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(button)
-        self.actions.addWidget(wrapper)
-        self._expanded_controls.append(wrapper)
-        wrapper.setVisible(self.disclosure.isChecked())
+    def add_footer_button(self, button):
+        self.actions.addWidget(button)
 
     def title(self):
         return self._heading.text()
 
     def _set_expanded(self, expanded):
         self._detail_area.setVisible(expanded)
-        for widget in self._expanded_controls:
-            widget.setVisible(expanded)
         self.disclosure.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         verb = "Hide" if expanded else "Show"
         label = f"{verb} {_PLATFORMS[self.platform][0]} progress details"

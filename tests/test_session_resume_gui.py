@@ -118,7 +118,7 @@ def test_unreadable_existing_session_is_never_overwritten(windows, monkeypatch):
     assert path.read_text() == '{"interrupted":'
 
 
-def test_box_dismiss_restores_from_current_proof_and_never_hides_an_unverified_batch(windows):
+def test_box_completion_state_matches_current_proof_on_reopen(windows):
     from cassn.core.verification_evidence import verification_context, write_result
 
     source = windows()
@@ -136,26 +136,15 @@ def test_box_dismiss_restores_from_current_proof_and_never_hides_an_unverified_b
         reopened.restore_session(json.loads(session.read_text()))
 
     reopen()
-    assert reopened.box_upload_complete and not reopened.dismiss_box_btn.isHidden()
+    assert reopened.box_upload_complete and not reopened.box_panel_button.isEnabled()
+    assert not reopened.box_panel_button.isHidden()
     assert not reopened.upload_group.isHidden() and reopened.hash_group.isHidden()
-    reopened.dismiss_box_btn.click()
-    assert not reopened.upload_group.isHidden() and not reopened.upload_group.disclosure.isChecked()
+    reopened.upload_group.disclosure.click()
     assert combined.read_bytes() == evidence
-    # Reopening the same event reconstructs its result. The display dismissal
-    # cannot suppress a later run, even if an old click is still queued.
-    reopen()
-    reopened._box_operation_active = True
-    reopened.dismiss_box_btn.click()
-    assert not reopened.upload_group.isHidden()
-    reopened._box_operation_active = False
-    reopened.file_inventory[0]["file_size_bytes"] = 1000
-    reopened.dismiss_box_btn.click()
-    assert reopened.dismiss_box_btn.isHidden() and not reopened.upload_group.isHidden()
-    assert not reopened.box_upload_complete
     write_result(folder, "hash", context, ok=False, summary="hash mismatch")
     reopen()
-    assert reopened.dismiss_box_btn.isHidden() and not reopened.upload_group.isHidden()
-    assert not reopened.box_upload_complete
+    assert not reopened.box_upload_complete and not reopened.upload_group.isHidden()
+    assert reopened.upload_status_label.property("platformStatus") != "complete"
 
 
 def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, monkeypatch):

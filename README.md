@@ -418,7 +418,8 @@ ORG_SITE_YYYYMMDD/
 
 ### Wildlife Insights Deployment CSV
 
-Use **Upload images** for a first upload. Use **Continue WI uploads** to add cameras or retry an eligible hold.
+Use **Upload to Wildlife Insights** to start an upload, add cameras, or retry an eligible hold.
+The button stays visible and turns gray when all selected photos are verified.
 Review the destination project and photo count before confirming.
 If delivery was interrupted, the panel opens the saved selection for confirmation.
 During transfer and verification, the app checks progress once per second while the helper is available.
@@ -553,7 +554,7 @@ UC SoundHub staging is available on **Review & upload**, including when using
 hosted Box sign-in. This screen provides local staging only; SoundHub upload and
 landing-zone checks are available through the maintenance CLI below.
 
-**Stage bird audio** in the Wildlife Sound Hub panel transcodes the open
+**Stage Bird Audio** in the Wildlife Sound Hub panel transcodes the open
    deployment event's BD WAVs to FLAC (level 5, `--verify`,
    `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
    local staging batch. Existing staged events remain, the two project CSVs are
@@ -561,13 +562,13 @@ landing-zone checks are available through the maintenance CLI below.
    per-file and the job is cancellable. A copy of both CSVs is also written to the event's `soundhub/`
    subfolder so the metadata travels to Box alongside the raw data.
 
-After successful staging, the panel shows **Bird audio staged** in gray.
+After successful staging, the panel shows the result in green and disables **Stage Bird Audio**.
 Adding another plot's bird recordings makes the staging action available again.
 Expand the panel to see a **Deployment / Progress** row with the count and percentage for each recorder. The completion summary lists recordings converted or reused,
-changed rows in each project CSV, and totals for the entire batch. **Open staging folder** opens the local batch in Finder.
+changed rows in each project CSV, and totals for the entire batch. **Open Staging Folder** opens the local batch in Finder.
 
 After cancellation or failure, reopen the event and choose
-**Continue SoundHub staging** in the panel. The app shows completed and remaining recording counts.
+**Stage Bird Audio** in the panel. The app shows completed and remaining recording counts.
 It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
 Staging checks available disk space before conversion, including space for temporary files.
 If disk space runs out, free space and continue the same event.

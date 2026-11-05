@@ -70,7 +70,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
-                     'dismiss_box_btn', 'box_count_retry', 'box_panel_button', 'upload_group', 'box_history_label',
+                     'box_count_retry', 'box_panel_button', 'upload_group', 'box_history_label',
                      'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',
@@ -188,7 +188,6 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
     assert verify.started
     context.upload_progress_bar.setFormat.assert_called_with("Verifying · %p%")
     context.hash_group.show.assert_not_called()
-    context.dismiss_box_btn.hide.assert_called()
     verify.result.emit(True, 'listed', [])
     assert context._box_operation_active
     fixity = context.fixity_thread
@@ -198,7 +197,7 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
     assert context.fixity_check_run
     assert all(call.args[0] == context.current_deployment_folder for call in qc.call_args_list)
     assert (context.current_deployment_folder / 'qc/box_upload_verification.json').is_file()
-    context.dismiss_box_btn.setVisible.assert_called_with(True)
+    context.box_panel_button.setEnabled.assert_called_with(False)
 
 
 def test_provenance_phase_keeps_original_owner_and_lock(setup, monkeypatch):
