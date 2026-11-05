@@ -64,7 +64,8 @@ class UploadProgressBar(QProgressBar):
         if not self.isTextVisible() or self.maximum() <= self.minimum():
             return
         painter.setPen(self.palette().color(QPalette.Text))
-        painter.drawText(option.rect, Qt.AlignCenter, self.text())
+        text_flags = Qt.AlignCenter | Qt.TextWordWrap if self.property("wrapProgressText") else Qt.AlignCenter
+        painter.drawText(option.rect, text_flags, self.text())
         filled = self.style().subElementRect(QStyle.SE_ProgressBarContents, option, self)
         fraction = max(0, self.value() - self.minimum()) / (self.maximum() - self.minimum())
         filled.setWidth(round(filled.width() * fraction))
@@ -73,7 +74,7 @@ class UploadProgressBar(QProgressBar):
         painter.setClipRect(filled)
         dark = QApplication.palette().color(QPalette.Window).lightness() < 128
         painter.setPen(QColor("#152d25" if dark else "#ffffff"))
-        painter.drawText(option.rect, Qt.AlignCenter, self.text())
+        painter.drawText(option.rect, text_flags, self.text())
 
 
 

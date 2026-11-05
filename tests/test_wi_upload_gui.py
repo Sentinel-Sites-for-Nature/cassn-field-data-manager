@@ -5,7 +5,7 @@ import time
 
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QTreeWidget
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel, QTreeWidget
 
 from cassn.box.auth import BoxConfig
 from cassn.box.client import BoxStorage
@@ -46,6 +46,8 @@ else:
                      retry_of=sha,stage='held',confirmed=0,hold_reason='Added deployment held: expected one exact camera 08021607; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
+        if stage=='verifying':
+            row['verified_count']=int((root/'verified-count').read_text()) if (root/'verified-count').exists() else 1
         if stage=='delivery':
             row=dict(deployment=s['deployment'],selection_sha256=s['selection_sha256'],stage='held',
                      confirmed=0,delivery_pending=True,hold_reason='Delivery is incomplete.')
@@ -127,6 +129,8 @@ def start(control, decision):
             QTimer.singleShot(10, click)
             return
         tree = dlg.findChild(QTreeWidget)
+        logos = [label for label in dlg.findChildren(QLabel) if label.accessibleName() == "Wildlife Insights logo"]
+        assert len(logos) == 1 and not logos[0].pixmap().isNull()
         inspected.extend((tree.topLevelItem(i).text(0), tree.topLevelItem(i).text(1))
                          for i in range(tree.topLevelItemCount()))
         dlg.findChild(QDialogButtonBox).button(decision).click()
@@ -168,11 +172,19 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     (tmp_path / "stage").write_text("verifying")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert ctrl.tree.itemWidget(ctrl.tree.topLevelItem(0), 1).text() == "Verifying originals…"
+    bar = ctrl.bar_for_item(ctrl.tree.topLevelItem(0))
+    assert bar.value() == 1 and bar.text() == "Verifying 1 of 2 photos"
+    for count in (2, 0):
+        (tmp_path / "verified-count").write_text(str(count))
+        ctrl.poll()
+        wait_for(lambda: ctrl.process is None)
+        assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).text() == "Verifying 2 of 2 photos"
+        assert ctrl.dismiss_button.isHidden()
+        assert not inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     (tmp_path / "stage").write_text("verified")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert "upload verified" in ctrl.tree.itemWidget(ctrl.tree.topLevelItem(0), 1).format()
+    assert "upload verified" in ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format()
     assert inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     again.wi_control.preview()
     assert "No new" in ctrl.notice.text()
@@ -259,7 +271,7 @@ def test_stale_status_and_missing_acknowledged_request(work, tmp_path):
     (tmp_path / "stale").touch()
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert ctrl.tree.itemWidget(ctrl.tree.topLevelItem(0), 1).format() == "Status unknown"
+    assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format() == "Status unknown"
     (tmp_path / "stale").unlink()
     (tmp_path / key).unlink()
     ctrl.poll()

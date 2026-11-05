@@ -15,6 +15,7 @@ Return fresh=true and rows [{deployment, selection_sha256, stage, confirmed,
 manifest_sha256?}]. The helper resolves the manifest after private admission.
 A verified row must include integrity {kind, manifest_sha256, image_count,
 receipt_sha256}, checked against the exact admitted project/deployment. Status
+may include verified_count while verifying. This display count is not a receipt. Status
 may return fresh=true, missing=true only after reconciling a durable absence.
 The helper must reject changed selections and preserve original-file claims
 on any replay. Return safe summaries only, never credentials or image lists.
@@ -29,16 +30,15 @@ import json
 import re
 from collections import Counter
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Qt
+from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QSize, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QGroupBox, QLabel, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QDialog, QDialogButtonBox, QFrame, QHeaderView, QHBoxLayout, QLabel, QPushButton,
+    QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from cassn.gui.workspace import UploadProgressBar
-from PySide6.QtWidgets import QFrame, QHeaderView
 
-from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.appearance import PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
     all_requests_verified, checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
@@ -79,14 +79,16 @@ class WildlifeInsightsControl(QObject):
         self.panel_error = False
         self.next_job = 0
         self.read_error = False
-        self.group = QGroupBox("Wildlife Insights")
-        box = QVBoxLayout(self.group)
+        self.group = PlatformPanel("wildlife_insights", "Wildlife Insights")
+        box = self.group.body
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Deployment", "Progress"])
+        self._fitting_columns = False
         self.tree.setWordWrap(True)
         self.tree.setRootIsDecorated(False)
         self.tree.header().setStretchLastSection(True)
-        self.tree.setMaximumHeight(165)
+        self._tree_viewport = self.tree.viewport()
+        self._tree_viewport.installEventFilter(self)
         box.addWidget(self.tree)
         self.notice = QLabel()
         self.notice.setTextFormat(Qt.PlainText)
@@ -141,6 +143,10 @@ class WildlifeInsightsControl(QObject):
                     continue
                 stage = row.get("stage", "unknown")
                 count = row.get("confirmed", 0)
+                if stage == "verifying":
+                    # A transfer count is not a verification count.
+                    value = row.get("verified_count", 0)
+                    count = min(total, max(0, value)) if type(value) is int else 0
                 if key in self.unavailable and stage not in {"verified", "held"}:
                     stage = "unknown"
                 item = QTreeWidgetItem(self.tree, [name])
@@ -149,10 +155,19 @@ class WildlifeInsightsControl(QObject):
                     "queued": "Queued", "waiting_retry": "Waiting to retry",
                     "cleaning": "Finishing checks", "held": "Needs review",
                     "transferred_or_waiting": "Waiting for verification",
-                    "unknown": "Status unknown", "verifying": "Verifying originals…",
-                    "verified": f"Wildlife Insights upload verified · {total:,} of {total:,}",
-                    "uploading": f"Uploading {count:,} of {total:,}",
+                    "unknown": "Status unknown", "verifying": f"Verifying {count:,} of {total:,} photos",
+                    "verified": f"WI upload verified · {total:,} photos",
+                    "uploading": f"Uploading {count:,} of {total:,} photos",
                 }
+                cell = QWidget()
+                cell.setAutoFillBackground(True)
+                cell.setBackgroundRole(self.tree.viewport().backgroundRole())
+                lines = QVBoxLayout(cell)
+                lines.setContentsMargins(0, 0, 0, 0)
+                lines.setSpacing(2)
+                name_label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
+                name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                lines.addWidget(name_label)
                 if stage == "held":
                     reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
                     label = "Last known hold" if key in self.unavailable else "Needs review"
@@ -162,17 +177,17 @@ class WildlifeInsightsControl(QObject):
                     else:
                         item.setText(1, f"{label} · {reason}")
                     item.setToolTip(1, reason)
-                elif stage == "verifying":
-                    self.tree.setItemWidget(item, 1, QLabel(labels[stage]))
+                    lines.addWidget(workspace_label(item.text(1), "muted", wrap=True))
                 else:
                     bar = UploadProgressBar()
                     bar.setRange(0, total)
                     bar.setValue(count)
                     bar.setFormat(labels[stage])
                     bar.setAccessibleName(labels[stage])
-                    self.tree.setItemWidget(item, 1, bar)
-        self.tree.resizeColumnToContents(0)
-        self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), 420))
+                    bar.setProperty("wrapProgressText", True)
+                    lines.addWidget(bar)
+                self.tree.setItemWidget(item, 1, cell)
+        self._fit_progress_column()
         finished = self.can_dismiss()
         if not finished:
             self.dismissed = None
@@ -182,6 +197,58 @@ class WildlifeInsightsControl(QObject):
             self.timer.start()
         else:
             self.timer.stop()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize and obj is self._tree_viewport and not self.closed:
+            self._fit_progress_column()
+        return super().eventFilter(obj, event)
+
+    def bar_for_item(self, item):
+        cell = self.tree.itemWidget(item, 1)
+        return cell.findChild(UploadProgressBar) if cell else None
+
+    def _fit_progress_column(self):
+        """Stack names above bars when both columns cannot fit at the current zoom."""
+        if self._fitting_columns:
+            return
+        self._fitting_columns = True
+        try:
+            width = self.tree.viewport().width()
+            items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+            needed = width // 2
+            for item in items:
+                bar = self.bar_for_item(item)
+                if bar:
+                    needed = max(needed, bar.fontMetrics().horizontalAdvance(bar.format()) + 24)
+            compact = width - needed < self.tree.fontMetrics().horizontalAdvance("Camera deployment")
+            self.tree.setColumnHidden(0, compact)
+            self.tree.headerItem().setText(1, "Camera progress" if compact else "Progress")
+            if not compact:
+                self.tree.setColumnWidth(0, min(420, width - needed))
+            text_width = max(1, self.tree.columnWidth(1) - 14)
+            heights = []
+
+            def text_height(widget, text):
+                return widget.fontMetrics().boundingRect(
+                    QRect(0, 0, text_width, 8192), Qt.TextWordWrap, text).height() + 6
+
+            for item in items:
+                cell = self.tree.itemWidget(item, 1)
+                if cell is None:
+                    continue
+                name = cell.layout().itemAt(0).widget()
+                name.setVisible(compact)
+                content = cell.layout().itemAt(1).widget()
+                text = content.format() if isinstance(content, UploadProgressBar) else content.text()
+                content_height = text_height(content, text)
+                if isinstance(content, UploadProgressBar) and content.minimumHeight() != content_height:
+                    content.setStyleSheet(f"min-height: {content_height}px; max-height: {content_height}px;")
+                row_height = content_height + (text_height(name, name.text()) + 2 if compact else 0)
+                item.setSizeHint(1, QSize(0, row_height))
+                heights.append(row_height + 17)  # Workspace cell padding and bottom rule.
+            self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + sum(heights[:3]))
+        finally:
+            self._fitting_columns = False
 
     def message(self, text, *, error=True):
         self.dismissed = None
@@ -373,7 +440,15 @@ class WildlifeInsightsControl(QObject):
         banner.setObjectName("sidebarBrandBlock")
         heading = QVBoxLayout(banner)
         heading.setContentsMargins(18, 14, 18, 14)
-        heading.addWidget(workspace_label("Wildlife Insights", "sidebarBrand"))
+        brand = QHBoxLayout()
+        brand.addWidget(workspace_label("Wildlife Insights", "sidebarBrand"), 1)
+        logo_plate = QFrame()
+        logo_plate.setStyleSheet("background: white; border-radius: 5px;")
+        plate = QHBoxLayout(logo_plate)
+        plate.setContentsMargins(8, 4, 8, 4)
+        plate.addWidget(platform_logo("wildlife_insights", height=22))
+        brand.addWidget(logo_plate)
+        heading.addLayout(brand)
         event_label = workspace_label(folder.name, "subtitle", wrap=True)
         event_label.setStyleSheet("color: #e0ebde; margin: 0;")
         heading.addWidget(event_label)
@@ -465,6 +540,7 @@ class WildlifeInsightsControl(QObject):
     def accept_status(self, key, result):
         job = self.jobs[key]
         rows = checked_status(job["scopes"], result["rows"])
+        totals = {scope["deployment"]: scope["images"] for scope in job["scopes"]}
         previous = {r["deployment"]: r for r in job.get("rows", [])}
         for row in rows:
             old = previous.get(row["deployment"], {})
@@ -472,6 +548,10 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The uploader request identity changed.")
             if old.get("manifest_sha256") and old["manifest_sha256"] != row.get("manifest_sha256"):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
+            if row["stage"] == "verifying":
+                values = (old.get("verified_count"), row.get("verified_count"))
+                floor = max((value for value in values if type(value) is int and value >= 0), default=0)
+                row["verified_count"] = min(totals[row["deployment"]], floor)
             if old.get("stage") == "verified" and (
                     row["stage"] != "verified" or old.get("integrity") != row.get("integrity")):
                 raise ValueError("The saved verification receipt changed.")

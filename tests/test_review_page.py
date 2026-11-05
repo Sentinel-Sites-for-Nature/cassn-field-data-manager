@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QStyle, QStyleOptionGro
 
 from cassn.box.auth import hosted_config
 from cassn.gui.wizard import FieldDataWizard
+from cassn.gui.appearance import PlatformPanel
 from cassn.lookups import LookupTables
 
 
@@ -32,7 +33,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
                               "rows": [{"deployment": "p1_ML", "stage": "uploading", "confirmed": 28}]}}
         wi.render()
         wi.timer.stop()
-        wi_bar = wi.tree.itemWidget(wi.tree.topLevelItem(0), 1)
+        wi_bar = wi.bar_for_item(wi.tree.topLevelItem(0))
         window.soundhub_status_label.setText("Preparing " + "recording" * 35)
         for width, zoom in ((1280, 100), (940, 130), (940, 200)):
             window.workspace.set_zoom(zoom)
@@ -45,6 +46,11 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             for view in (window.summary_text, window.staged_event_tree):
                 assert view.viewport().height() >= 200
             for group in [window.review_splitter.widget(i) for i in range(2)] + groups:
+                if isinstance(group, PlatformPanel):
+                    header = group.body.itemAt(0).geometry()
+                    assert 0 < header.top() < header.bottom() < group.body.itemAt(1).geometry().top()
+                    assert group._heading.geometry().height() >= group._heading.fontMetrics().height()
+                    continue
                 option = QStyleOptionGroupBox()
                 group.initStyleOption(option)
                 title = group.style().subControlRect(QStyle.CC_GroupBox, option, QStyle.SC_GroupBoxLabel, group)
