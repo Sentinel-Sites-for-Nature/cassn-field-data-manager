@@ -83,6 +83,8 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                 assert bar.text() == text
                 bounds = bar.fontMetrics().boundingRect(bar.rect(), Qt.AlignCenter | Qt.TextWordWrap, text)
                 assert bounds.width() <= bar.width() and bounds.height() <= bar.height()
+                assert bar.parentWidget().rect().contains(bar.geometry())
+                assert control.tree.viewport().rect().contains(bar.mapTo(control.tree.viewport(), bar.rect().bottomRight()))
             sizes.append((window.upload_progress_bar.width(), status.height()))
             if width == 930:
                 page.ensureWidgetVisible(window.cancel_upload_btn)

@@ -89,6 +89,7 @@ class WildlifeInsightsControl(QObject):
         self.tree.header().setStretchLastSection(True)
         self._tree_viewport = self.tree.viewport()
         self._tree_viewport.installEventFilter(self)
+        self.tree.header().sectionResized.connect(self._fit_progress_column)
         box.addWidget(self.tree)
         self.notice = QLabel()
         self.notice.setTextFormat(Qt.PlainText)
@@ -226,8 +227,6 @@ class WildlifeInsightsControl(QObject):
             if not compact:
                 self.tree.setColumnWidth(0, min(420, width - needed))
             text_width = max(1, self.tree.columnWidth(1) - 14)
-            heights = []
-
             def text_height(widget, text):
                 return widget.fontMetrics().boundingRect(
                     QRect(0, 0, text_width, 8192), Qt.TextWordWrap, text).height() + 6
@@ -243,10 +242,13 @@ class WildlifeInsightsControl(QObject):
                 content_height = text_height(content, text)
                 if isinstance(content, UploadProgressBar) and content.minimumHeight() != content_height:
                     content.setStyleSheet(f"min-height: {content_height}px; max-height: {content_height}px;")
-                row_height = content_height + (text_height(name, name.text()) + 2 if compact else 0)
+                row_height = content_height + 17  # Tree cell padding and bottom rule.
+                if compact:
+                    row_height += max(name.heightForWidth(text_width), text_height(name, name.text())) + 2
                 item.setSizeHint(1, QSize(0, row_height))
-                heights.append(row_height + 17)  # Workspace cell padding and bottom rule.
-            self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + sum(heights[:3]))
+            self.tree.doItemsLayout()
+            visible_height = sum(self.tree.visualItemRect(item).height() for item in items[:3])
+            self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + visible_height)
         finally:
             self._fitting_columns = False
 
