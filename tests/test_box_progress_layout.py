@@ -123,7 +123,8 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         window.close()
         app.processEvents()
 
-def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch):
+@pytest.mark.parametrize("zoom", [100, 130, 200])
+def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch, zoom):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: setattr(self, "wi_upload_helper", "/synthetic/helper"))
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
@@ -131,6 +132,8 @@ def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch):
     window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
     try:
         window.tabs.setCurrentIndex(2)
+        window.resize(930, 740)
+        window.workspace.set_zoom(zoom)
         window.show()
         prepare = window.findChild(QToolButton, "prepareUpload")
         menu = prepare.menu()
@@ -146,8 +149,10 @@ def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch):
         assert [QAccessible.queryAccessibleInterface(logo).text(QAccessible.Name) for logo in logos] == [
             "Box logo", "Wildlife Sound Hub logo", "Wildlife Insights logo",
         ]
-        for action, logo in zip(actions, logos):
+        assert menu.width() <= window.width()
+        for action, logo, minimum_width in zip(actions, logos, [55, 120, 135]):
             assert logo.isVisible() and not logo.pixmap().isNull()
+            assert logo.pixmap().deviceIndependentSize().width() >= minimum_width
             assert menu.actionGeometry(action).contains(logo.geometry())
             assert logo.testAttribute(Qt.WA_TransparentForMouseEvents)
         window.soundhub_stage_btn.setEnabled(False)

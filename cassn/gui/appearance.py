@@ -188,6 +188,9 @@ class PlatformPanel(QGroupBox):
 class PlatformMenu(QMenu):
     """Native actions handle selection, keyboard navigation, tooltips and disabled states."""
 
+    # The Sound Hub artwork has white margins. Give it more height than the other marks.
+    _logo_heights = {"box": 32, "soundhub": 60, "wildlife_insights": 36}
+
     def __init__(self, entries, parent):
         super().__init__(parent)
         self._logos = {}
@@ -196,7 +199,7 @@ class PlatformMenu(QMenu):
             # Keep the wordmark wide and expose its name as a real accessible label.
             action.setIconVisibleInMenu(False)
             self.addAction(action)
-            logo = platform_logo(platform, height=24)
+            logo = platform_logo(platform, height=self._logo_heights[platform])
             logo.setParent(self)
             logo.setAlignment(Qt.AlignCenter)
             logo.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -210,12 +213,13 @@ class PlatformMenu(QMenu):
 
     def _fit_rows(self):
         unit = self.fontMetrics().height()
-        column = 5 * unit
+        column = min(10 * unit, 216)
+        logo_height = min(4 * unit, 96)
         self.setStyleSheet(f"""
-            QMenu::item {{ padding: {unit}px {unit}px {unit}px {column + unit}px; }}
+            QMenu::item {{ padding: {logo_height // 2}px {unit}px {logo_height // 2}px {column + unit}px; }}
         """)
         for logo in self._logos.values():
-            logo.setFixedSize(column, 2 * unit)
+            logo.setFixedSize(column, logo_height)
             logo._refresh()
         self._place_logos()
 
