@@ -113,7 +113,7 @@ def test_sidebar_review_respects_validation_refusal(workspace_window, tmp_path, 
 def test_collection_checks_require_explicit_continue(
     workspace_window, tmp_path, monkeypatch, accept, sidebar
 ):
-    from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
+    from PySide6.QtWidgets import QTreeWidget
     from cassn.core.quality_control import append_qc_report
     from cassn.gui import wizard
 
@@ -144,14 +144,13 @@ def test_collection_checks_require_explicit_continue(
         assert tree.topLevelItem(tree.topLevelItemCount() - 1).text(0).startswith("Pending")
         for expected in ("p1_ML", "Small image", "Invalid offset", "Missing latitude", "Missing elevation"):
             assert expected in text
-        buttons = dialog.findChild(QDialogButtonBox)
         if accept:
             for i, finding in enumerate(findings):
                 if finding["severity"] in {"error", "warning"}:
                     tree.setCurrentItem(tree.topLevelItem(i))
                     dialog.acknowledge.click()
         target = "Continue to review" if accept else "Back to card ingest"
-        next(button for button in buttons.buttons() if button.text() == target).click()
+        next(button for button in dialog.findChildren(QPushButton) if button.text() == target).click()
         return dialog.result()
 
     monkeypatch.setattr(wizard.QDialog, "exec", respond)
@@ -346,7 +345,7 @@ def test_review_groups_only_empty_pending_devices(workspace_window, tmp_path):
         row.setData(0, Qt.UserRole, device)
     dialog = CollectionReviewDialog(window._collection_review_findings([]), window.file_inventory, tmp_path)
     try:
-        assert dialog.findChild(QLabel, "qcSummary").text() == "Needs investigation: 1 · To review: 1 · Notices: 0"
+        assert dialog.findChild(QLabel, "qcSummary") is None
         tree = dialog.tree
         assert tree.currentItem().text(1) == "p3_ML"
         assert tree.topLevelItem(1).text(1) == "p3_SA"

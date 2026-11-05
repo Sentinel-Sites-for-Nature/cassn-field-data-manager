@@ -1,14 +1,13 @@
 """A compact collection check summary with selected evidence."""
 from __future__ import annotations
 
-from collections import Counter
 from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
+    QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QTextEdit, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -43,7 +42,7 @@ class HoldToAcknowledge(QPushButton):
     held = Signal()
 
     def __init__(self):
-        super().__init__("Hold 2 seconds to acknowledge all")
+        super().__init__("Acknowledge all (hold 2 s)")
         self.setAutoDefault(False)
         self.setToolTip("Hold the mouse button or Space for two seconds. Release early to cancel.")
         self.timer = QTimer(self)
@@ -60,7 +59,7 @@ class HoldToAcknowledge(QPushButton):
 
     def _cancel(self):
         self.timer.stop()
-        self.setText("Hold 2 seconds to acknowledge all")
+        self.setText("Acknowledge all (hold 2 s)")
 
     def _finish(self):
         if self.isDown() and self.isEnabled() and self.isVisible():
@@ -87,7 +86,6 @@ class CollectionReviewDialog(WindowDialog):
             (row.get("device_label", ""), row.get("new_filename", "")): row
             for row in inventory
         }
-        counts = Counter(f["severity"] for f in findings)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 8, 12, 12)
         scroll = QScrollArea()
@@ -116,12 +114,6 @@ class CollectionReviewDialog(WindowDialog):
         event.setStyleSheet("color: #dcebe5;")
         header.addWidget(event)
         layout.addWidget(banner)
-        summary = workspace_label(
-            f"Needs investigation: {counts['error']} · To review: {counts['warning']} · Notices: {counts['info']}"
-            if findings else "No findings to address.", "contextTitle"
-        )
-        summary.setObjectName("qcSummary")
-        layout.addWidget(summary)
         self.tree = FindingsTable(content)
         self.tree.setObjectName("qcFindings")
         self.tree.setAccessibleName("Card ingest findings")
@@ -138,7 +130,7 @@ class CollectionReviewDialog(WindowDialog):
             label, light_color, dark_color = _LEVELS[finding["severity"]]
             color = QColor(dark_color if dark else light_color)
             item = QTreeWidgetItem([
-                f"{label} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
+                f"{label}: " + finding["title"].replace(" + ", "\n"), finding["affected"],
             ])
             for column in range(self.tree.columnCount()):
                 item.setBackground(column, color)
@@ -149,15 +141,18 @@ class CollectionReviewDialog(WindowDialog):
                 self._required.add(key)
                 item.setData(0, Qt.UserRole + 1, key)
                 item.setText(2, "Acknowledged" if key in self._acknowledged else "To review")
+            else:
+                item.setText(2, "No action needed")
             self.tree.addTopLevelItem(item)
             for device, description in finding.get("pending_devices", []):
-                child = QTreeWidgetItem(item, [f"Pending · {description}", device])
+                child = QTreeWidgetItem(item, [f"Pending: {description}", device, "No action needed"])
                 for column in range(self.tree.columnCount()):
                     child.setBackground(column, color)
                 child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
         layout.addWidget(self.tree, 3)
         self.tree.ensurePolished()
-        self.tree.setColumnWidth(2, self.tree.fontMetrics().horizontalAdvance("Acknowledged") + 28)
+        status_width = max(self.tree.fontMetrics().horizontalAdvance(text) for text in ("Acknowledged", "No action needed"))
+        self.tree.setColumnWidth(2, status_width + 28)
         visible_rows = min(4, self.tree.topLevelItemCount())
         if visible_rows:
             self.tree.setMinimumHeight(self.tree.header().sizeHint().height() + 8
@@ -191,33 +186,37 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.clicked.connect(self._open_file)
         controls.addWidget(self.open_file)
         evidence.addLayout(controls)
-        acknowledgement_row = QHBoxLayout()
-        self.acknowledge = QPushButton("I reviewed this finding\nand took any necessary action")
-        self.acknowledge.setAccessibleName("Acknowledge this finding as reviewed")
-        self.acknowledge.setProperty("role", "primary")
-        self.acknowledge.clicked.connect(self._acknowledge_current)
-        acknowledgement_row.addWidget(self.acknowledge, 1)
-        self.hold_all = HoldToAcknowledge()
-        self.hold_all.held.connect(lambda: self._save_reviewed(self._required))
-        self.hold_all.setVisible(bool(self._required))
-        self.hold_all.setEnabled(bool(self._required - self._acknowledged))
-        acknowledgement_row.addWidget(self.hold_all)
-        outer.addLayout(acknowledgement_row)
-        self.hold_all.ensurePolished()
-        self.hold_all.setMinimumWidth(self.hold_all.sizeHint().width())
         self.save_error = workspace_label("Could not save the acknowledgement. Try again.", "contextTitle", wrap=True)
         outer.addWidget(self.save_error)
         self.save_error.hide()
-        buttons = QDialogButtonBox()
-        back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
-        proceed = buttons.addButton("Continue to review", QDialogButtonBox.AcceptRole)
-        self.proceed = proceed
-        proceed.setEnabled(self._required <= self._acknowledged)
-        proceed.setProperty("role", "primary" if proceed.isEnabled() else "")
+
+        self.acknowledge = QPushButton("Acknowledge finding")
+        self.acknowledge.setAccessibleName("Acknowledge this finding as reviewed")
+        self.acknowledge.setToolTip("I reviewed this finding and took any necessary action.")
+        self.acknowledge.setProperty("role", "primary")
+        self.acknowledge.clicked.connect(self._acknowledge_current)
+        self.hold_all = HoldToAcknowledge()
+        self.hold_all.held.connect(lambda: self._save_reviewed(self._required))
+        self.hold_all.setVisible(bool(self._required - self._acknowledged))
+        back = QPushButton("Back to card ingest")
         back.setDefault(True)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        back.clicked.connect(self.reject)
+        self.proceed = QPushButton("Continue to review")
+        self.proceed.setEnabled(self._required <= self._acknowledged)
+        self.proceed.setProperty("role", "primary" if self.proceed.isEnabled() else "")
+        self.proceed.clicked.connect(self.accept)
+
+        footer = QGridLayout()
+        outer.addLayout(footer)
+        footer.setColumnStretch(0, 1)
+        buttons = (self.acknowledge, self.hold_all, back, self.proceed)
+        for index, button in enumerate(buttons):
+            footer.addWidget(button, index // 2, index % 2 + 1)
+            button.ensurePolished()
+        # Reserve the two columns even when the bulk button changes its text during a hold.
+        width = max(button.sizeHint().width() for button in buttons)
+        for column in (1, 2):
+            footer.setColumnMinimumWidth(column, width)
         self.tree.currentItemChanged.connect(self._select_finding)
         self.file_picker.currentIndexChanged.connect(self._update_open_button)
         if findings:
@@ -237,10 +236,7 @@ class CollectionReviewDialog(WindowDialog):
             return
         finding = item.data(0, Qt.UserRole)
         key = item.data(0, Qt.UserRole + 1)
-        self.acknowledge.setVisible(bool(key))
-        self.acknowledge.setEnabled(bool(key and key not in self._acknowledged))
-        self.acknowledge.setText("Finding acknowledged" if key in self._acknowledged else
-                                 "I reviewed this finding\nand took any necessary action")
+        self.acknowledge.setVisible(bool(key and key not in self._acknowledged))
         self.detail_title.setText(finding.get("detail_title", finding["title"]))
         explanation = finding.get("explanation", "")
         lines = [escape(text) for text in (explanation, finding["action"]) if text]
@@ -275,10 +271,9 @@ class CollectionReviewDialog(WindowDialog):
             item = self.tree.topLevelItem(index)
             if item.data(0, Qt.UserRole + 1) in updated:
                 item.setText(2, "Acknowledged")
-        self.acknowledge.setEnabled(False)
-        self.acknowledge.setText("Finding acknowledged")
+        self.acknowledge.hide()
         complete = self._required <= updated
-        self.hold_all.setEnabled(not complete)
+        self.hold_all.setVisible(not complete)
         self.proceed.setEnabled(complete)
         if complete:
             self.proceed.setProperty("role", "primary")

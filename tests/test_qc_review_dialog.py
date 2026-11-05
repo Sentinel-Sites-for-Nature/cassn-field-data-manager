@@ -37,7 +37,12 @@ def test_default_view_shows_unusual_evidence_and_hides_policy(app, tmp_path):
         assert "bad.jpg" in dialog.details.toPlainText()
         assert "10 bytes" in dialog.details.toPlainText()
         assert "long policy" not in dialog.details.toPlainText()
+        assert dialog.tree.currentItem().text(0).startswith("Review: ")
+        assert not dialog.acknowledge.isHidden() and not dialog.hold_all.isHidden()
         dialog.tree.setCurrentItem(dialog.tree.topLevelItem(1))
+        assert dialog.tree.currentItem().text(0).startswith("Notice: ")
+        assert dialog.tree.currentItem().text(2) == "No action needed"
+        assert dialog.acknowledge.isHidden() and not dialog.hold_all.isHidden()
         assert dialog.file_picker.count() == 0
         assert "100,000" in dialog.tree.currentItem().text(1)
         assert "bad.jpg" not in dialog.details.toPlainText()
@@ -111,6 +116,7 @@ def test_acknowledgement_persists_only_for_unchanged_evidence(app, tmp_path):
     dialog.close()
     reopened = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved)
     assert reopened.proceed.isEnabled()
+    assert reopened.acknowledge.isHidden() and reopened.hold_all.isHidden()
     reopened.close()
     rows[0]["evidence_key"] = "different-file"
     changed = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved,
@@ -171,6 +177,9 @@ def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
                                     save_acknowledgements=lambda keys: saves.append(keys) or True)
     dialog.show()
     app.processEvents()
+    assert dialog.acknowledge.width() == dialog.hold_all.width()
+    assert dialog.hold_all.geometry().right() == dialog.proceed.geometry().right()
+    assert dialog.hold_all.height() == dialog.proceed.height()
     button = dialog.hold_all
     try:
         assert button.timer.interval() == 2000
@@ -186,7 +195,7 @@ def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
         assert len(saves) == 1 and len(saves[0]) == 2
         assert dialog.proceed.isEnabled()
         assert dialog.tree.topLevelItem(0).text(2) == "Acknowledged"
-        assert dialog.tree.topLevelItem(1).text(2) == ""
+        assert dialog.tree.topLevelItem(1).text(2) == "No action needed"
     finally:
         dialog.close()
 
@@ -201,6 +210,7 @@ def test_status_column_reserves_the_whole_word(app, tmp_path, zoom):
     dialog.show()
     app.processEvents()
     dialog.acknowledge.click()
-    assert dialog.tree.columnWidth(2) >= dialog.tree.fontMetrics().horizontalAdvance("Acknowledged") + 10
-    assert dialog.acknowledge.isVisibleTo(dialog)
+    for status in ("Acknowledged", "No action needed"):
+        assert dialog.tree.columnWidth(2) >= dialog.tree.fontMetrics().horizontalAdvance(status) + 10
+    assert dialog.acknowledge.isHidden() and dialog.hold_all.isHidden()
     dialog.close()
