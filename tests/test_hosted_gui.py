@@ -82,21 +82,31 @@ def test_empty_project_error_scrolls_on_small_window_with_footer_reachable(app, 
 
 
 @pytest.mark.parametrize("profile", ["uc", "csu"])
-def test_fresh_welcome_uses_shared_brand_and_one_primary_action(app, monkeypatch, tmp_path, profile):
+def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, tmp_path, profile):
     from dataclasses import replace
     from PySide6.QtWidgets import QLabel
     monkeypatch.setattr(hosted_setup.QTimer, "singleShot", lambda *_: None)
     dialog = hosted_setup.HostedSetupDialog(replace(csu_config(), profile=profile), cache_dir=tmp_path)
     dialog.show()
     app.processEvents()
-    assert dialog.title.text() == "Welcome to the CA-SSN Data Manager"
+    assert dialog.title.text() == f"Open your {profile.upper()} project"
+    assert dialog.intro_heading.text() == "Loading project settings"
+    assert not dialog.connect_button.isVisible()
+    from cassn.box.hosted import HostedError
+    def no_session():
+        raise HostedError("reconnect")
+    monkeypatch.setattr(hosted_setup, "manager_for", lambda _: SimpleNamespace(token=no_session, session=None))
+    dialog.load_project()
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.intro_heading.text() == "Connect your Box account"
+    assert dialog.connect_button.isVisible()
+    assert not dialog.status.isVisible()
     assert not dialog.connect_button.icon().isNull()
     assert dialog.connect_button.isDefault()
     assert not dialog.retry_button.isVisible()
     assert not dialog.disconnect_button.isVisible()
     labels = dialog.findChildren(QLabel)
-    assert any("Click Connect to Box below to begin." in label.text() for label in labels)
-    assert any("approved to access your project folder" in label.text() for label in labels)
+    assert any("account that has access to your project folder" in label.text() for label in labels)
     assert any('href="mailto:jtimperato@ucdavis.edu"' in label.text() and label.openExternalLinks() for label in labels)
     dialog.close()
 
@@ -313,7 +323,10 @@ def test_authentication_failure_stays_recoverable_without_cache_retry(app, monke
     assert calls == ['token']
     assert dialog.result() != QDialog.Accepted
     assert dialog.connect_button.isVisible() and dialog.connect_button.isEnabled()
-    assert str(HostedError(kind)) in dialog.status.text()
+    if kind == "reconnect":
+        assert dialog.status.isHidden()
+    else:
+        assert str(HostedError(kind)) in dialog.status.text()
     assert not dialog.connected
     dialog.close()
 
