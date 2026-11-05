@@ -556,7 +556,8 @@ def inspect_deployment_for_cleanup(
                         record = read_object(box_bytes)
                         if record.get("file_count") != len(archive_paths):
                             raise ValueError("event count does not match verified archive metadata")
-                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"])) != record:
+                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"],
+                                                   deployment_lookup=deployment / "qc/lookup_snapshot/deployments.csv")) != record:
                             raise ValueError("Box event does not cover this batch")
                     store.assert_unchanged(ref)
                     continue

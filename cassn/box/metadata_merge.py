@@ -182,7 +182,39 @@ def read_object(payload: bytes) -> dict:
         raise MetadataConflict(f"Cannot safely read shared JSON: {exc}") from exc
 
 
-def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes:
+def _check_pending_device(label, previous, incoming, placements, records, file_ids):
+    """Prove the missing ID is a pending device, without inferring an ID from its label."""
+    from cassn.lookups import deployment_storage_label
+
+    conflict = MetadataConflict(f"Cannot confirm the deployment ID for {label}. "
+                                "Review the event records and saved device lookup before uploading.")
+    deployment_id = previous.get("deployment_id") or incoming.get("deployment_id")
+    for field in ("plot_number", "plot_label", "device_type"):
+        if not previous.get(field) or previous[field] != incoming.get(field):
+            raise conflict
+    matches = [p for p in placements if deployment_storage_label(p) == label
+               or p["deployment_id"] == deployment_id]
+    if len(matches) != 1:
+        raise conflict
+    placement = matches[0]
+    if (placement["deployment_id"] != deployment_id or deployment_storage_label(placement) != label
+            or placement["plot_number"] != str(incoming["plot_number"])
+            or placement["device_type"] != incoming["device_type"]):
+        raise conflict
+    for index, record in enumerate(records):
+        devices = record.get("devices", [])
+        matching = [d for d in devices if d.get("device_label") == label or d.get("deployment_id") == deployment_id]
+        if len(matching) != 1 or matching[0].get("device_label") != label:
+            raise conflict
+        if file_ids is not None:
+            ids = file_ids[index]
+            if (not ids.issubset({d.get("deployment_id") for d in devices})
+                    or (deployment_id in ids) != (matching[0].get("deployment_id") == deployment_id)):
+                raise conflict
+
+
+def merge_event(remote: bytes | None, local: bytes, *, file_count: int,
+                deployment_lookup: Path | None = None, file_ids=None) -> bytes:
     new = read_object(local)
     old = read_object(remote) if remote is not None else {}
     for obj in (new, old):
@@ -215,6 +247,7 @@ def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes
             if old_info.get(field) and new_info.get(field) and old_info[field] != new_info[field]:
                 raise MetadataConflict(f"Event record disagrees on {field}")
     devices = {}
+    placements = None
     for row in old.get("devices", []) + new["devices"]:
         if not isinstance(row, dict) or not row.get("device_label"):
             raise MetadataConflict("Device record has no unambiguous label")
@@ -224,7 +257,16 @@ def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes
             if any(previous[field] != row[field] for field in previous.keys() & row.keys()):
                 raise MetadataConflict(f"Conflicting deployment mapping for {label}")
             if previous.get("deployment_id") != row.get("deployment_id"):
-                raise MetadataConflict(f"Legacy deployment mapping needs review for {label}")
+                # FDM lists pending devices before their first file supplies an ID.
+                # A label alone cannot establish that an older row is the same device.
+                from cassn.lookups import load_device_deployments
+                if placements is None:
+                    placements = []
+                    if deployment_lookup is not None and deployment_lookup.is_file():
+                        placements = [p for p in load_device_deployments(deployment_lookup)
+                                      if p["deployment_event_id"] == new_info["deployment_event_id"]
+                                      and p["site_short_name"] == new_info.get("site_short_name")]
+                _check_pending_device(label, previous, row, placements, (old, new), file_ids)
             devices[label] = {**row, **previous}
         else:
             devices[label] = dict(row)

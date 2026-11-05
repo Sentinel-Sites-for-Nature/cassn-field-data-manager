@@ -168,16 +168,26 @@ class EventPublication:
 
         if "deployment_event_record.json" in local:
             name = "deployment_event_record.json"
+            file_ids = []
             for side, payload in (("remote", baseline.get(name)), ("local", local[name])):
+                ids = set()
+                file_ids.append(ids)
                 if payload is not None:
                     record = read_object(payload)
-                    count = sum(len(read_csv(data)[1]) for csv_name in CSV_NAMES
-                                if (data := (baseline.get(csv_name) if side == "remote" else local.get(csv_name))) is not None)
+                    count = 0
+                    for csv_name in CSV_NAMES:
+                        data = (baseline if side == "remote" else local).get(csv_name)
+                        if data is not None:
+                            rows = read_csv(data)[1]
+                            count += len(rows)
+                            ids.update(r["deployment_id"] for r in rows)
                     if record.get("file_count") != count:
                         raise MetadataConflict(f"{side} event file_count does not match its metadata rows; reconcile before upload")
             count = sum(len(read_csv(data)[1]) for csv_name in CSV_NAMES
                         if (data := self.candidates.get(csv_name, self.remote.get(csv_name))) is not None)
-            self.candidates[name] = merge_event(baseline.get(name), local[name], file_count=count)
+            self.candidates[name] = merge_event(baseline.get(name), local[name], file_count=count,
+                                                deployment_lookup=self.local_folder / "qc/lookup_snapshot/deployments.csv",
+                                                file_ids=file_ids)
         if "qc/qc_report.json" in local:
             name = "qc/qc_report.json"
             self.candidates[name] = merge_qc(self.remote.get(name), local[name])

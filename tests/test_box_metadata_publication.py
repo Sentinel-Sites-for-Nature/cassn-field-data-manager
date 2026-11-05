@@ -258,6 +258,55 @@ def test_event_union_and_conflicting_legacy_mapping():
         merge_event(json.dumps(old).encode(), json.dumps(new).encode(), file_count=2)
 
 
+@pytest.mark.parametrize("case", ["later plot", "retry", "pending locally", "no lookup",
+                                  "wrong assignment", "duplicate placement", "unaccounted files"])
+def test_partial_event_can_bind_only_a_proven_pending_device(tmp_path, case):
+    from cassn.lookups import DEVICE_DEPLOYMENT_REQUIRED_FIELDS
+
+    api = FakeBox()
+    previous = event("p3_BD")
+    previous["deployment_info"]["site_short_name"] = "Test"
+    pending = {"device_label": "p1_BD", "plot_label": "1", "plot_number": 1, "device_type": "BD"}
+    previous["devices"].append(pending)
+    assigned = "existing-assigned-id"
+    current = json.loads(json.dumps(previous))
+    current["devices"][1]["deployment_id"] = assigned
+    current["file_count"] = 2
+    old_rows = [row("old.wav", deployment="p3_BD")]
+    new_rows = old_rows + [row("new.wav", deployment=assigned)]
+    if case == "pending locally":
+        previous, current = current, previous
+        old_rows, new_rows = new_rows, old_rows
+    if case == "unaccounted files":
+        old_rows = [row("older.wav", deployment="unresolved")]
+    api.add("deployment_event_record.json", json.dumps(previous).encode())
+    api.add("audio_file_metadata.csv", payload(old_rows))
+    (tmp_path / "deployment_event_record.json").write_text(json.dumps(current))
+    snapshot = tmp_path / "qc/lookup_snapshot/deployments.csv"
+    snapshot.parent.mkdir(parents=True)
+    placement = dict.fromkeys(DEVICE_DEPLOYMENT_REQUIRED_FIELDS, "")
+    placement.update(deployment_id=assigned, deployment_event_id="event", device_type="BD",
+                     site_short_name="Test", plot_number="1", deployment_sequence="0",
+                     deployment_start_date="2026-01-01", deployment_end_date="2026-04-01")
+    if case == "wrong assignment":
+        placement["deployment_id"] = "different"
+    if case != "no lookup":
+        placements = [placement, placement] if case == "duplicate placement" else [placement]
+        snapshot.write_bytes(csv_bytes(list(placement), placements))
+    if case not in {"later plot", "retry", "pending locally"}:
+        with pytest.raises(MetadataConflict, match="Cannot confirm the deployment ID for p1_BD"):
+            prepare(api, tmp_path, new_rows)
+        assert api.calls == []
+        return
+    publication = prepare(api, tmp_path, new_rows)
+    publication.publish()
+    if case == "retry":
+        prepare(api, tmp_path, new_rows).publish()
+    merged = json.loads(api.data("deployment_event_record.json"))
+    assert merged["devices"][1] == dict(pending, deployment_id=assigned)
+    assert merged["file_count"] == 2
+
+
 def test_legacy_event_site_aliases_preserve_earlier_fields_and_add_current_names():
     old, new = event("old"), event("new")
     old["deployment_info"]["reserve_name"] = old["deployment_info"].pop("site_name")
