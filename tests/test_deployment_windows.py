@@ -449,7 +449,7 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     worker.start.side_effect = lambda: setattr(worker.isRunning, "return_value", True)
     monkeypatch.setattr(wizard_module, "flac_available", lambda: True)
     monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args: worker)
-    monkeypatch.setattr(WindowMessageBox, "question", lambda *args: WindowMessageBox.Yes)
+    monkeypatch.setattr(wizard_module.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     window.soundhub_group.setTitle("SoundHub upload progress")
     window.stage_for_soundhub()
     assert window.soundhub_group.title() == "SoundHub staging progress"

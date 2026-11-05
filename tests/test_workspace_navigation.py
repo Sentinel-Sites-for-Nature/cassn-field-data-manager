@@ -8,7 +8,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from cassn.box.auth import BoxConfig, hosted_config
 from cassn.gui.wizard import FieldDataWizard
@@ -60,7 +60,7 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.current_deployment_folder = tmp_path / "event"
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
     monkeypatch.setattr(wizard, "flac_available", lambda: True)
-    monkeypatch.setattr(wizard.QMessageBox, "question", lambda *args: wizard.QMessageBox.Yes)
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     worker = MagicMock()
     stage = MagicMock(return_value=worker)
     upload = MagicMock(side_effect=AssertionError("Staging must not start an upload"))
@@ -371,16 +371,20 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     worker = MagicMock()
     stage = MagicMock(return_value=worker)
     monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
-    question = MagicMock(return_value=wizard.QMessageBox.No)
-    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+    def cancel(dialog):
+        text = [label.text() for label in dialog.findChildren(QLabel)]
+        assert "Current batch: 2 deployments · 3 recordings" in text
+        assert "event" in text
+        assert {b.text() for b in dialog.findChildren(QPushButton)} == {"Cancel", "Stage bird audio"}
+        return dialog.DialogCode.Rejected
 
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", cancel)
     window.stage_for_soundhub()
-    assert "2 SoundHub deployment(s), 3 recording(s)" in question.call_args.args[2]
     validate.assert_not_called()
     check_box.assert_not_called()
     stage.assert_not_called()
 
-    question.return_value = wizard.QMessageBox.Yes
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     window.stage_for_soundhub()
     worker.start.assert_called_once()
     assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
@@ -412,8 +416,23 @@ def test_soundhub_continue_action_restores_saved_counts(workspace_window, tmp_pa
     assert window.soundhub_stage_btn.text() == "Continue SoundHub Staging…"
     assert "1 completed, 1 remaining" in window.soundhub_status_label.text()
     monkeypatch.setattr(wizard, "flac_available", lambda: True)
-    question = MagicMock(return_value=wizard.QMessageBox.No)
-    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+    def cancel(dialog):
+        text = [label.text() for label in dialog.findChildren(QLabel)]
+        assert "1 completed · 1 remaining" in text
+        assert "Continue staging" in [b.text() for b in dialog.findChildren(QPushButton)]
+        return dialog.DialogCode.Rejected
+
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", cancel)
     window.stage_for_soundhub()
-    assert question.call_args.args[1] == "Continue SoundHub Staging"
-    assert "1 completed, 1 remaining" in question.call_args.args[2]
+
+def test_activity_log_shows_device_severity_and_complete_diagnostic(workspace_window):
+    _, window = workspace_window
+    log = window.log_text
+    log.clear()
+    window.log("[p1_BD] Warning: Check the recorder.")
+    window.log("QC [p2_ML] pass: Camera dates match.")
+    window.log("✗ [p3_BD] Copy stopped.\nDetails: <card unavailable>")
+    assert [log.topLevelItem(i).text(1) for i in range(3)] == ["Warning", "Passed", "Error"]
+    entry = log.topLevelItem(2)
+    assert entry.text(0) == "p3_BD · Copy stopped."
+    assert entry.child(0).text(0) == "Copy stopped.\nDetails: <card unavailable>"
