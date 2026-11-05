@@ -3519,6 +3519,8 @@ class FieldDataWizard(QMainWindow):
             self.box_history_label.setText(
                 f"{recorded:,} of {total:,} event files recorded as uploaded · {total - recorded:,} await confirmation.")
             self.box_history_label.show()
+        else:
+            self.upload_metrics_label.setText("A confirmed file count is unavailable for this earlier upload.")
         try:
             state = json.loads((folder / STATE_PATH).read_text())
         except (OSError, ValueError):
@@ -4837,6 +4839,8 @@ class FieldDataWizard(QMainWindow):
             return
 
         self._record_soundhub_result("upload", "interrupted", "SoundHub upload started and has no completion result. Check its status.")
+        self.soundhub_progress_bar.setRange(0, 100)
+        self.soundhub_progress_bar.setFormat("%p%")
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_status_label.setText("Uploading to SoundHub…")
@@ -4970,6 +4974,8 @@ class FieldDataWizard(QMainWindow):
         self.log(operation_message(message, success, warning=cancelled))
 
         if success:
+            self.soundhub_progress_bar.setRange(0, 100)
+            self.soundhub_progress_bar.setFormat("%p%")
             self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")
