@@ -74,7 +74,7 @@ from cassn.gui.card_eject import CardDiskThread, card_attachment, identify_card,
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
 from cassn.gui.workspace import (
     ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
-    UploadProgressBar, workspace_label,
+    UploadMessage, UploadProgressBar, workspace_label,
 )
 from cassn.soundhub.export import (
     enrich_audio_rows,
@@ -807,6 +807,7 @@ class FieldDataWizard(QMainWindow):
         self.collection_splitter.setSizes([190, 300] if compact else [400, 660])
         self.review_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.review_splitter.setSizes([420, 480])
+        self.review_actions_layout.setDirection(direction)
         self._reflow_card_panels()
 
     def create_metadata_tab(self):
@@ -1227,15 +1228,20 @@ class FieldDataWizard(QMainWindow):
 
     def create_review_tab(self):
         """Create the review and finalize tab"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         tab = QWidget()
-        self.tabs.addTab(tab, "3. Review & Finalize")
+        scroll.setWidget(tab)
+        self.tabs.addTab(scroll, "3. Review & Finalize")
 
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(26, 22, 26, 22)
         layout.setSpacing(16)
 
         # Title
-        title = workspace_label("Review & upload", "pageTitle")
+        title = workspace_label("Review & upload", "pageTitle", wrap=True)
         layout.addWidget(title)
         layout.addWidget(workspace_label(
             "Check staged data before sending it to Box.", "subtitle", wrap=True,
@@ -1284,10 +1290,9 @@ class FieldDataWizard(QMainWindow):
         self.upload_progress_bar.setMaximum(100)
         upload_layout.addWidget(self.upload_progress_bar)
 
-        self.upload_status_label = QLabel("")
+        self.upload_status_label = UploadMessage()
         upload_layout.addWidget(self.upload_status_label)
-        self.upload_metrics_label = QLabel("")
-        self.upload_metrics_label.setWordWrap(True)
+        self.upload_metrics_label = UploadMessage()
         upload_layout.addWidget(self.upload_metrics_label)
 
         # Cancel button (shown only while an upload is running)
@@ -1313,7 +1318,7 @@ class FieldDataWizard(QMainWindow):
         self.hash_progress_bar.setMaximum(100)
         hash_layout.addWidget(self.hash_progress_bar)
 
-        self.hash_status_label = QLabel("")
+        self.hash_status_label = UploadMessage()
         hash_layout.addWidget(self.hash_status_label)
 
         self.hash_group.setLayout(hash_layout)
@@ -1407,7 +1412,7 @@ class FieldDataWizard(QMainWindow):
             from cassn.gui.wi_upload import WildlifeInsightsControl
             self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
             wi_actions.append(self.wi_control.action)
-        button_layout = QHBoxLayout()
+        self.review_actions_layout = button_layout = QHBoxLayout()
         prepare = self._menu_button("Prepare && Upload ▾", [
             self.upload_now_btn,
             None,

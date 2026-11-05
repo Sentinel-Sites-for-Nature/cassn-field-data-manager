@@ -1,7 +1,8 @@
 """Presentation shell for the field workspace; workflow decisions stay in the wizard."""
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QPixmap, QTransform
+from math import ceil
+from PySide6.QtCore import QEvent, QPointF, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPalette, QPixmap, QTextLayout, QTextOption, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
     QVBoxLayout, QWidget, QProgressBar, QStyle, QStyleOptionProgressBar, QStylePainter,
@@ -12,6 +13,43 @@ from cassn.profile import PROFILE
 
 
 PAGE_NAMES = ("Deployments and devices", "Card ingest", "Review & upload")
+
+
+class UploadMessage(QLabel):
+    """Fit progress text to the panel, including filenames wider than a line."""
+
+    def __init__(self):
+        super().__init__()
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(True)
+        # A long filename must not set the minimum width of the Review page.
+        policy = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def _wrapped(self, width):
+        text = self.text().replace("\n", "\u2028")
+        layout = QTextLayout(text, self.font())
+        options = QTextOption()
+        options.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(options)
+        height = 0.0
+        layout.beginLayout()
+        while (line := layout.createLine()).isValid():
+            line.setLineWidth(max(1, width))
+            line.setPosition(QPointF(0, height))
+            height += line.height()
+        layout.endLayout()
+        return layout, ceil(height)
+
+    def heightForWidth(self, width):
+        return self._wrapped(width)[1]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        layout, _ = self._wrapped(self.width())
+        layout.draw(painter, QPointF(0, 0))
 
 
 class UploadProgressBar(QProgressBar):
