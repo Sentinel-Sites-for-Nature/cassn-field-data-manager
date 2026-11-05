@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from html import escape
+from math import ceil
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QRectF, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel,
+    QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLayout,
     QPushButton, QScrollArea, QTextEdit, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -33,16 +34,53 @@ def acknowledgement_key(finding):
 
 
 class FindingsTable(SeverityTree):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.itemExpanded.connect(self.fit_rows)
+        self.itemCollapsed.connect(self.fit_rows)
+
+    def fit_rows(self):
+        self.doItemsLayout()
+        item = self.topLevelItem(0)
+        height = self.header().height() + 2 * self.frameWidth()
+        while item is not None:
+            height += self.visualItemRect(item).height()
+            item = self.itemBelow(item)
+        if self.minimumHeight() != height:
+            self.setFixedHeight(height)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.setColumnWidth(1, self.viewport().width() // 3)
+        if event.size().width() != event.oldSize().width():
+            self.setColumnWidth(1, self.viewport().width() // 3)
+            self.fit_rows()
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class EvidenceText(QTextEdit):
+    """Fit selected evidence to its text. Let the page handle scrolling."""
+
+    def __init__(self):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_text)
+
+    def _fit_text(self, size):
+        self.setFixedHeight(ceil(size.height()) + 2 * self.frameWidth() + 2)
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class HoldToAcknowledge(QPushButton):
     held = Signal()
 
     duration_ms = 2000
-    idle_text = "Acknowledge all (hold 2 s)"
+    idle_text = "Hold to acknowledge all and continue"
 
     def __init__(self):
         super().__init__(self.idle_text)
@@ -72,9 +110,6 @@ class HoldToAcknowledge(QPushButton):
             self.elapsed.invalidate()
             self.setDown(False)
             self.held.emit()
-        else:
-            tenths = (self.duration_ms - elapsed + 99) // 100
-            self.setText(f"Holding · {tenths / 10:.1f} s")
         self.update()
 
     def _cancel(self):
@@ -172,6 +207,8 @@ class CollectionReviewDialog(WindowDialog):
         scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget()
         layout = QVBoxLayout(content)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
         scroll.setWidget(content)
         outer.addWidget(scroll, 1)
         self.setObjectName("fieldWorkspace")
@@ -228,27 +265,24 @@ class CollectionReviewDialog(WindowDialog):
                 for column in range(self.tree.columnCount()):
                     child.setBackground(column, color)
                 child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
-        layout.addWidget(self.tree, 3)
+        layout.addWidget(self.tree)
         self.tree.ensurePolished()
         status_width = max(self.tree.fontMetrics().horizontalAdvance(text) for text in ("Acknowledged", "No action needed"))
         self.tree.setColumnWidth(2, status_width + 28)
-        visible_rows = min(4, self.tree.topLevelItemCount())
-        if visible_rows:
-            self.tree.setMinimumHeight(self.tree.header().sizeHint().height() + 8
-                                       + sum(self.tree.sizeHintForRow(i) for i in range(visible_rows)))
-        layout.addSpacing(8)
+        self.tree.fit_rows()
         card = QFrame()
         card.setObjectName("setupCard")
         evidence = QVBoxLayout(card)
         evidence.setContentsMargins(14, 10, 14, 10)
-        layout.addWidget(card, 2)
+        evidence.setAlignment(Qt.AlignTop)
+        layout.addWidget(card)
         self.detail_title = workspace_label("", "sectionTitle", wrap=True)
         evidence.addWidget(self.detail_title)
         self.next_step = QLabel()
         self.next_step.setWordWrap(True)
         self.next_step.setObjectName("qcNextStep")
         evidence.addWidget(self.next_step)
-        self.details = QTextEdit()
+        self.details = EvidenceText()
         self.details.setObjectName("qcEvidence")
         self.details.setAccessibleName("Selected finding evidence")
         self.details.setReadOnly(True)
@@ -363,6 +397,8 @@ class CollectionReviewDialog(WindowDialog):
             self.proceed.setProperty("role", "primary")
             self.proceed.style().unpolish(self.proceed)
             self.proceed.style().polish(self.proceed)
+        if bulk and complete:
+            self.accept()
 
     def _audio_selected(self):
         row = self._inventory.get(self.file_picker.currentData(), {})

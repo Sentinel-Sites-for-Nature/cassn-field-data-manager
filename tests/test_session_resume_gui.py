@@ -187,3 +187,28 @@ def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, mo
     finding["evidence_key"] = "two-files"
     assert not reopened._confirm_collection_review([])
     assert json.loads(path.read_text())["qc_acknowledgements"] == []
+
+
+def test_chooser_distinguishes_complete_skipped_and_unreadable_sessions(windows, tmp_path):
+    from datetime import datetime
+    from cassn.gui.session_chooser import SessionChooser
+    window = windows()
+    entries = [
+        dict(data={"metadata": {"site_name": "San Jacinto Mountains", "observer": "James",
+                                "deployment_start": "2026-06-10", "deployment_end": "2026-10-23"},
+                   "device_statuses": {"p1_ML": {"status": "Complete"}, "p1_BD": {"status": "Skipped"}}},
+             path=tmp_path / "sample-event" / "session.json", status="ok", saved_at=datetime(2026, 11, 5, 18)),
+        dict(data=None, path=tmp_path / "damaged" / "session.json", status="corrupted", error_msg="Unreadable JSON")
+    ]
+    chooser = SessionChooser(entries, window)
+    try:
+        row = chooser.tree.currentItem()
+        assert row.text(0) == "San Jacinto Mountains" and row.text(2) == "1 of 2"
+        assert row.text(1) == "2026-06-10 → 2026-10-23"
+        assert "James" in chooser.detail.text() and "Skipped devices: 1" in chooser.detail.text()
+        assert chooser.selected_session() is entries[0]
+        chooser.tree.setCurrentItem(chooser.tree.topLevelItem(1))
+        assert not chooser.resume.isEnabled()
+        assert "Unreadable JSON" in chooser.detail.text()
+    finally:
+        chooser.close()

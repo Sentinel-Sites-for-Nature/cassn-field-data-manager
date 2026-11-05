@@ -192,9 +192,11 @@ def test_hold_all_requires_an_uninterrupted_hold_and_one_save(app, tmp_path):
         QTest.mousePress(button, Qt.LeftButton)
         QTest.qWait(350)
         assert 0 < button.progress < 1 and not dialog.proceed.isEnabled()
+        assert button.text() == button.idle_text
         QTest.qWait(1750)
         assert button.progress == 1 and button.text() == "✓ All acknowledged"
         assert dialog.proceed.isEnabled() and len(saves) == 1  # Still pressing.
+        assert dialog.result() == dialog.DialogCode.Accepted
         QTest.mouseRelease(button, Qt.LeftButton)
         assert len(saves) == 1 and len(saves[0]) == 2
         assert dialog.proceed.isEnabled()
@@ -248,3 +250,20 @@ def test_status_column_reserves_the_whole_word(app, tmp_path, zoom):
         assert dialog.tree.columnWidth(2) >= dialog.tree.fontMetrics().horizontalAdvance(status) + 10
     assert dialog.acknowledge.isHidden() and dialog.hold_all.isHidden()
     dialog.close()
+
+@pytest.mark.parametrize("count,needs_scroll", [(5, False), (18, True)])
+def test_findings_page_scrolls_only_when_needed(app, tmp_path, count, needs_scroll):
+    from PySide6.QtWidgets import QScrollArea
+    rows = [dict(findings()[0], title=f"Finding {i}", message="One short finding.") for i in range(count)]
+    dialog = CollectionReviewDialog(rows, [], tmp_path)
+    dialog.show()
+    try:
+        for _ in range(4):
+            app.processEvents()
+        page = dialog.findChild(QScrollArea)
+        assert (page.verticalScrollBar().maximum() > 0) == needs_scroll
+        assert dialog.tree.verticalScrollBar().maximum() == 0
+        assert dialog.details.verticalScrollBar().maximum() == 0
+        assert dialog.tree.viewport().rect().contains(dialog.tree.visualItemRect(dialog.tree.topLevelItem(count - 1)))
+    finally:
+        dialog.close()

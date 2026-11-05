@@ -49,7 +49,8 @@ def test_missing_project_stays_open_without_repeating_login(app, monkeypatch, tm
     snapshot = SimpleNamespace(source="box", lookups=object())
     monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", lambda *a: snapshot)
     dialog.retry_button.click()
-    settle(app, lambda: dialog.bootstrap is snapshot)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is snapshot
     assert dialog.result() == QDialog.Accepted
     dialog.close()
 
@@ -129,11 +130,15 @@ def test_loading_settings_replaces_connection_check(app, monkeypatch, tmp_path):
     dialog.show()
     try:
         settle(app, lambda: dialog.status.text() == "Loading your project settings…")
-        assert not dialog.connection_status.isVisible()
+        assert dialog.connection_status.isVisible()
+        assert dialog.connection_check.isVisible()
         assert not dialog.connect_button.isVisible()
     finally:
         ready.set()
         settle(app, lambda: dialog.worker is None)
+    assert dialog.settings_check.isVisible()
+    assert dialog.status.text() == "Project settings loaded"
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
     assert dialog.result() == QDialog.Accepted
 
 
@@ -145,7 +150,8 @@ def test_valid_config_accepts_startup_and_offline_stays_disconnected(app, monkey
     monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", lambda *a: snapshot)
     dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
     dialog.show()
-    settle(app, lambda: dialog.bootstrap is snapshot)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is snapshot
     assert dialog.result() == QDialog.Accepted
     assert not dialog.connected
     dialog.close()
@@ -377,7 +383,8 @@ def test_successful_login_keeps_settings_failure_on_welcome_until_reload(app, mo
     settle(app, lambda: dialog.worker is None)
     assert dialog.connected and dialog.result() != QDialog.Accepted
     dialog.retry_button.click()
-    settle(app, lambda: dialog.bootstrap is live)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is live
     assert dialog.result() == QDialog.Accepted and dialog.connected
     dialog.close()
 

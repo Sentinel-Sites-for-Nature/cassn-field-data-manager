@@ -523,72 +523,11 @@ class FieldDataWizard(QMainWindow):
     def offer_resume_session(self, sessions: list):
         """Show a selection dialog listing all deployments in staging. Lets user open any of them
         — whether to resume in-progress work or to inspect/verify a completed deployment."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Open Deployment")
-        dlg.setMinimumWidth(560)
-        layout = QVBoxLayout(dlg)
-        help_text = (
-            "Select a deployment to open. You can resume in-progress sessions or reopen\n"
-            "completed deployments to run integrity checks (Verify Box Upload, etc.)."
-        )
-        layout.addWidget(QLabel(help_text))
+        from cassn.gui.session_chooser import SessionChooser
 
-        list_widget = QListWidget()
-        for s in sessions:
-            if s["status"] == "ok":
-                meta = normalize_deployment_event_metadata(
-                    s["data"].get("metadata", {})
-                )
-                statuses = s["data"].get("device_statuses", {})
-                total = len(statuses)
-                completed = sum(1 for v in statuses.values() if v.get("status") in ("Complete", "Skipped"))
-                site_name = meta.get("site_name") or meta.get("reserve_name", "Unknown Site")
-                start = meta.get("deployment_event_start_date", "?")
-                end = meta.get("deployment_event_end_date", "?")
-                label = f"✓  {site_name}  |  {start} → {end}  |  {completed}/{total} devices done"
-            elif s["status"] == "unsupported":
-                label = f"⚠  UNSUPPORTED — {s['path'].parent.name} ({s['error_msg']})"
-            else:
-                folder_name = s["path"].parent.name
-                label = f"⚠  CORRUPTED — {folder_name}  (truncated file, may be repairable)"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, s)
-            list_widget.addItem(item)
-
-        list_widget.setCurrentRow(0)
-        layout.addWidget(list_widget)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Open Selected")
-        buttons.button(QDialogButtonBox.Cancel).setText("Start New")
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        selected = list_widget.currentItem()
-        if not selected:
-            return
-        chosen = selected.data(Qt.UserRole)
-
-        if chosen["status"] == "unsupported":
-            QMessageBox.warning(self, "Unsupported Session",
-                                f"{chosen['path']}\n\n{chosen['error_msg']}")
-            return
-        if chosen["status"] == "corrupted":
-            QMessageBox.warning(
-                self,
-                "Corrupted Session",
-                f"The session file at:\n{chosen['path']}\n\ncould not be parsed "
-                f"({chosen['error_msg']}).\n\n"
-                "You can try opening it in a text editor to manually repair the JSON, "
-                "or discard it and start a new session.",
-            )
-            return
-
-        self.restore_session(chosen["data"])
+        dlg = SessionChooser(sessions, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.restore_session(dlg.selected_session()["data"])
 
     def restore_session(self, session_data):
         """Restore app state from a saved session dict."""

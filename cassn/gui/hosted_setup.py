@@ -70,7 +70,7 @@ class HostedDisconnectDialog(QDialog):
 
 
 class HostedSetupDialog(QDialog):
-    loading_settings = Signal()
+    loading_settings = Signal(bool)
 
     def __init__(self, config, parent=None, *, cache_dir=LOCAL_DATA_DIR):
         super().__init__(parent)
@@ -133,15 +133,28 @@ class HostedSetupDialog(QDialog):
         checking = QHBoxLayout(self.connection_status)
         checking.setContentsMargins(0, 0, 0, 0)
         checking.setSpacing(4)
-        checking.addWidget(workspace_label("Checking your", "contextTitle"))
+        self.connection_check = workspace_label("✓", "connected")
+        self.connection_check.hide()
+        checking.addWidget(self.connection_check)
+        self.connection_lead = workspace_label("Checking your", "contextTitle")
+        checking.addWidget(self.connection_lead)
         checking.addWidget(platform_logo("box", height=18))
-        checking.addWidget(workspace_label("connection…", "contextTitle"))
+        self.connection_tail = workspace_label("connection…", "contextTitle")
+        checking.addWidget(self.connection_tail)
         checking.addStretch()
         layout.addWidget(self.connection_status)
         self.loading_settings.connect(self._show_loading_settings)
         self.status = workspace_label("", "muted", wrap=True)
         self.status.hide()
-        layout.addWidget(self.status)
+        settings_row = QHBoxLayout()
+        self.settings_check = workspace_label("✓", "connected")
+        self.settings_check.hide()
+        settings_row.addWidget(self.settings_check, alignment=Qt.AlignTop)
+        settings_row.addWidget(self.status, 1)
+        layout.addLayout(settings_row)
+        self.open_timer = QTimer(self)
+        self.open_timer.setSingleShot(True)
+        self.open_timer.timeout.connect(self.accept)
         self.details = workspace_label("", "muted", wrap=True)
         self.details.hide()
         layout.addWidget(self.details)
@@ -184,13 +197,19 @@ class HostedSetupDialog(QDialog):
         self.close_button.clicked.connect(self.reject)
         QTimer.singleShot(0, self.load_project)
 
-    def _show_loading_settings(self):
-        if not self._closing:
-            self.connection_status.hide()
-            self.status.setText("Loading your project settings…")
-            self.status.show()
+    def _show_loading_settings(self, connected):
+        if self._closing:
+            return
+        self.connection_check.setVisible(connected)
+        self.connection_lead.setVisible(False)
+        state = "connection checked" if connected else "connection unavailable"
+        self.connection_tail.setText(state)
+        self.connection_status.setAccessibleName(f"Box {state}")
+        self.status.setText("Loading your project settings…")
+        self.status.show()
 
     def _show_sign_in(self):
+        self.connection_status.hide()
         self.title.setText("Connect your Box account")
         self.intro_note.setText(
             "Sign in with the account that has access to your project folder. "
@@ -217,6 +236,11 @@ class HostedSetupDialog(QDialog):
         self.connect_button.hide()
         self.retry_button.hide()
         self.status.hide()
+        self.settings_check.hide()
+        self.connection_check.hide()
+        self.connection_lead.show()
+        self.connection_tail.setText("connection…")
+        self.connection_status.setAccessibleName("Checking your Box connection")
         self.connection_status.show()
         def load():
             manager = manager_for(self.config)
@@ -231,7 +255,7 @@ class HostedSetupDialog(QDialog):
                     # Keep recovery visible; do not retry credentials or silently
                     # enter offline mode after an authentication failure.
                     return None, False, auth_error
-            self.loading_settings.emit()
+            self.loading_settings.emit(connected)
             try:
                 snapshot = bootstrap_lookup_tables(self.config, self.cache_dir)
                 if (require_live or connected) and snapshot.source != "box":
@@ -249,7 +273,6 @@ class HostedSetupDialog(QDialog):
         self.worker.start()
 
     def loaded(self):
-        self.connection_status.hide()
         self.status.show()
         worker, self.worker = self.worker, None
         self._busy(False)
@@ -268,7 +291,10 @@ class HostedSetupDialog(QDialog):
             self.bootstrap, self.connected, error = worker.result
             if self.bootstrap is not None:
                 worker.deleteLater()
-                self.accept()
+                self.status.setText("Project settings loaded" if self.connected else "Saved project settings loaded")
+                self.settings_check.show()
+                self._busy(True)
+                self.open_timer.start(450)
                 return
             if isinstance(error, LookupBootstrapError):
                 if error.reason == "missing_files":
@@ -375,6 +401,7 @@ class HostedSetupDialog(QDialog):
             self.retry_button.hide()
 
     def reject(self):
+        self.open_timer.stop()
         if self.worker is not None:
             self._closing = True
             self._busy(True)
