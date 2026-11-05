@@ -1,5 +1,6 @@
 """The workspace shell must preserve workflow gates and fit a laptop window."""
 
+import json
 import os
 from unittest.mock import MagicMock
 
@@ -436,3 +437,36 @@ def test_activity_log_shows_device_severity_and_complete_diagnostic(workspace_wi
     entry = log.topLevelItem(2)
     assert entry.text(0) == "p3_BD · Copy stopped."
     assert entry.child(0).text(0) == "Copy stopped.\nDetails: <card unavailable>"
+
+
+def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    _, window = workspace_window
+    event = tmp_path / "event"
+    event.mkdir()
+    window.current_deployment_folder = event
+    window.metadata["site_short_name"] = "example"
+    window.save_session()
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "staging")
+    monkeypatch.setattr(wizard, "event_audio_is_staged", lambda *args: True)
+    monkeypatch.setattr(wizard.QMessageBox, "information", lambda *args: None)
+    monkeypatch.setattr(wizard.QMessageBox, "warning", lambda *args: None)
+
+    window.on_soundhub_stage_complete(True, False, "Bird audio staged.", {})
+    session = event / "session.json"
+    before = session.read_bytes()
+    window.dismiss_soundhub_btn.click()
+    window._refresh_soundhub_resume()
+    assert window.soundhub_group.isHidden() and session.read_bytes() == before
+    window.restore_session(json.loads(before))
+    window.tabs.setCurrentIndex(2)
+    assert not window.soundhub_group.isHidden() and not window.dismiss_soundhub_btn.isHidden()
+
+    window.on_soundhub_stage_complete(False, False, "Disk full", {})
+    window.restore_session(json.loads(session.read_text()))
+    window.tabs.setCurrentIndex(2)
+    assert not window.soundhub_group.isHidden() and window.dismiss_soundhub_btn.isHidden()
+    assert "Disk full" in window.soundhub_status_label.text()
+    window._dismiss_soundhub_progress()
+    assert not window.soundhub_group.isHidden()

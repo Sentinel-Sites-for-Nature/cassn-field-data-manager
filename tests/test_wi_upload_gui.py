@@ -164,6 +164,7 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     again.validate_and_next()
     ctrl = again.wi_control
     assert ctrl.tree.topLevelItemCount() == 2
+    assert ctrl.dismiss_button.isHidden()
     (tmp_path / "stage").write_text("verifying")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
@@ -322,6 +323,7 @@ def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
     require_wi_complete(window.current_deployment_folder)
+    assert not ctrl.dismiss_button.isHidden()
     assert set(read_requests(window.current_deployment_folder)) == {original, replacement}
 
 
@@ -356,3 +358,31 @@ def test_interrupted_inbox_delivery_replays_saved_identity(work, tmp_path):
     start(ctrl, QDialogButtonBox.Ok)
     assert list(ctrl.jobs) == [key] and not ctrl.delivery_keys
     assert all(r["stage"] == "verified" for r in ctrl.jobs[key]["rows"])
+
+
+def test_dismiss_only_verified_wi_panel_and_restore(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / "stage").write_text("held")
+    start(ctrl, QDialogButtonBox.Ok)
+    assert ctrl.dismiss_button.isHidden() and not ctrl.group.isHidden()
+    ctrl.dismiss()
+    assert not ctrl.group.isHidden()
+    (tmp_path / "stage").write_text("verified")
+    ctrl.poll()
+    wait_for(lambda: ctrl.process is None)
+    assert not ctrl.dismiss_button.isHidden()
+    folder = window.current_deployment_folder
+    before = (folder / STATE_FILE).read_bytes()
+    calls = (tmp_path / "calls").read_text()
+    ctrl.dismiss_button.click()
+    ctrl.render()
+    assert ctrl.group.isHidden()
+    assert (folder / STATE_FILE).read_bytes() == before
+    assert (tmp_path / "calls").read_text() == calls
+
+    reopened = work()
+    reopened.validate_and_next()
+    assert not reopened.wi_control.group.isHidden()
+    assert not reopened.wi_control.dismiss_button.isHidden()

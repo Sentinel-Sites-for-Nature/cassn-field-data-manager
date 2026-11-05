@@ -139,19 +139,20 @@ def complete(job, sources=()):
                or superseded(s, rows.get(s["deployment"], {}), sources) for s in job["scopes"])
 
 
+def all_requests_verified(jobs):
+    # Resolve historical holds only through replacements with verified receipts.
+    verified_sources = set()
+    while True:
+        resolved = {key: job for key, job in jobs.items() if complete(job, verified_sources)}
+        sources = replacement_sources(resolved)
+        if sources == verified_sources:
+            return len(resolved) == len(jobs)
+        verified_sources = sources
+
+
 def require_wi_complete(folder):
     try:
-        jobs = read_requests(folder)
-        # Work backwards from verified replacements only. A queued or held
-        # replacement must never release its predecessor's staged originals.
-        verified_sources = set()
-        while True:
-            resolved = {key: job for key, job in jobs.items() if complete(job, verified_sources)}
-            sources = replacement_sources(resolved)
-            if sources == verified_sources:
-                break
-            verified_sources = sources
-        if len(resolved) != len(jobs):
+        if not all_requests_verified(read_requests(folder)):
             raise ValueError("Retain staged originals until Wildlife Insights verification finishes.")
     except OSError as exc:
         raise ValueError("Cannot check the saved Wildlife Insights requests.") from exc

@@ -227,6 +227,8 @@ class FieldDataWizard(QMainWindow):
         self.wi_split_thread = None
         self._box_operation_active = False
         self.provenance_thread = None
+        self._soundhub_result = {}
+        self._soundhub_dismissed = None
         self.soundhub_stage_thread = None
         self.soundhub_upload_thread = None
         self.box_verify_thread = None
@@ -426,6 +428,8 @@ class FieldDataWizard(QMainWindow):
             "deployment_folder": str(self.current_deployment_folder),
         }
 
+        if self._soundhub_result.get("folder") == str(self.current_deployment_folder):
+            session["soundhub_display"] = self._soundhub_result
         if self.box_config.provider == "hosted":
             session["box_project"] = {"profile": self.box_config.profile, "data_folder": self.box_config.field_data_folder_id}
         error = write_session(self.current_deployment_folder, session)
@@ -592,6 +596,11 @@ class FieldDataWizard(QMainWindow):
         self.file_inventory = session_data.get("file_inventory", [])
         self.camera_date_reviews = session_data.get("camera_date_reviews", {})
         self.current_deployment_folder = Path(session_data["deployment_folder"])
+        saved_result = session_data.get("soundhub_display")
+        self._soundhub_result = saved_result if isinstance(saved_result, dict) else {}
+        self._soundhub_dismissed = None
+        self.soundhub_group.hide()
+        self.dismiss_soundhub_btn.hide()
         try:
             removed_duplicates = deduplicate_exact_storage_entries(self.file_inventory)
         except ValueError as exc:
@@ -1348,6 +1357,10 @@ class FieldDataWizard(QMainWindow):
         )
         self.cancel_soundhub_btn.hide()
         soundhub_layout.addWidget(self.cancel_soundhub_btn, alignment=Qt.AlignRight)
+        self.dismiss_soundhub_btn = QPushButton("Dismiss")
+        self.dismiss_soundhub_btn.clicked.connect(self._dismiss_soundhub_progress)
+        self.dismiss_soundhub_btn.hide()
+        soundhub_layout.addWidget(self.dismiss_soundhub_btn, alignment=Qt.AlignRight)
 
         self.soundhub_group.setLayout(soundhub_layout)
         self.soundhub_group.hide()
@@ -4561,24 +4574,89 @@ class FieldDataWizard(QMainWindow):
             return
         self.soundhub_stage_btn.setEnabled(True)
         self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
-        if not self.current_deployment_folder:
+        self.dismiss_soundhub_btn.hide()
+        folder = self.current_deployment_folder
+        if not folder or self.box_config.profile == "csu":
+            self.soundhub_group.hide()
             return
+        result = self._soundhub_result
+        if result.get("folder") != str(folder):
+            result = {}
         try:
             root = self._soundhub_staging_root()
-            counts = staging_progress(self.current_deployment_folder, root)
-            if counts is None and event_audio_is_staged(self.current_deployment_folder, root):
-                self._show_bird_audio_staged()
-                return
-        except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError):
+            counts = staging_progress(folder, root)
+            staged = counts is None and event_audio_is_staged(folder, root)
+        except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError) as exc:
+            self.soundhub_group.show()
+            self.soundhub_status_label.setText(f"Could not check SoundHub staging: {exc}")
+            self._soundhub_dismissed = None
+            return
+        if staged:
+            self._show_bird_audio_staged()
+        if result.get("state") in {"interrupted", "failed", "cancelled"}:
+            self._soundhub_dismissed = None
+            self.soundhub_group.show()
+            operation = result.get("operation", "staging")
+            self.soundhub_group.setTitle(f"SoundHub {operation} progress")
+            self.soundhub_progress_bar.setValue(0)
+            self.soundhub_status_label.setText(result.get("message") or "Review the unfinished SoundHub operation.")
+            self.soundhub_status_label.setStyleSheet("color: red;" if result["state"] == "failed" else "color: orange;")
+            if operation == "staging":
+                self.soundhub_stage_btn.setEnabled(True)
+                self.soundhub_stage_btn.setText("Continue SoundHub Staging…")
             return
         if counts is not None:
+            self._soundhub_dismissed = None
             completed, total = counts
             self.soundhub_stage_btn.setText("Continue SoundHub Staging…")
             self.soundhub_group.show()
+            self.soundhub_group.setTitle("SoundHub staging progress")
+            self.soundhub_status_label.setStyleSheet("")
+            self.soundhub_progress_bar.setValue(round(100 * completed / max(total, 1)))
             self.soundhub_status_label.setText(
                 f"SoundHub staging can continue. {completed} completed, {total - completed} remaining. "
                 "Choose Prepare & Upload → Continue SoundHub Staging."
             )
+            return
+        generation = self._soundhub_generation()
+        uploaded = (result.get("operation") == "upload" and result.get("state") == "complete"
+                    and result.get("generation") == generation)
+        if staged or uploaded:
+            operation = "upload" if uploaded else "staging"
+            self.soundhub_group.setTitle(f"SoundHub {operation} progress")
+            self.soundhub_status_label.setStyleSheet("color: green;")
+            self.soundhub_status_label.setText(result["message"] if uploaded else "Bird audio staging is complete.")
+            self.soundhub_progress_bar.setValue(100)
+            self.dismiss_soundhub_btn.show()
+            self.soundhub_group.setVisible(self._soundhub_dismissed != (folder, generation))
+        else:
+            self._soundhub_dismissed = None
+            self.soundhub_group.hide()
+
+    def _soundhub_generation(self):
+        path = self.current_deployment_folder / "audio_file_metadata.csv"
+        try:
+            return path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return None
+
+    def _record_soundhub_result(self, operation, state, message):
+        self._soundhub_dismissed = None
+        self.dismiss_soundhub_btn.hide()
+        self.soundhub_group.show()
+        if self.current_deployment_folder:
+            self._soundhub_result = dict(folder=str(self.current_deployment_folder), operation=operation,
+                                         state=state, message=message, generation=self._soundhub_generation())
+            if (self.current_deployment_folder / "session.json").exists():
+                self.save_session()
+
+    def _dismiss_soundhub_progress(self):
+        if not self.current_deployment_folder or self._soundhub_busy():
+            return
+        self._refresh_soundhub_resume()
+        if not self.dismiss_soundhub_btn.isHidden():
+            self._soundhub_dismissed = (self.current_deployment_folder, self._soundhub_generation())
+            self.soundhub_group.hide()
 
     def _show_bird_audio_staged(self):
         self.soundhub_stage_btn.setText("Bird Audio Already Staged")
@@ -4618,7 +4696,10 @@ class FieldDataWizard(QMainWindow):
             existing_deployments = row_count("deployment.csv")
             existing_recordings = row_count("recording.csv")
             counts = staging_progress(self.current_deployment_folder, staging_root)
-            if counts is None and event_audio_is_staged(self.current_deployment_folder, staging_root):
+            retry_failed = (self._soundhub_result.get("folder") == str(self.current_deployment_folder)
+                            and self._soundhub_result.get("operation") == "staging"
+                            and self._soundhub_result.get("state") in {"failed", "interrupted", "cancelled"})
+            if not retry_failed and counts is None and event_audio_is_staged(self.current_deployment_folder, staging_root):
                 self._show_bird_audio_staged()
                 return
         except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError) as exc:
@@ -4630,7 +4711,7 @@ class FieldDataWizard(QMainWindow):
         if confirm.exec() != QDialog.Accepted:
             return
 
-        self.soundhub_group.show()
+        self._record_soundhub_result("staging", "interrupted", "Staging started and has no completion result. Continue staging.")
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_group.setTitle("SoundHub staging progress")
@@ -4707,7 +4788,7 @@ class FieldDataWizard(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        self.soundhub_group.show()
+        self._record_soundhub_result("upload", "interrupted", "SoundHub upload started and has no completion result. Check its status.")
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_group.setTitle("SoundHub upload progress")
@@ -4795,11 +4876,12 @@ class FieldDataWizard(QMainWindow):
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
-        self._refresh_soundhub_resume()
+        self._record_soundhub_result("staging", "complete" if success else "cancelled" if cancelled else "failed", message)
         self.log(operation_message(message, success, warning=cancelled))
 
         if success:
             self._show_bird_audio_staged()
+            self.dismiss_soundhub_btn.show()
             self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")
@@ -4820,6 +4902,8 @@ class FieldDataWizard(QMainWindow):
             QMessageBox.warning(self, "SoundHub Preparation Failed", message)
 
     def on_soundhub_upload_complete(self, success, cancelled, message, result):
+        self._record_soundhub_result("upload", "complete" if success else "cancelled" if cancelled else "failed", message)
+        self.dismiss_soundhub_btn.setVisible(success)
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
         self.log(operation_message(message, success, warning=cancelled))

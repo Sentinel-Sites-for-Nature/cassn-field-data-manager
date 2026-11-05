@@ -31,7 +31,7 @@ from collections import Counter
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QGroupBox, QLabel,
+    QDialog, QDialogButtonBox, QGroupBox, QLabel, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
@@ -41,7 +41,7 @@ from PySide6.QtWidgets import QFrame, QHeaderView
 from cassn.gui.appearance import workspace_label, workspace_stylesheet
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
-    checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
+    all_requests_verified, checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
     superseded, validate_scopes,
 )
 
@@ -76,6 +76,7 @@ class WildlifeInsightsControl(QObject):
         self.delivery_keys = set()
         self.menu_waiting = False
         self.closed = False
+        self.panel_error = False
         self.next_job = 0
         self.read_error = False
         self.group = QGroupBox("Wildlife Insights")
@@ -91,6 +92,11 @@ class WildlifeInsightsControl(QObject):
         self.notice.setTextFormat(Qt.PlainText)
         self.notice.setWordWrap(True)
         box.addWidget(self.notice)
+        self.dismissed = None
+        self.dismiss_button = QPushButton("Dismiss")
+        self.dismiss_button.clicked.connect(self.dismiss)
+        self.dismiss_button.hide()
+        box.addWidget(self.dismiss_button, alignment=Qt.AlignRight)
         layout.addWidget(self.group)
         self.group.hide()
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
@@ -106,8 +112,10 @@ class WildlifeInsightsControl(QObject):
         folder = self.window.current_deployment_folder
         if folder != self.folder:
             self.folder = folder
+            self.dismissed = None
             self.jobs = {}
             self.read_error = False
+            self.panel_error = False
             self.notice.clear()
             self.delivery_keys.clear()
             self.menu_waiting = False
@@ -134,7 +142,7 @@ class WildlifeInsightsControl(QObject):
                 stage = row.get("stage", "unknown")
                 count = row.get("confirmed", 0)
                 if key in self.unavailable and stage not in {"verified", "held"}:
-                    stage, count = "unknown", 0
+                    stage = "unknown"
                 item = QTreeWidgetItem(self.tree, [name])
                 item.setToolTip(0, name)
                 labels = {
@@ -165,15 +173,30 @@ class WildlifeInsightsControl(QObject):
                     self.tree.setItemWidget(item, 1, bar)
         self.tree.resizeColumnToContents(0)
         self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), 420))
-        self.group.setVisible(bool(self.jobs or self.notice.text()))
+        finished = self.can_dismiss()
+        if not finished:
+            self.dismissed = None
+        self.dismiss_button.setVisible(finished)
+        self.group.setVisible(bool(self.jobs or self.notice.text()) and self.dismissed != frozenset(self.jobs))
         if any(not complete(j, sources) for j in self.jobs.values()):
             self.timer.start()
         else:
             self.timer.stop()
 
-    def message(self, text):
+    def message(self, text, *, error=True):
+        self.dismissed = None
+        self.panel_error = error
         self.notice.setText(text)
+        self.dismiss_button.setVisible(self.can_dismiss())
         self.group.show()
+
+    def can_dismiss(self):
+        return bool(self.jobs and not self.read_error and not self.panel_error and all_requests_verified(self.jobs))
+
+    def dismiss(self):
+        if self.can_dismiss():
+            self.dismissed = frozenset(self.jobs)
+            self.group.hide()
 
     def call(self, operation, payload, receive):
         if self.closed or self.process or not self.folder:
@@ -324,7 +347,7 @@ class WildlifeInsightsControl(QObject):
             self.message(str(exc))
             return
         if not counts:
-            self.message("No new completed camera deployments to submit.")
+            self.message("No new completed camera deployments to submit.", error=False)
             return
         specs = [dict(deployment=k, images=v) for k, v in counts.items()]
         self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts))
@@ -459,6 +482,7 @@ class WildlifeInsightsControl(QObject):
             save_requests(self.folder, jobs)
             self.jobs = jobs
         self.unavailable.discard(key)
+        self.panel_error = False
         self.notice.clear()
         if any(row.get("delivery_pending") for row in rows):
             self.delivery_keys.add(key)
