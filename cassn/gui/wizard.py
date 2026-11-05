@@ -3426,6 +3426,16 @@ class FieldDataWizard(QMainWindow):
         self.box_upload_complete = verified
         self.upload_group.show()
         self.upload_metrics_label.clear()
+        if verified and self.current_deployment_folder:
+            # readiness() already matched these results to the current inventory.
+            try:
+                record = json.loads((self.current_deployment_folder / "qc/box_upload_verification.json").read_text())
+                if record.get("verified") is True:
+                    self.upload_metrics_label.setText(
+                        f"Box file list: {record['box_file_list']['summary']}\n"
+                        f"File hashes: {record['hash_verification']['summary']}")
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass
         self.cancel_upload_btn.hide()
         self.box_panel_button.setHidden(verified)
         self.box_panel_button.setEnabled(self.upload_now_btn.isEnabled() and bool(self.file_inventory))
@@ -3509,6 +3519,8 @@ class FieldDataWizard(QMainWindow):
         self.upload_progress_bar.show()
         self.box_history_label.setText(self.upload_progress_bar.text())
         complete = verified and current == total
+        if not complete:
+            self.upload_metrics_label.clear()
         self.box_upload_complete = complete
         self.box_panel_button.setHidden(complete)
         self.dismiss_box_btn.setVisible(complete)

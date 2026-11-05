@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import json
+
 import pytest
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QApplication
@@ -75,6 +77,17 @@ def test_reopen_counts_partial_upload_without_publishing_or_verifying(monkeypatc
         assert not window.box_upload_complete
         assert EventProgress.from_box_paths(inventory, window._box_present_paths).remaining == {"raw_data/p1_ML/next.jpg"}
         assert not (second / "qc/box_upload_verification.json").exists()
+        (second / "qc/box_upload_verification.json").write_text(json.dumps({
+            "verified": True, "box_file_list": {"summary": "3 names matched"},
+            "hash_verification": {"summary": "3 hashes matched"},
+        }))
+        window._box_present_paths = present | {"raw_data/p1_ML/next.jpg"}
+        window._show_saved_box_result(True)
+        assert window.upload_metrics_label.text() == "Box file list: 3 names matched\nFile hashes: 3 hashes matched"
+        window._box_present_paths = present
+        window._show_saved_box_result(True)
+        assert not window.box_upload_complete
+        assert not window.upload_metrics_label.text()
         window.set_box_connection_state(False)
         assert "Connect to Box" in window.box_history_label.text()
         assert window.upload_progress_bar.isHidden()
