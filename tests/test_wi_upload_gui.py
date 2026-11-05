@@ -521,7 +521,8 @@ def test_only_staged_cameras_render_without_creating_requests(work, tmp_path):
     assert not (tmp_path / "calls").exists()
 
 
-def test_web_button_selects_the_exported_project_without_submitting(work, tmp_path, monkeypatch):
+@pytest.mark.parametrize(("menu_index", "project"), [(0, "2010527"), (1, "2010517")])
+def test_web_button_selects_the_exported_project_without_submitting(work, tmp_path, monkeypatch, menu_index, project):
     window = work()
     prepare(window)
     ctrl = window.wi_control
@@ -532,9 +533,9 @@ def test_web_button_selects_the_exported_project_without_submitting(work, tmp_pa
     ctrl.web_button.click()
     menu = ctrl.web_button.findChild(QMenu)
     assert [a.text() for a in menu.actions()] == ["UCNRS Mammal", "UCNRS Small Animal"]
-    menu.actions()[1].trigger()
+    menu.actions()[menu_index].trigger()
     menu.close()
-    assert opened == ["https://app.wildlifeinsights.org/manage/organizations/2001427/projects/2010517"]
+    assert opened == [f"https://app.wildlifeinsights.org/manage/organizations/2001427/projects/{project}/uploads"]
     assert not (tmp_path / "calls").exists()
 
 

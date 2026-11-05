@@ -12,6 +12,16 @@ from cassn.box.publication import STATE_PATH
 from cassn.gui.dialogs import WindowMessageBox
 
 
+WI_PROJECT_NAMES = {"2010517": "UCNRS Small Animal", "2010527": "UCNRS Mammal"}
+
+
+def wi_project_uploads_url(project=None):
+    manage = "https://app.wildlifeinsights.org/manage"
+    if str(project) in WI_PROJECT_NAMES:
+        return f"{manage}/organizations/2001427/projects/{project}/uploads"
+    return manage
+
+
 def box_web_url(event_folder, data_folder_id):
     folder_id = None
     if event_folder:

@@ -4,6 +4,13 @@ from subprocess import CompletedProcess
 from cassn.gui import platform_links
 
 
+def test_wi_links_open_the_uploads_tab_for_known_projects():
+    projects = "https://app.wildlifeinsights.org/manage/organizations/2001427/projects"
+    assert platform_links.wi_project_uploads_url("2010517") == f"{projects}/2010517/uploads"
+    assert platform_links.wi_project_uploads_url("2010527") == f"{projects}/2010527/uploads"
+    assert platform_links.wi_project_uploads_url("unknown") == "https://app.wildlifeinsights.org/manage"
+
+
 def test_box_link_uses_this_events_folder_and_falls_back_to_project(tmp_path):
     folder = tmp_path / "event"
     journal = folder / platform_links.STATE_PATH

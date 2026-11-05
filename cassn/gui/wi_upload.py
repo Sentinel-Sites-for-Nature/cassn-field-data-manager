@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from cassn.gui.workspace import UploadProgressBar
-from cassn.gui.platform_links import open_platform_url
+from cassn.gui.platform_links import WI_PROJECT_NAMES, open_platform_url, wi_project_uploads_url
 
 from cassn.gui.appearance import style_cancel_button, PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
 from cassn.config import QC_SUBFOLDER
@@ -48,7 +48,6 @@ from cassn.core.wi_requests import (
 )
 
 
-PROJECT_NAMES = {"2010517": "UCNRS Small Animal", "2010527": "UCNRS Mammal"}
 ACTIVE_POLL_MS = 1000
 QUEUE_POLL_MS = 3000
 
@@ -124,7 +123,7 @@ class WildlifeInsightsControl(QObject):
         self.panel_button = self.group.add_action_button("Upload images", self.action, primary=True)
         self.panel_button.setAccessibleDescription("Review camera deployments for Wildlife Insights.")
         self.web_button = QPushButton("Open Wildlife Insights")
-        self.web_button.setToolTip("Open the destination project in your browser.")
+        self.web_button.setToolTip("Open the destination project’s Uploads tab in your browser.")
         self.web_button.clicked.connect(self._open_website)
         self.group.add_footer_button(self.web_button)
         self.timer = QTimer(self)
@@ -139,20 +138,19 @@ class WildlifeInsightsControl(QObject):
             for record in (*job["scopes"], *job.get("rows", [])):
                 projects.add(str(record.get("project_id", "")))
                 projects.add(str((record.get("integrity") or {}).get("project_id", "")))
-        ids = sorted(projects.intersection(PROJECT_NAMES), key=PROJECT_NAMES.get)
-        manage = "https://app.wildlifeinsights.org/manage"
+        ids = sorted(projects.intersection(WI_PROJECT_NAMES), key=WI_PROJECT_NAMES.get)
         if not ids:
-            open_platform_url(self.window, manage)
+            open_platform_url(self.window, wi_project_uploads_url())
             return
         def open_project(project):
-            open_platform_url(self.window, f"{manage}/organizations/2001427/projects/{project}")
+            open_platform_url(self.window, wi_project_uploads_url(project))
 
         if len(ids) == 1:
             open_project(ids[0])
             return
         menu = QMenu(self.web_button)
         for project in ids:
-            menu.addAction(PROJECT_NAMES[project]).triggered.connect(lambda _, p=project: open_project(p))
+            menu.addAction(WI_PROJECT_NAMES[project]).triggered.connect(lambda _, p=project: open_project(p))
         menu.aboutToHide.connect(menu.deleteLater)
         menu.popup(self.web_button.mapToGlobal(self.web_button.rect().bottomLeft()))
 
@@ -330,7 +328,7 @@ class WildlifeInsightsControl(QObject):
         for source, value in candidates:
             if type(value) in {str, int} and str(value).strip():
                 value = str(value).strip()
-                return f"Destination project: {PROJECT_NAMES.get(value, value)}", source
+                return f"Destination project: {WI_PROJECT_NAMES.get(value, value)}", source
         return "Destination project: unavailable", "No destination found in the saved records."
 
     def eventFilter(self, obj, event):
@@ -626,7 +624,7 @@ class WildlifeInsightsControl(QObject):
             ready = s.get("ready") is True and not s.get("hold")
             name = s["deployment"]
             project_id = projects.get(name)
-            destination = PROJECT_NAMES.get(project_id, project_id or "Unavailable")
+            destination = WI_PROJECT_NAMES.get(project_id, project_id or "Unavailable")
             detail = name if ready else f"{name}\n{s.get('hold') or 'Needs review'}"
             item = QTreeWidgetItem(tree, [detail, destination, f"{s['images']:,}"])
             item.setCheckState(0, Qt.Checked if ready else Qt.Unchecked)
