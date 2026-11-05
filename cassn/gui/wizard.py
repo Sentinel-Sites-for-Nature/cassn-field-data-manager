@@ -78,10 +78,11 @@ from cassn.gui.workspace import (
 )
 from cassn.soundhub.export import (
     enrich_audio_rows,
+    event_audio_is_staged,
     read_bd_audio_rows,
     write_deployment_copy,
 )
-from cassn.soundhub.staging import flac_available, project_root, staging_progress
+from cassn.soundhub.staging import SoundHubStagingError, flac_available, project_root, staging_progress
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -728,6 +729,7 @@ class FieldDataWizard(QMainWindow):
         self.workspace.page_requested.connect(self._navigate_workspace)
         self.workspace.compact_changed.connect(self._set_workspace_compact)
         self.tabs.currentChanged.connect(self._refresh_workspace_context)
+        self.tabs.currentChanged.connect(lambda index: self._refresh_soundhub_resume() if index == 2 else None)
         self.site_name_combo.currentTextChanged.connect(self._refresh_workspace_context)
         self.deploy_event_combo.currentIndexChanged.connect(self._refresh_workspace_context)
         self.device_tree.itemChanged.connect(self._refresh_workspace_context)
@@ -759,7 +761,6 @@ class FieldDataWizard(QMainWindow):
     def _refresh_workspace_context(self, *_args) -> None:
         if not hasattr(self, "workspace") or not hasattr(self, "device_tree"):
             return
-        self._refresh_soundhub_resume()
         if getattr(self, "wi_control", None):
             self.wi_control.refresh()
         metadata = self.metadata
@@ -1407,12 +1408,14 @@ class FieldDataWizard(QMainWindow):
             self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
             wi_actions.append(self.wi_control.action)
         button_layout = QHBoxLayout()
-        button_layout.addWidget(self._menu_button("Prepare && Upload ▾", [
+        prepare = self._menu_button("Prepare && Upload ▾", [
             self.upload_now_btn,
             None,
             self.soundhub_stage_btn,
             *wi_actions,
-        ]))
+        ])
+        prepare.menu().aboutToShow.connect(self._refresh_soundhub_resume)
+        button_layout.addWidget(prepare)
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
             self.box_verify_btn,
             self.fixity_btn,
@@ -4498,12 +4501,17 @@ class FieldDataWizard(QMainWindow):
     def _refresh_soundhub_resume(self):
         if not hasattr(self, "soundhub_stage_btn") or self._soundhub_busy():
             return
+        self.soundhub_stage_btn.setEnabled(True)
         self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
         if not self.current_deployment_folder:
             return
         try:
-            counts = staging_progress(self.current_deployment_folder, self._soundhub_staging_root())
-        except (OSError, ValueError, KeyError):
+            root = self._soundhub_staging_root()
+            counts = staging_progress(self.current_deployment_folder, root)
+            if counts is None and event_audio_is_staged(self.current_deployment_folder, root):
+                self._show_bird_audio_staged()
+                return
+        except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError):
             return
         if counts is not None:
             completed, total = counts
@@ -4513,6 +4521,10 @@ class FieldDataWizard(QMainWindow):
                 f"SoundHub staging can continue. {completed} completed, {total - completed} remaining. "
                 "Choose Prepare & Upload → Continue SoundHub Staging."
             )
+
+    def _show_bird_audio_staged(self):
+        self.soundhub_stage_btn.setText("Bird Audio Already Staged")
+        self.soundhub_stage_btn.setEnabled(False)
 
     def _set_soundhub_actions_enabled(self, enabled: bool):
         self.soundhub_stage_btn.setEnabled(enabled)
@@ -4548,7 +4560,10 @@ class FieldDataWizard(QMainWindow):
         existing_recordings = row_count("recording.csv")
         try:
             counts = staging_progress(self.current_deployment_folder, staging_root)
-        except (OSError, ValueError, KeyError) as exc:
+            if counts is None and event_audio_is_staged(self.current_deployment_folder, staging_root):
+                self._show_bird_audio_staged()
+                return
+        except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError) as exc:
             QMessageBox.warning(self, "Cannot Read SoundHub Progress", str(exc))
             return
         resume_message = ""
@@ -4744,7 +4759,7 @@ class FieldDataWizard(QMainWindow):
         self.log(message)
 
         if success:
-            self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
+            self._show_bird_audio_staged()
             self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")

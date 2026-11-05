@@ -376,6 +376,30 @@ def _read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def event_audio_is_staged(event_folder, staging_root) -> bool:
+    """Compare this event with the finished local batch without reading media contents."""
+    root = project_root(staging_root)
+    if not (root / RECORDING_CSV).is_file() or not (Path(event_folder) / "audio_file_metadata.csv").is_file():
+        return False
+    rows = read_bd_audio_rows(event_folder)
+    if not rows:
+        return False
+    expected = build_recording_rows(rows)
+    ids = {row["deployment_id"] for row in expected}
+    if any(not ident or Path(ident).name != ident or ident in {".", ".."} for ident in ids):
+        return False
+    staged = [r for r in _read_csv(root / RECORDING_CSV) if r["deployment_id"] in ids]
+    if sorted(staged, key=lambda r: r["path"]) != sorted(expected, key=lambda r: r["path"]):
+        return False
+    event_deployments = _read_csv(Path(event_folder) / "soundhub" / DEPLOYMENT_CSV)
+    staged_deployments = [r for r in _read_csv(root / DEPLOYMENT_CSV) if r["deployment_id"] in ids]
+    if ({r["deployment_id"] for r in event_deployments} != ids or
+            sorted(staged_deployments, key=lambda r: r["deployment_id"]) !=
+            sorted(event_deployments, key=lambda r: r["deployment_id"])):
+        return False
+    return all((root / r["path"]).is_file() and (root / r["path"]).stat().st_size > 0 for r in expected)
+
+
 def refresh_project_csvs(staging_root) -> dict:
     """Rebuild the two project-level CSVs from every fragment in staging.
 

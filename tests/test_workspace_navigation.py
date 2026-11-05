@@ -73,7 +73,8 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     worker.start.assert_called_once()
     assert not window.soundhub_stage_btn.isEnabled()
     window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
-    assert window.soundhub_stage_btn.isEnabled()
+    assert not window.soundhub_stage_btn.isEnabled()
+    assert window.soundhub_stage_btn.text() == "Bird Audio Already Staged"
     assert "nothing was uploaded" in notice.call_args.args[2]
     assert "Upload Bird Data to SoundHub" not in notice.call_args.args[2]
     upload.assert_not_called()
@@ -407,7 +408,7 @@ def test_soundhub_continue_action_restores_saved_counts(workspace_window, tmp_pa
     (folder / f"{deployment_id}_00001.flac").write_bytes(b"completed")
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: staging)
     window.current_deployment_folder = event
-    window._refresh_workspace_context()
+    window.tabs.setCurrentIndex(2)
     assert window.soundhub_stage_btn.text() == "Continue SoundHub Staging…"
     assert "1 completed, 1 remaining" in window.soundhub_status_label.text()
     monkeypatch.setattr(wizard, "flac_available", lambda: True)

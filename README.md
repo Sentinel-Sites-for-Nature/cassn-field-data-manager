@@ -556,6 +556,9 @@ landing-zone checks are available through the maintenance CLI below.
    per-file and the job is cancellable. A copy of both CSVs is also written to the event's `soundhub/`
    subfolder so the metadata travels to Box alongside the raw data.
 
+After successful staging, the menu shows **Bird Audio Already Staged** in gray.
+Adding another plot's bird recordings makes the staging action available again.
+
 After cancellation or failure, reopen the event and choose
 **Prepare & Upload → Continue SoundHub Staging…**. The app shows completed and remaining recording counts.
 It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
