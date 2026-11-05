@@ -108,7 +108,7 @@ def _context(needs_reconnect, connected=True):
         _update_copy_action=MagicMock(),
         box_authenticated=True, box_upload_complete=False, _box_operation_active=True,
     )
-    for name in ("cancel_upload_btn", "upload_progress_bar", "upload_status_label", "open_btn",
+    for name in ("box_count_retry", "cancel_upload_btn", "upload_progress_bar", "upload_status_label", "open_btn",
                  "switch_deployment_btn", "exit_btn", "upload_now_btn", "new_btn",
                  "box_verify_btn", "fixity_btn"):
         setattr(context, name, MagicMock())
