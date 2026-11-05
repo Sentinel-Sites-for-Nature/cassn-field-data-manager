@@ -421,6 +421,11 @@ ORG_SITE_YYYYMMDD/
 
 ### Wildlife Insights Deployment CSV
 
+Use **Prepare & Upload → Upload images to Wildlife Insights** for a first upload
+or to retry an eligible held camera. Review the project and photo count before
+confirming. If delivery of an earlier request was interrupted, this menu shows
+the saved selection for confirmation.
+
 At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires event-scoped camera fields in `deployments.csv` and defaults in `wi_config.json`.
 
 On Box, open the event's **wildlife_insights** folder for manual upload inputs.
