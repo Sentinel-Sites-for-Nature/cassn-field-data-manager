@@ -820,9 +820,6 @@ class FieldDataWizard(QMainWindow):
         self.collection_splitter.setSizes([190, 300] if compact else [400, 660])
         self.review_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.review_splitter.setSizes([420, 480])
-        # Keep the start button at the right. A second click there cannot cancel the job.
-        for group in (self.upload_group, self.soundhub_group):
-            group.action_row.setDirection(QBoxLayout.BottomToTop if compact else QBoxLayout.LeftToRight)
         self._reflow_card_panels()
 
     def create_metadata_tab(self):
@@ -1328,7 +1325,7 @@ class FieldDataWizard(QMainWindow):
         self.dismiss_box_btn.setToolTip("Collapse the details for this verified Box upload.")
         self.dismiss_box_btn.clicked.connect(self._dismiss_verified_box)
         self.dismiss_box_btn.hide()
-        self.upload_group.details.addWidget(self.dismiss_box_btn, alignment=Qt.AlignRight)
+        self.upload_group.add_footer_button(self.dismiss_box_btn, details_only=True)
 
         layout.addWidget(self.upload_group)
 
@@ -1336,7 +1333,8 @@ class FieldDataWizard(QMainWindow):
         self.hash_group = PlatformPanel("box_check")
         hash_layout = self.hash_group.body
 
-        self.hash_progress_bar = QProgressBar()
+        self.hash_progress_bar = UploadProgressBar()
+        self.hash_progress_bar.setObjectName("eventProgress")
         self.hash_progress_bar.setMinimum(0)
         self.hash_progress_bar.setMaximum(100)
         self.hash_group.details.addWidget(self.hash_progress_bar)
@@ -1378,7 +1376,7 @@ class FieldDataWizard(QMainWindow):
         self.dismiss_soundhub_btn = QPushButton("Dismiss")
         self.dismiss_soundhub_btn.clicked.connect(self._dismiss_soundhub_progress)
         self.dismiss_soundhub_btn.hide()
-        self.soundhub_group.details.addWidget(self.dismiss_soundhub_btn, alignment=Qt.AlignRight)
+        self.soundhub_group.add_footer_button(self.dismiss_soundhub_btn, details_only=True)
 
         self.soundhub_group.setVisible(self.box_config.profile != "csu")
         layout.addWidget(self.soundhub_group)
@@ -4931,6 +4929,7 @@ class FieldDataWizard(QMainWindow):
             if name not in self.soundhub_recorder_bars:
                 label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
                 bar = UploadProgressBar()
+                bar.setObjectName("eventProgress")
                 bar.setAccessibleName(f"{name} recording preparation")
                 self.soundhub_recorder_layout.addWidget(label)
                 self.soundhub_recorder_layout.addWidget(bar)

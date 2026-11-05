@@ -26,6 +26,14 @@ class UploadMessage(QLabel):
         policy = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
+        self.hide()
+
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self):
+        self.setText("")
 
     def _wrapped(self, width):
         text = self.text().replace("\n", "\u2028")
@@ -65,7 +73,14 @@ class UploadProgressBar(QProgressBar):
             return
         painter.setPen(self.palette().color(QPalette.Text))
         text_flags = Qt.AlignCenter | Qt.TextWordWrap if self.property("wrapProgressText") else Qt.AlignCenter
-        painter.drawText(option.rect, text_flags, self.text())
+        label = self.text()
+        available = option.rect.width() - 6
+        if self.format().endswith(" · %p%") and self.fontMetrics().horizontalAdvance(label) > available:
+            percent = label.rsplit(" · ", 1)[-1]
+            label = f"{self.value():,} / {self.maximum():,} · {percent}"
+            if self.fontMetrics().horizontalAdvance(label) > available:
+                label = percent
+        painter.drawText(option.rect, text_flags, label)
         filled = self.style().subElementRect(QStyle.SE_ProgressBarContents, option, self)
         fraction = max(0, self.value() - self.minimum()) / (self.maximum() - self.minimum())
         filled.setWidth(round(filled.width() * fraction))
@@ -74,7 +89,7 @@ class UploadProgressBar(QProgressBar):
         painter.setClipRect(filled)
         dark = QApplication.palette().color(QPalette.Window).lightness() < 128
         painter.setPen(QColor("#152d25" if dark else "#ffffff"))
-        painter.drawText(option.rect, text_flags, self.text())
+        painter.drawText(option.rect, text_flags, label)
 
 
 

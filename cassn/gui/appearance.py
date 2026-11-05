@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QPalette, QPixmap, QRegion
-from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -64,6 +64,7 @@ QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px;
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
 QGroupBox[role="cardJob"] {{ padding: 0px 8px 8px; }}
 QGroupBox[role="platformPanel"] {{ margin-top: 0; padding: 0; }}
+QFrame#platformActions {{ background: {background}; border-top: 1px solid {line}; border-bottom-left-radius: 9px; border-bottom-right-radius: 9px; }}
 QFrame#platformHeader {{ background: {"#c8ddd1" if dark else "#deede4"}; border: none;
     border-bottom: 1px solid #b8d1c3; border-top-left-radius: 9px; border-top-right-radius: 9px; }}
 QLabel[role="platformTitle"] {{ color: #163f31; font-size: 18px; font-weight: 700; }}
@@ -85,7 +86,7 @@ QTreeWidget::item:selected {{ background: {tint}; color: {text}; }}
 QHeaderView::section {{ background: {background}; color: {muted}; border: none; border-bottom: 1px solid {line}; padding: 10px 5px; font-weight: normal; }}
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
-QProgressBar#boxUploadProgress, QProgressBar#eventProgress {{ min-height: 24px; max-height: 16777215px; color: {text}; text-align: center; }}
+QProgressBar#boxUploadProgress, QProgressBar#eventProgress {{ min-height: {round(26 * zoom / 100)}px; max-height: 16777215px; color: {text}; text-align: center; }}
 QProgressBar#boxUploadProgress::chunk {{ background: {accent}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: {background}; }}
@@ -186,11 +187,77 @@ def platform_logo(platform, *, height=20):
 
 
 _PANEL_TITLES = {
-    "box": "Archive event files in cloud storage",
-    "box_check": "Compare local and archived file hashes",
+    "box": "Upload event files to Box",
+    "box_check": "Verify uploaded files against local copies",
     "soundhub": "Prepare and Stage Bird Audio Data for SoundHub Upload",
     "wildlife_insights": "Upload camera deployments and photos",
 }
+
+
+class _PanelActions(QLayout):
+    """Wrap secondary controls while keeping the main action at the top right."""
+
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.items = []
+        self.primary = None
+        self.setSpacing(12)
+
+    def addItem(self, item):
+        self.items.append(item)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, index):
+        return self.items[index] if 0 <= index < len(self.items) else None
+
+    def takeAt(self, index):
+        return self.items.pop(index) if 0 <= index < len(self.items) else None
+
+    def minimumSize(self):
+        sizes = [item.minimumSize() for item in self.items if not item.isEmpty()]
+        return QSize(max((s.width() + 28 for s in sizes), default=0), self.heightForWidth(10000))
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QRect(0, 0, width, 0), False)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, True)
+
+    def _arrange(self, rect, draw):
+        visible = [item for item in self.items if not item.isEmpty() and item.sizeHint().width() > 0]
+        if not visible:
+            return 0
+        left, right = rect.x() + 14, rect.x() + rect.width() - 14
+        x, y = left, rect.y() + 10
+        limit, row_height = right, 0
+        main = next((item for item in visible if item.widget() is self.primary), None)
+        if main:
+            size = main.sizeHint()
+            limit = right - size.width() - self.spacing()
+            row_height = size.height()
+            if draw:
+                main.setGeometry(QRect(right - size.width(), y, size.width(), size.height()))
+        for item in visible:
+            if item is main:
+                continue
+            size = item.sizeHint()
+            if row_height and x + size.width() > limit:
+                y += row_height + self.spacing()
+                x, limit, row_height = left, right, 0
+            if draw:
+                item.setGeometry(QRect(x, y, size.width(), size.height()))
+            row_height = max(row_height, size.height())
+            x += size.width() + self.spacing()
+        return y - rect.y() + row_height + 10
 
 
 class PlatformPanel(QGroupBox):
@@ -231,6 +298,15 @@ class PlatformPanel(QGroupBox):
         self.details = QVBoxLayout(self._detail_area)
         self.details.setContentsMargins(14, 0, 14, 12)
         layout.addWidget(self._detail_area)
+        self.footer = None
+        self._expanded_controls = []
+        if purpose in ("box", "soundhub"):
+            self.footer = QFrame()
+            self.footer.setObjectName("platformActions")
+            self.actions = _PanelActions(self.footer)
+            layout.addWidget(self.footer)
+            self.body.setSpacing(6)
+            self.details.setSpacing(8)
         self._set_expanded(False)
         self.disclosure.toggled.connect(self._set_expanded)
         self.setAccessibleName(f"{name} {self.title()}")
@@ -248,23 +324,35 @@ class PlatformPanel(QGroupBox):
         action.visibleChanged.connect(lambda: button.setVisible(action.isVisible()))
         button.setVisible(action.isVisible())
         sync()
-        if cancel is None:
+        if self.footer is None:
             (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
         else:
-            self.action_row = QHBoxLayout()
-            self.action_row.setContentsMargins(0, 6, 0, 0)
-            self.action_row.setSpacing(12)
-            self.action_row.addWidget(cancel, alignment=Qt.AlignLeft)
-            self.action_row.addStretch()
-            self.action_row.addWidget(button, alignment=Qt.AlignRight)
-            self.body.addLayout(self.action_row)
+            if cancel is not None:
+                self.actions.primary = button
+                self.actions.addWidget(cancel)
+            self.add_footer_button(button, details_only=details)
         return button
+
+    def add_footer_button(self, button, *, details_only=False):
+        if not details_only:
+            self.actions.addWidget(button)
+            return
+        # Hide the wrapper when collapsed. The button retains its own job-specific state.
+        wrapper = QWidget()
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(button)
+        self.actions.addWidget(wrapper)
+        self._expanded_controls.append(wrapper)
+        wrapper.setVisible(self.disclosure.isChecked())
 
     def title(self):
         return self._heading.text()
 
     def _set_expanded(self, expanded):
         self._detail_area.setVisible(expanded)
+        for widget in self._expanded_controls:
+            widget.setVisible(expanded)
         self.disclosure.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         verb = "Hide" if expanded else "Show"
         label = f"{verb} {_PLATFORMS[self.platform][0]} progress details"

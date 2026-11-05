@@ -104,6 +104,15 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             horizontal_gap = start.left() - cancel.right() - 1
             vertical_gap = cancel.top() - start.bottom() - 1
             assert max(horizontal_gap, vertical_gap) >= 12
+            for panel in (window.upload_group, window.soundhub_group):
+                assert panel._detail_area.geometry().bottom() < panel.footer.y()
+                rects = []
+                for button in panel.footer.findChildren(QPushButton):
+                    if button.isVisible():
+                        rect = button.rect().translated(button.mapTo(panel.footer, button.rect().topLeft()))
+                        assert panel.footer.rect().contains(rect)
+                        assert all(not other.intersects(rect) for other in rects)
+                        rects.append(rect)
             assert page.widget().width() == page.viewport().width()
             assert page.horizontalScrollBar().maximum() == 0
             assert window.upload_progress_bar.value() == 25 * count
@@ -115,8 +124,8 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             assert len({p.logo.x() for p in panels}) == 1
             assert len({p._heading.x() for p in panels}) == 1
             for group, name, title in [
-                (window.upload_group, "Box", "Archive event files in cloud storage"),
-                (window.hash_group, "Box", "Compare local and archived file hashes"),
+                (window.upload_group, "Box", "Upload event files to Box"),
+                (window.hash_group, "Box", "Verify uploaded files against local copies"),
                 (window.soundhub_group, "Wildlife Sound Hub", "Prepare and Stage Bird Audio Data for SoundHub Upload"),
                 (control.group, "Wildlife Insights", "Upload camera deployments and photos"),
             ]:
