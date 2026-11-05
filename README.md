@@ -553,7 +553,7 @@ UC SoundHub staging is available on **Review & upload**, including when using
 hosted Box sign-in. This screen provides local staging only; SoundHub upload and
 landing-zone checks are available through the maintenance CLI below.
 
-**Prepare & Upload → Add Bird Audio to SoundHub Staging…** transcodes the open
+**Prepare & Upload → Prepare and stage bird audio for Wildlife Sound Hub** transcodes the open
    deployment event's BD WAVs to FLAC (level 5, `--verify`,
    `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
    local staging batch. Existing staged events remain, the two project CSVs are

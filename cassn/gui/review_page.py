@@ -21,6 +21,9 @@ class ReviewPage(QScrollArea):
             QWidget#reviewContent QGroupBox {
                 margin-top: 0; padding: 2em 6px 6px;
             }
+            QWidget#reviewContent QGroupBox[role="platformPanel"] {
+                padding: 6px;
+            }
             QWidget#reviewContent QGroupBox::title {
                 subcontrol-origin: border; subcontrol-position: top left;
                 left: 12px; top: 6px; padding: 0;

@@ -1,10 +1,11 @@
 """Shared presentation helpers, safe to import before choosing a project."""
+from functools import lru_cache
 from pathlib import Path
 import re
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtGui import QIcon, QPalette, QPixmap
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -62,6 +63,11 @@ QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus, QDateEdi
 QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px; margin-top: 18px; padding: 18px 12px 12px; font-weight: 600; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
 QGroupBox[role="cardJob"] {{ padding: 0px 8px 8px; }}
+QGroupBox[role="platformPanel"] {{ margin-top: 0; padding: 8px; }}
+QLabel[role="platformLogo"] {{ background: white; border-radius: 3px; padding: 2px 4px; }}
+QToolButton#prepareUpload {{ background: {accent}; color: {on_accent}; border-color: {accent}; padding: 10px 16px; font-weight: 600; }}
+QToolButton#prepareUpload::menu-indicator {{ image: none; width: 0; height: 0; }}
+QToolButton#prepareUpload:pressed {{ background: {"#a4dccc" if dark else "#174c3c"}; color: {on_accent}; }}
 QGroupBox[role="cardJob"] QPushButton, QGroupBox[role="cardJob"] QToolButton {{ padding: 5px 9px; }}
 QLineEdit, QComboBox, QDateEdit, QSpinBox {{ background: {panel}; color: {text}; border: 1px solid {line}; border-radius: 5px; padding: 7px; selection-background-color: {accent}; selection-color: {on_accent}; }}
 QLineEdit:read-only, QDateEdit:read-only {{ background: {background}; }}
@@ -106,3 +112,126 @@ def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
     label.setWordWrap(wrap)
     label.setTextFormat(Qt.PlainText)
     return label
+
+
+_PLATFORMS = {
+    "box": ("Box", "box.webp"),
+    "soundhub": ("Wildlife Sound Hub", "wildlife-soundhub.png"),
+    "wildlife_insights": ("Wildlife Insights", "wildlife-insights.png"),
+}
+
+
+@lru_cache(maxsize=64)
+def platform_pixmap(platform, *, width, height, ratio=1):
+    """Keep the original aspect ratio and limit sampling to the source pixels."""
+    source = QPixmap(str(ARTWORK / _PLATFORMS[platform][1]))
+    if source.isNull():
+        return source
+    bounds = QSize(min(source.width(), max(1, round(width * ratio))),
+                   min(source.height(), max(1, round(height * ratio))))
+    image = source.scaled(bounds, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    image.setDevicePixelRatio(ratio)
+    return image
+
+
+class _PlatformLogo(QLabel):
+    def __init__(self, platform, height):
+        super().__init__()
+        self.platform = platform
+        self.height_at_normal_zoom = height
+        self.setProperty("role", "platformLogo")
+        self.setAccessibleName(f"{_PLATFORMS[platform][0]} logo")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._refresh()
+
+    def _refresh(self):
+        height = self.height_at_normal_zoom * self.fontMetrics().height() / 16
+        width = min(height * 5, self.maximumWidth() - 8)
+        height = min(height, self.maximumHeight() - 4)
+        self.setPixmap(platform_pixmap(self.platform, width=width, height=height,
+                                       ratio=self.devicePixelRatioF()))
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in (QEvent.FontChange, QEvent.DevicePixelRatioChange, QEvent.Show):
+            self._refresh()
+        return result
+
+
+def platform_logo(platform, *, height=20):
+    return _PlatformLogo(platform, height)
+
+
+class PlatformPanel(QGroupBox):
+    """Keep a platform mark beside its changing job title at every window width."""
+
+    def __init__(self, platform, title):
+        super().__init__()
+        self.setProperty("role", "platformPanel")
+        self.body = QVBoxLayout(self)
+        header = QHBoxLayout()
+        header.addWidget(platform_logo(platform), alignment=Qt.AlignVCenter)
+        self._heading = workspace_label("", "sectionTitle", wrap=True)
+        header.addWidget(self._heading, 1)
+        self.body.addLayout(header)
+        self.setTitle(title)
+
+    def setTitle(self, title):
+        self._heading.setText(title)
+        self.setAccessibleName(title)
+
+    def title(self):
+        return self._heading.text()
+
+
+class PlatformMenu(QMenu):
+    """Native actions handle selection, keyboard navigation, tooltips and disabled states."""
+
+    def __init__(self, entries, parent):
+        super().__init__(parent)
+        self._logos = {}
+        for action, platform in entries:
+            action.setIcon(QIcon(str(ARTWORK / _PLATFORMS[platform][1])))
+            # Keep the wordmark wide and expose its name as a real accessible label.
+            action.setIconVisibleInMenu(False)
+            self.addAction(action)
+            logo = platform_logo(platform, height=24)
+            logo.setParent(self)
+            logo.setAlignment(Qt.AlignCenter)
+            logo.setAttribute(Qt.WA_TransparentForMouseEvents)
+            opacity = QGraphicsOpacityEffect(logo)
+            logo.setGraphicsEffect(opacity)
+            self._logos[action] = logo
+            action.changed.connect(self._place_logos)
+        self.setToolTipsVisible(True)
+        self.aboutToShow.connect(self._fit_rows)
+        self._fit_rows()
+
+    def _fit_rows(self):
+        unit = self.fontMetrics().height()
+        column = 5 * unit
+        self.setStyleSheet(f"""
+            QMenu::item {{ padding: {unit}px {unit}px {unit}px {column + unit}px; }}
+        """)
+        for logo in self._logos.values():
+            logo.setFixedSize(column, 2 * unit)
+            logo._refresh()
+        self._place_logos()
+
+    def _place_logos(self):
+        for action, logo in self._logos.items():
+            rect = self.actionGeometry(action)
+            logo.setVisible(action.isVisible() and rect.isValid())
+            if action.isVisible() and rect.isValid():
+                logo.move(rect.left() + self.fontMetrics().height() // 2,
+                          rect.center().y() - logo.height() // 2)
+                logo.setEnabled(action.isEnabled())
+                logo.graphicsEffect().setOpacity(1 if action.isEnabled() else 0.5)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_logos()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._place_logos()

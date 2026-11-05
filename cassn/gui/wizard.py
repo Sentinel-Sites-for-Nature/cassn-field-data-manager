@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -75,8 +75,9 @@ from cassn.gui.soundhub_stage_dialog import SoundHubStageDialog
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.card_eject import CardDiskThread, card_attachment, identify_card, eject_card
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
+from cassn.gui.appearance import PlatformMenu, PlatformPanel, platform_logo
 from cassn.gui.workspace import (
-    ARTWORK, CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
+    CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
     UploadMessage, UploadProgressBar, workspace_label,
 )
 from cassn.soundhub.export import (
@@ -1025,12 +1026,7 @@ class FieldDataWizard(QMainWindow):
 
         # Box connection status indicator
         box_status_layout = QHBoxLayout()
-        box_logo = QLabel()
-        box_logo.setPixmap(QPixmap(str(ARTWORK / "box.webp")).scaled(
-            55, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        ))
-        box_logo.setAccessibleName("Box logo")
-        box_logo.setContentsMargins(0, 0, 0, 6)
+        box_logo = platform_logo("box", height=28)
         box_status_layout.addWidget(box_logo)
         box_status_layout.addSpacing(6)
         box_status_label = self.box_connection_label = QLabel()
@@ -1285,8 +1281,8 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(scroll.progress_heading)
 
         # Box upload progress (hidden by default)
-        self.upload_group = QGroupBox("Box Upload Progress")
-        upload_layout = QVBoxLayout()
+        self.upload_group = PlatformPanel("box", "Box Upload Progress")
+        upload_layout = self.upload_group.body
 
         self.upload_progress_bar = UploadProgressBar()
         self.upload_progress_bar.setObjectName("boxUploadProgress")
@@ -1317,13 +1313,12 @@ class FieldDataWizard(QMainWindow):
         self.dismiss_box_btn.hide()
         upload_layout.addWidget(self.dismiss_box_btn, alignment=Qt.AlignRight)
 
-        self.upload_group.setLayout(upload_layout)
         self.upload_group.hide()
         layout.addWidget(self.upload_group)
 
         # Box verification progress (hidden by default)
-        self.hash_group = QGroupBox("Box Verification Progress")
-        hash_layout = QVBoxLayout()
+        self.hash_group = PlatformPanel("box", "Box Verification Progress")
+        hash_layout = self.hash_group.body
 
         self.hash_progress_bar = QProgressBar()
         self.hash_progress_bar.setMinimum(0)
@@ -1333,13 +1328,12 @@ class FieldDataWizard(QMainWindow):
         self.hash_status_label = UploadMessage()
         hash_layout.addWidget(self.hash_status_label)
 
-        self.hash_group.setLayout(hash_layout)
         self.hash_group.hide()
         layout.addWidget(self.hash_group)
 
         # SoundHub progress (hidden by default)
-        self.soundhub_group = QGroupBox("SoundHub staging progress")
-        soundhub_layout = QVBoxLayout()
+        self.soundhub_group = PlatformPanel("soundhub", "SoundHub staging progress")
+        soundhub_layout = self.soundhub_group.body
 
         self.soundhub_progress_bar = QProgressBar()
         self.soundhub_progress_bar.setMinimum(0)
@@ -1362,7 +1356,6 @@ class FieldDataWizard(QMainWindow):
         self.dismiss_soundhub_btn.hide()
         soundhub_layout.addWidget(self.dismiss_soundhub_btn, alignment=Qt.AlignRight)
 
-        self.soundhub_group.setLayout(soundhub_layout)
         self.soundhub_group.hide()
         layout.addWidget(self.soundhub_group)
 
@@ -1375,13 +1368,13 @@ class FieldDataWizard(QMainWindow):
         # growing sideways.
         # ------------------------------------------------------------------
         self.upload_now_btn = self._menu_action(
-            "Upload to Box Now",
+            "Upload to Box now",
             self.upload_to_box_manual,
             "Upload this deployment's raw data and metadata to Box.",
             enabled=self.box_authenticated,
         )
         self.soundhub_stage_btn = self._menu_action(
-            "Add Bird Audio to SoundHub Staging…",
+            "Prepare and stage bird audio for Wildlife Sound Hub",
             self.stage_for_soundhub,
             "Add or refresh this deployment event in the cumulative SoundHub "
             "staging batch. Source WAVs are not modified and nothing is uploaded.",
@@ -1423,18 +1416,18 @@ class FieldDataWizard(QMainWindow):
             # The existing SoundHub staging configuration belongs to UC.
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
-        wi_actions = []
+        platforms = [(self.upload_now_btn, "box"), (self.soundhub_stage_btn, "soundhub")]
         if self.wi_upload_helper:
             from cassn.gui.wi_upload import WildlifeInsightsControl
             self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
-            wi_actions.append(self.wi_control.action)
+            platforms.append((self.wi_control.action, "wildlife_insights"))
         self.review_actions_layout = button_layout = QHBoxLayout()
-        prepare = self._menu_button("Prepare && Upload ▾", [
-            self.upload_now_btn,
-            None,
-            self.soundhub_stage_btn,
-            *wi_actions,
-        ])
+        prepare = QToolButton()
+        prepare.setObjectName("prepareUpload")
+        prepare.setText("Prepare && Upload ▾")
+        prepare.setAccessibleName("Prepare and Upload")
+        prepare.setPopupMode(QToolButton.InstantPopup)
+        prepare.setMenu(PlatformMenu(platforms, prepare))
         prepare.menu().aboutToShow.connect(self._refresh_soundhub_resume)
         button_layout.addWidget(prepare)
         button_layout.addWidget(self._menu_button("QC Checks ▾", [
@@ -3392,9 +3385,9 @@ class FieldDataWizard(QMainWindow):
             f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
             "<h3>Before you finish</h3>"
             "<p>Review the staged event tree and resolve any QC findings. "
-            "Use <b>Prepare &amp; Upload → Upload to Box Now</b> to upload, then wait for file-list and hash verification.</p>"
+            "Use <b>Prepare &amp; Upload → Upload to Box now</b> to upload, then wait for file-list and hash verification.</p>"
             "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
-            "<p>For bird audio, <b>Prepare &amp; Upload → Add Bird Audio to SoundHub Staging</b> adds this event to the "
+            "<p>For bird audio, <b>Prepare &amp; Upload → Prepare and stage bird audio for Wildlife Sound Hub</b> adds this event to the "
             "local staging batch. No SoundHub upload is performed from this screen.</p>"
         )
         self._populate_staged_event_tree()
@@ -4573,7 +4566,7 @@ class FieldDataWizard(QMainWindow):
         if not hasattr(self, "soundhub_stage_btn") or self._soundhub_busy():
             return
         self.soundhub_stage_btn.setEnabled(True)
-        self.soundhub_stage_btn.setText("Add Bird Audio to SoundHub Staging…")
+        self.soundhub_stage_btn.setText("Prepare and stage bird audio for Wildlife Sound Hub")
         self.dismiss_soundhub_btn.hide()
         folder = self.current_deployment_folder
         if not folder or self.box_config.profile == "csu":
