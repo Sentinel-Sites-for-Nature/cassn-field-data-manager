@@ -423,6 +423,14 @@ ORG_SITE_YYYYMMDD/
 
 At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires event-scoped camera fields in `deployments.csv` and defaults in `wi_config.json`.
 
+On Box, open the event's **wildlife_insights** folder for manual upload inputs.
+FDM publishes `ML_deployments.csv` and `SA_deployments.csv` for the camera
+types present, before sending media. Later plots add rows to the same files.
+The input CSVs describe deployments; their presence does not confirm a transfer.
+The WI uploader adds `upload_record.md` and `upload_record.json` after it
+verifies the event's pinned deployments. The per-batch copies under
+`qc/box_batches/` describe the inputs staged for each individual Box upload.
+
 In Wildlife Insights deployment CSVs, latitude and longitude are written with exactly eight digits after the decimal point. Shorter values are padded with trailing zeroes and longer values are rounded to eight places, satisfying Wildlife Insights' requirement of four to eight decimal places without modifying the source lookup values.
 
 After each ML or SA card finishes copying and hash verification, the app silently

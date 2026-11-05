@@ -8,13 +8,17 @@ from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
 from cassn.box.client import BoxStorage
-from cassn.box.metadata_merge import CSV_NAMES, read_csv
+from cassn.box.metadata_merge import CSV_NAMES, WI_INPUT_NAMES, read_csv
 from cassn.box.metadata_store import BoxFileStore
 from cassn.core.hashing import sha1 as compute_file_sha1
 from cassn.core.inventory import index_inventory_by_storage_relpath
 
+
 # Files that legitimately live on Box but are not in the local file inventory.
 _EXPECTED_METADATA = {
+    *WI_INPUT_NAMES.values(),
+    "wildlife_insights/upload_record.md",
+    "wildlife_insights/upload_record.json",
     "image_file_metadata.csv",
     "audio_file_metadata.csv",
     "deployment_event_record.json",

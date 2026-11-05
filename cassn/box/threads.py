@@ -209,6 +209,7 @@ class BoxUploadThread(QThread):
             publication = EventPublication(storage, deploy_id, self.deployment_folder)
             publication.prepare()  # Reject unsafe merges before sending media.
             publication.validate_batch_inventory(self.file_inventory)
+            publication.publish_wi_inputs()
 
             def remote_path(path):
                 relative = path.relative_to(self.deployment_folder)

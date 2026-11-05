@@ -182,6 +182,9 @@ def test_verify_box_hashes_detects_nested_box_orphan(tmp_path):
 def test_box_orphan_allowlist_uses_basename_at_any_depth():
     assert not is_orphan_on_box("raw_data/p1_ML/p1_ML_manifest.json")
     assert not is_orphan_on_box("qc/wildlife_insights_images.csv")
+    for name in ("ML_deployments.csv", "SA_deployments.csv", "upload_record.md", "upload_record.json"):
+        assert not is_orphan_on_box(f"wildlife_insights/{name}")
+    assert is_orphan_on_box("wildlife_insights/unknown.csv")
     assert is_orphan_on_box("raw_data/p1_ML/p1_ML_1/unexpected.jpg")
 
 

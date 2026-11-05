@@ -98,11 +98,17 @@ class BoxStorage:
 
             from box_sdk_gen import CreateFolderParent
 
-            new_folder = self.client.folders.create_folder(
-                folder_name, CreateFolderParent(id=parent_id)
-            )
-            self._resolved_folders[cache_key] = new_folder.id
-            return new_folder.id
+            try:
+                folder_id = self.client.folders.create_folder(
+                    folder_name, CreateFolderParent(id=parent_id)
+                ).id
+            except Exception:
+                # A WI publisher can create the same folder between list and create.
+                folder_id = self.find_child_folder(parent_id, folder_name)
+                if folder_id is None:
+                    raise
+            self._resolved_folders[cache_key] = folder_id
+            return folder_id
         except Exception as e:
             raise Exception(f"Error creating folder '{folder_name}': {e}")
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from cassn.box.metadata_merge import (
-    CSV_NAMES, SHARED_NAMES, MetadataConflict, merge_csv, merge_event, merge_qc,
+    CSV_NAMES, SHARED_NAMES, WI_INPUT_NAMES, merge_wi_input, MetadataConflict, merge_csv, merge_event, merge_qc,
     read_csv, read_object, carry_wi_only_update,
 )
 from cassn.box.metadata_store import BoxFileStore
@@ -124,6 +124,17 @@ class EventPublication:
                 return None
         return parent
 
+    def _snapshot(self, name):
+        parent = self._parent(name)
+        file_id = self._find(parent, Path(name).name) if parent is not None else None
+        ref = self.store.snapshot(file_id) if file_id else None
+        self.refs[name] = ref
+        self.remote[name] = self.store.read(ref) if ref else None
+        safe_name = name.replace("/", "__")
+        if ref:
+            (self.attempt_dir / (safe_name + ".source")).write_bytes(self.remote[name])
+        self.state["files"][name] = {"source": asdict(ref) if ref else None, "status": "read"}
+
     def prepare(self):
         local = {}
         allowed = {Path(p).name for p in self.csv_paths} if self.csv_paths is not None else None
@@ -133,17 +144,9 @@ class EventPublication:
             path = self.local_folder / name
             if path.exists() and (allowed is None or name in allowed):
                 local[name] = path.read_bytes()
-            parent = self._parent(name)
-            file_id = self._find(parent, Path(name).name) if parent is not None else None
-            ref = self.store.snapshot(file_id) if file_id else None
-            self.refs[name] = ref
-            self.remote[name] = self.store.read(ref) if ref else None
-            safe_name = name.replace("/", "__")
-            if ref:
-                (self.attempt_dir / (safe_name + ".source")).write_bytes(self.remote[name])
+            self._snapshot(name)
             if name in local:
-                (self.attempt_dir / (safe_name + ".local")).write_bytes(local[name])
-            self.state["files"][name] = {"source": asdict(ref) if ref else None, "status": "read"}
+                (self.attempt_dir / (name.replace("/", "__") + ".local")).write_bytes(local[name])
             self._save()
 
         baseline = dict(self.remote)
@@ -184,7 +187,14 @@ class EventPublication:
         for name in CSV_NAMES:
             data = self.candidates.get(name, self.remote.get(name))
             if data is not None:
-                for row in read_csv(data)[1]:
+                rows = read_csv(data)[1]
+                if name == "image_file_metadata.csv" and name in local and not self.provenance:
+                    from cassn.export.wildlife_insights import wi_rows_from_image_metadata
+                    for kind, deployments in wi_rows_from_image_metadata(rows).items():
+                        target = WI_INPUT_NAMES[kind]
+                        self._snapshot(target)
+                        self.candidates[target] = merge_wi_input(self.remote[target], deployments)
+                for row in rows:
                     key = (row["deployment_id"], row["filename"])
                     if row["filename"] in names:
                         raise MetadataConflict(f"Ambiguous cross-metadata filename: {row['filename']}")
@@ -306,10 +316,24 @@ class EventPublication:
             self.state["files"][name]["saved"] = asdict(current)
         self._save()
 
+    def publish_wi_inputs(self):
+        """Expose manual inputs before media transfer; WI owns the later upload records."""
+        names = [name for name in WI_INPUT_NAMES.values() if name in self.candidates]
+        if names:
+            self._publish_files(names)
+
     def publish(self):
         self.state["status"] = "publishing"
         self._save()
-        for name in self.candidates:
+        self._publish_files(self.candidates)
+        self.state["status"] = ("awaiting_provenance" if not self.provenance and
+                                any(name in self.candidates for name in CSV_NAMES) else "published")
+        self._save()
+
+    def _publish_files(self, names):
+        for name in names:
+            if self.state["files"][name]["status"] == "verified":
+                continue
             self._recheck()
             parent = self._parent(name, create=True)
             self.state["files"][name]["status"] = "write_pending"
@@ -363,6 +387,3 @@ class EventPublication:
             self.state["files"][name].update(status="verified", saved=asdict(current))
             self._save()
         self._recheck()
-        self.state["status"] = ("awaiting_provenance" if not self.provenance and
-                                any(name in self.candidates for name in CSV_NAMES) else "published")
-        self._save()

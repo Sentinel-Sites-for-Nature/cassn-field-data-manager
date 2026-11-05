@@ -773,3 +773,54 @@ def test_stamp_during_conditional_write_or_readback(tmp_path, provenance, hook):
     assert all(images[0][field] == value for field, value in WI_STAMP.items())
     if provenance:
         assert next(r for r in images if r["filename"] == "new.jpg")["box_uploader"] == "John"
+
+
+def test_wi_folder_created_by_publisher_during_fdm_creation(monkeypatch):
+    api = FakeBox()
+    def competing_create(name, parent):
+        folder = FakeBox.create_folder(api, name, parent)
+        api.add("upload_record.md", b"verified by WI", folder.id)
+        raise RuntimeError("409 folder already exists")
+
+    monkeypatch.setattr(api, "create_folder", competing_create)
+    folder = BoxStorage(api).find_or_create_folder("event", "wildlife_insights")
+    assert folder == api.by_name("wildlife_insights")
+    assert api.objects[api.by_name("upload_record.md", folder)]["payload"] == b"verified by WI"
+
+
+def test_wi_manual_inputs_ready_before_media_and_accumulate_across_plots(tmp_path):
+    import csv
+
+    api = FakeBox()
+    def camera(plot, kind):
+        deployment = f"p{plot}_{kind}"
+        return row(deployment + ".jpg", deployment=deployment, file_type="image",
+                   device_type=kind, camera_id=f"camera-{plot}", project_id=kind)
+
+    def start(batch):
+        (tmp_path / "image_file_metadata.csv").write_bytes(payload(batch))
+        publication = EventPublication(BoxStorage(api), "event", tmp_path)
+        publication.prepare()
+        publication.validate_batch_inventory([{"new_filename": r["filename"], **r} for r in batch])
+        publication.publish_wi_inputs()
+        return publication
+
+    initial = start([camera(1, "ML"), camera(1, "SA")])
+    folder = api.by_name("wildlife_insights")
+    ml = api.by_name("ML_deployments.csv", folder)
+    sa = api.by_name("SA_deployments.csv", folder)
+    assert all(o["name"] != "image_file_metadata.csv" for o in api.objects.values())
+    record = api.add("upload_record.json", b"WI receipt", folder)
+    initial.publish()
+    second = start([camera(3, "ML")])
+    expected = list(csv.DictReader(io.StringIO(api.objects[ml]["payload"].decode())))
+    assert [r["deployment_id"] for r in expected] == ["p1_ML", "p3_ML"]
+    assert api.objects[sa]["version"] == 1
+    second.publish()
+    start([camera(3, "ML")]).publish()
+    assert api.objects[ml]["version"] == 2
+    assert api.objects[record]["payload"] == b"WI receipt" and api.objects[record]["version"] == 1
+    api.change(ml, api.objects[ml]["payload"].replace(b"camera-1", b"manual-edit"))
+    with pytest.raises(MetadataConflict, match="Box WI input differs"):
+        start([camera(4, "ML")])
+    assert b"manual-edit" in api.objects[ml]["payload"]

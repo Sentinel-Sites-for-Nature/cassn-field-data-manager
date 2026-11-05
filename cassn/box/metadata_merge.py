@@ -15,6 +15,7 @@ from uuid import uuid4
 
 
 CSV_NAMES = ("image_file_metadata.csv", "audio_file_metadata.csv")
+WI_INPUT_NAMES = {kind: f"wildlife_insights/{kind}_deployments.csv" for kind in ("ML", "SA")}
 SHARED_NAMES = (*CSV_NAMES, "deployment_event_record.json", "qc/qc_report.json")
 BOX_HISTORY = ("is_uploaded_to_box", "box_uploader", "box_upload_datetime")
 WI_HISTORY = ("is_submitted_to_wi", "wi_submitter", "wi_submission_datetime")
@@ -54,6 +55,33 @@ def csv_bytes(fields, rows) -> bytes:
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue().encode("utf-8")
+
+
+def merge_wi_input(previous, incoming):
+    """Keep earlier plots and stop before overwriting a conflicting manual edit."""
+    from cassn.export.wildlife_insights import WI_COLUMNS, rows_to_csv_bytes
+
+    if previous is None:
+        return rows_to_csv_bytes(incoming)
+    reader = csv.DictReader(io.StringIO(previous.decode("utf-8-sig"), newline=""), strict=True)
+    if reader.fieldnames != list(WI_COLUMNS):
+        raise MetadataConflict("Unexpected Box WI deployment CSV header")
+    by_id = {}
+    for row in reader:
+        key = row.get("deployment_id")
+        if not key or key in by_id or None in row or None in row.values():
+            raise MetadataConflict("Invalid or duplicate Box WI deployment row")
+        by_id[key] = row
+    added = False
+    for row in incoming:
+        key = row["deployment_id"]
+        if key in by_id:
+            if by_id[key] != row:
+                raise MetadataConflict(f"Box WI input differs for {key}; review before replacing it")
+        else:
+            by_id[key] = row
+            added = True
+    return rows_to_csv_bytes(list(by_id.values())) if added else previous
 
 
 def carry_wi_only_update(before: bytes, newer: bytes, candidate: bytes) -> bytes:

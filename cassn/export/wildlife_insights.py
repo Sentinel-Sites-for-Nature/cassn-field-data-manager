@@ -220,49 +220,54 @@ def reshape_image_metadata_to_wi(image_csv_path: Path) -> dict[str, list[dict]]:
     wins). Returns ``{dev_type: [row_dict, ...]}``. The WI columns are pulled
     straight from the image metadata, which already carries them.
     """
+    with open(image_csv_path, newline='', encoding='utf-8-sig') as stream:
+        return wi_rows_from_image_metadata(csv.DictReader(stream))
+
+
+def wi_rows_from_image_metadata(rows):
+    """Build manual-upload rows from either staged or accumulated Box metadata."""
     seen: set[str] = set()
     rows_by_type: dict[str, list[dict]] = {}
-    with open(image_csv_path, newline='', encoding='utf-8') as f:
-        for row in csv.DictReader(f):
-            if row.get('file_type') != 'image':
-                continue
-            dev_type = row.get('device_type', '')
-            if dev_type not in CAMERA_DEVICE_TYPES:
-                continue
-            dep_id = row.get('deployment_id', '')
-            if dep_id in seen:
-                continue
-            seen.add(dep_id)
-            wi_row = {
-                "project_id":              row.get('project_id', ''),
-                "deployment_id":           dep_id,
-                "subproject_name":         row.get('subproject', ''),
-                "subproject_design":       row.get('subproject_design', ''),
-                "placename":               row.get('placename', ''),
-                "longitude":               format_wi_coordinate(row.get('longitude', '')),
-                "latitude":                format_wi_coordinate(row.get('latitude', '')),
-                "start_date":              row.get('start_date', ''),
-                "end_date":                row.get('end_date', ''),
-                "event_name":              row.get('event_name', ''),
-                "event_description":       row.get('event_description', ''),
-                "event_type":              row.get('event_type', ''),
-                "bait_type":               row.get('bait_type', ''),
-                "bait_description":        row.get('bait_description', ''),
-                "feature_type":            validate_wi_feature_type(row.get('feature_type', '')),
-                "feature_type_methodology": row.get('feature_type_methodology', ''),
-                "camera_id":               row.get('camera_id', ''),
-                "quiet_period":            row.get('quiet_period', ''),
-                "camera_functioning":      row.get('camera_functioning', ''),
-                "sensor_height":           row.get('sensor_height', ''),
-                "height_other":            row.get('height_other', ''),
-                "sensor_orientation":      row.get('sensor_orientation', ''),
-                "orientation_other":       row.get('orientation_other', ''),
-                "recorded_by":             row.get('recorded_by', ''),
-                "plot_treatment":          row.get('plot_treatment', ''),
-                "plot_treatment_description": row.get('plot_treatment_description', ''),
-                "detection_distance":      row.get('detection_distance', ''),
-            }
-            rows_by_type.setdefault(dev_type, []).append(wi_row)
+    for row in rows:
+        if row.get('file_type') != 'image':
+            continue
+        dev_type = row.get('device_type', '')
+        if dev_type not in CAMERA_DEVICE_TYPES:
+            continue
+        dep_id = row.get('deployment_id', '')
+        if dep_id in seen:
+            continue
+        seen.add(dep_id)
+        wi_row = {
+            "project_id":              row.get('project_id', ''),
+            "deployment_id":           dep_id,
+            "subproject_name":         row.get('subproject', ''),
+            "subproject_design":       row.get('subproject_design', ''),
+            "placename":               row.get('placename', ''),
+            "longitude":               format_wi_coordinate(row.get('longitude', '')),
+            "latitude":                format_wi_coordinate(row.get('latitude', '')),
+            "start_date":              row.get('start_date', ''),
+            "end_date":                row.get('end_date', ''),
+            "event_name":              row.get('event_name', ''),
+            "event_description":       row.get('event_description', ''),
+            "event_type":              row.get('event_type', ''),
+            "bait_type":               row.get('bait_type', ''),
+            "bait_description":        row.get('bait_description', ''),
+            "feature_type":            validate_wi_feature_type(row.get('feature_type', '')),
+            "feature_type_methodology": row.get('feature_type_methodology', ''),
+            "camera_id":               row.get('camera_id', ''),
+            "quiet_period":            row.get('quiet_period', ''),
+            "camera_functioning":      row.get('camera_functioning', ''),
+            "sensor_height":           row.get('sensor_height', ''),
+            "height_other":            row.get('height_other', ''),
+            "sensor_orientation":      row.get('sensor_orientation', ''),
+            "orientation_other":       row.get('orientation_other', ''),
+            "recorded_by":             row.get('recorded_by', ''),
+            "plot_treatment":          row.get('plot_treatment', ''),
+            "plot_treatment_description": row.get('plot_treatment_description', ''),
+            "detection_distance":      row.get('detection_distance', ''),
+        }
+        rows_by_type.setdefault(dev_type, []).append(wi_row)
     return rows_by_type
 
 
