@@ -26,11 +26,12 @@ An ordinary lost-reply replay keeps its existing request_id.
 
 import csv
 import json
+import re
 from collections import Counter
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QGroupBox, QLabel, QPushButton,
+    QDialog, QDialogButtonBox, QGroupBox, QLabel,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
@@ -72,7 +73,8 @@ class WildlifeInsightsControl(QObject):
         self.jobs = {}
         self.unavailable = set()
         self.process = None
-        self.retry_key = None
+        self.delivery_keys = set()
+        self.menu_waiting = False
         self.closed = False
         self.next_job = 0
         self.read_error = False
@@ -89,14 +91,6 @@ class WildlifeInsightsControl(QObject):
         self.notice.setTextFormat(Qt.PlainText)
         self.notice.setWordWrap(True)
         box.addWidget(self.notice)
-        self.retry_button = QPushButton("Retry the saved request")
-        self.retry_button.hide()
-        self.retry_button.clicked.connect(self.retry)
-        box.addWidget(self.retry_button)
-        self.held_button = QPushButton("Review and retry held cameras…")
-        self.held_button.clicked.connect(lambda: self.preview(held_only=True))
-        box.addWidget(self.held_button)
-        self.held_button.hide()
         layout.addWidget(self.group)
         self.group.hide()
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
@@ -115,8 +109,8 @@ class WildlifeInsightsControl(QObject):
             self.jobs = {}
             self.read_error = False
             self.notice.clear()
-            self.retry_key = None
-            self.retry_button.hide()
+            self.delivery_keys.clear()
+            self.menu_waiting = False
             try:
                 self.jobs = read_requests(folder) if folder else {}
                 self.unavailable = set(self.jobs)
@@ -124,9 +118,8 @@ class WildlifeInsightsControl(QObject):
                 self.read_error = True
                 self.notice.setText(str(exc))
             self.render()
-        self.action.setEnabled(bool(folder and not self.read_error and not self.process
+        self.action.setEnabled(bool(folder and not self.read_error and (not self.process or self.process.property("operation") == "status")
                                     and not self.window.card_ingest_threads))
-        self.held_button.setEnabled(self.action.isEnabled())
 
     def render(self):
         self.tree.clear()
@@ -155,8 +148,12 @@ class WildlifeInsightsControl(QObject):
                 if stage == "held":
                     reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
                     label = "Last known hold" if key in self.unavailable else "Needs review"
-                    item.setText(1, f"{label} · {reason}")
-                    item.setToolTip(1, item.text(1))
+                    missing = re.fullmatch(r"Added deployment held: expected one exact camera ([A-Za-z0-9_-]+); found 0", reason)
+                    if missing:
+                        item.setText(1, f"{label} · Camera {missing[1]} was missing in WI at the last attempt.")
+                    else:
+                        item.setText(1, f"{label} · {reason}")
+                    item.setToolTip(1, reason)
                 elif stage == "verifying":
                     self.tree.setItemWidget(item, 1, QLabel(labels[stage]))
                 else:
@@ -169,7 +166,6 @@ class WildlifeInsightsControl(QObject):
         self.tree.resizeColumnToContents(0)
         self.tree.setColumnWidth(0, min(self.tree.columnWidth(0), 420))
         self.group.setVisible(bool(self.jobs or self.notice.text()))
-        self.held_button.setVisible(bool(self.retryable()))
         if any(not complete(j, sources) for j in self.jobs.values()):
             self.timer.start()
         else:
@@ -185,6 +181,7 @@ class WildlifeInsightsControl(QObject):
         folder = self.folder
         body = dict(payload, version=1, event=folder.name, folder=str(folder))
         process = QProcess(self)
+        process.setProperty("operation", operation)
         self.process = process
         self.refresh()
         process.setProgram(self.helper)
@@ -209,6 +206,7 @@ class WildlifeInsightsControl(QObject):
             deadline.stop()
             collect()
             self.process = None
+            succeeded = False
             try:
                 if self.closed or self.window.current_deployment_folder != folder:
                     return
@@ -222,18 +220,21 @@ class WildlifeInsightsControl(QObject):
                 if operation in {"status", "submit"} and result.get("fresh") is not True:
                     raise ValueError("The helper has no current service status.")
                 receive(result)
+                succeeded = True
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 key = body.get("request_id")
                 if key in self.jobs:
                     self.unavailable.add(key)
-                    if self.retry_key == key:
-                        self.retry_key = None
-                        self.retry_button.hide()
+                    self.delivery_keys.discard(key)
                     self.render()
                 self.message(f"Wildlife Insights status unknown. {exc}")
             finally:
                 process.deleteLater()
                 self.refresh()
+                if self.menu_waiting and operation == "status":
+                    self.menu_waiting = False
+                    if succeeded and not self.closed and self.folder == folder:
+                        self.preview()
 
         def started():
             process.write(json.dumps(body).encode())
@@ -267,7 +268,7 @@ class WildlifeInsightsControl(QObject):
                         eligible[name] = row["retry_of"]
         return eligible
 
-    def selection(self, *, held_only=False):
+    def selection(self):
         require_no_ingest_holds(self.folder)
         if self.window.metadata.get("deployment_event_id") != self.folder.name:
             raise ValueError("The selected event does not match the local staging folder.")
@@ -295,16 +296,30 @@ class WildlifeInsightsControl(QObject):
                 row = rows.get(name, {})
                 if not superseded(scope, row, sources) and not (name in eligible and row.get("retry_of") == eligible[name]):
                     counts.pop(name, None)
-        if held_only:
-            counts = {name: count for name, count in counts.items() if name in eligible}
         return dict(sorted(counts.items()))
 
-    def preview(self, *, held_only=False):
+    def preview(self):
         self.refresh()
         if not self.action.isEnabled():
             return
+        if self.process:
+            self.menu_waiting = True
+            return
+        # On reopen, refresh missing status before deciding which cameras to offer.
+        sources = replacement_sources(self.jobs)
+        stale = {key for key in self.unavailable - self.delivery_keys if not complete(self.jobs[key], sources)}
+        if stale:
+            self.menu_waiting = True
+            self.check_status(sorted(stale)[0])
+            return
         try:
-            counts = self.selection(held_only=held_only)
+            require_no_ingest_holds(self.folder)
+            if self.delivery_keys:
+                key = sorted(self.delivery_keys)[0]
+                scopes = [dict(s, ready=True) for s in self.jobs[key]["scopes"]]
+                self.confirm({"scopes": scopes}, {s["deployment"]: s["images"] for s in scopes}, delivery_key=key)
+                return
+            counts = self.selection()
         except (OSError, ValueError) as exc:
             self.message(str(exc))
             return
@@ -312,15 +327,15 @@ class WildlifeInsightsControl(QObject):
             self.message("No new completed camera deployments to submit.")
             return
         specs = [dict(deployment=k, images=v) for k, v in counts.items()]
-        self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts, held_only=held_only))
+        self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts))
 
-    def confirm(self, result, counts, *, held_only=False):
+    def confirm(self, result, counts, *, delivery_key=None):
         scopes = result["scopes"]
         validate_scopes(scopes)
         if {s["deployment"]: s["images"] for s in scopes} != counts:
             raise ValueError("Preview does not match the selected camera deployments.")
         retries = self.retryable()
-        if any(s.get("ready") and s.get("retry_of") != retries.get(s["deployment"]) for s in scopes):
+        if not delivery_key and any(s.get("ready") and s.get("retry_of") != retries.get(s["deployment"]) for s in scopes):
             raise ValueError("The held request changed. Refresh its status and review the selection again.")
         scope_list = sorted(scopes, key=lambda s: s["deployment"])
         folder = self.folder
@@ -340,7 +355,7 @@ class WildlifeInsightsControl(QObject):
         event_label.setStyleSheet("color: #e0ebde; margin: 0;")
         heading.addWidget(event_label)
         layout.addWidget(banner)
-        layout.addWidget(workspace_label("Select camera deployments", "sectionTitle"))
+        layout.addWidget(workspace_label("Resume the saved upload" if delivery_key else "Select camera deployments", "sectionTitle"))
         tree = QTreeWidget()
         tree.setRootIsDecorated(False)
         tree.setAccessibleName("Camera deployments to upload")
@@ -358,6 +373,8 @@ class WildlifeInsightsControl(QObject):
             detail = name if ready else f"{name}\n{s.get('hold') or 'Needs review'}"
             item = QTreeWidgetItem(tree, [detail, destination, f"{s['images']:,}"])
             item.setCheckState(0, Qt.Checked if ready else Qt.Unchecked)
+            if delivery_key:
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
             if not ready:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             item.setToolTip(0, detail)
@@ -366,6 +383,7 @@ class WildlifeInsightsControl(QObject):
             item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(tree)
         layout.addWidget(workspace_label(
+            "Confirm to resume delivery of this exact selection." if delivery_key else
             "Confirming allows Wildlife Insights to register a missing camera for each selected deployment.",
             "muted", wrap=True))
         summary = workspace_label("", "contextTitle")
@@ -396,7 +414,13 @@ class WildlifeInsightsControl(QObject):
         try:
             if dialog.exec() != QDialog.Accepted or self.window.current_deployment_folder != folder:
                 return
-            if self.selection(held_only=held_only) != counts:
+            require_no_ingest_holds(folder)
+            if delivery_key:
+                if delivery_key not in self.delivery_keys:
+                    raise ValueError("The saved request changed. Open the preview again.")
+                self.submit(delivery_key)
+                return
+            if self.selection() != counts:
                 raise ValueError("Selection changed. Open the preview again.")
             approved = [{k: s[k] for k in ("deployment", "images", "selection_sha256", "retry_of") if k in s}
                         for s in selected()]
@@ -430,19 +454,18 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The saved verification receipt changed.")
         jobs = dict(self.jobs)
         jobs[key] = dict(job, rows=rows)
+        redraw = jobs != self.jobs or key in self.unavailable or bool(self.notice.text())
         if jobs != self.jobs:
             save_requests(self.folder, jobs)
             self.jobs = jobs
         self.unavailable.discard(key)
         self.notice.clear()
         if any(row.get("delivery_pending") for row in rows):
-            self.retry_key = key
-            self.retry_button.setText("Finish delivering the saved request")
-            self.retry_button.show()
-        elif self.retry_key == key:
-            self.retry_key = None
-            self.retry_button.hide()
-        self.render()
+            self.delivery_keys.add(key)
+        else:
+            self.delivery_keys.discard(key)
+        if redraw:
+            self.render()
 
     def poll(self):
         self.refresh()
@@ -453,29 +476,21 @@ class WildlifeInsightsControl(QObject):
         key = pending[self.next_job % len(pending)]
         self.next_job += 1
 
+        self.check_status(key)
+
+    def check_status(self, key):
         def received(result):
             if result.get("missing") is True:
                 if self.jobs[key].get("rows"):
                     raise ValueError("The service lost track of an acknowledged request. Review its records.")
                 self.unavailable.add(key)
                 self.render()
-                self.retry_key = key
-                self.retry_button.setText("Retry the saved request")
-                self.retry_button.show()
-                self.message("The helper has no record of this saved request. Retry to submit the same selection.")
+                self.delivery_keys.add(key)
+                self.message("Use Prepare & Upload to resume the saved selection.")
             else:
                 self.accept_status(key, result)
 
         self.call("status", {"request_id": key, "scopes": self.jobs[key]["scopes"]}, received)
-
-    def retry(self):
-        if not self.process and self.retry_key and self.retry_key in self.jobs:
-            try:
-                require_no_ingest_holds(self.folder)
-            except (OSError, ValueError) as exc:
-                self.message(str(exc))
-                return
-            self.submit(self.retry_key)
 
     def close(self):
         self.closed = True

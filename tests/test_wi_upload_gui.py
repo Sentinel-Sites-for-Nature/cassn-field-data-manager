@@ -43,7 +43,7 @@ else:
         if stage=='held':
             sha=hashlib.sha256((req['request_id']+s['deployment']).encode()).hexdigest()
             row=dict(deployment=s['deployment'],selection_sha256=s['selection_sha256'],request_sha=sha,
-                     retry_of=sha,stage='held',confirmed=0,hold_reason='Expected one exact camera; found 0')
+                     retry_of=sha,stage='held',confirmed=0,hold_reason='Added deployment held: expected one exact camera 08021607; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
         if stage=='delivery':
@@ -118,7 +118,7 @@ def prepare(window):
     window.save_session()
 
 
-def start(control, decision, *, retry_held=False):
+def start(control, decision):
     inspected = []
 
     def click():
@@ -132,10 +132,7 @@ def start(control, decision, *, retry_held=False):
         dlg.findChild(QDialogButtonBox).button(decision).click()
 
     QTimer.singleShot(10, click)
-    if retry_held:
-        control.held_button.click()
-    else:
-        control.action.trigger()
+    control.action.trigger()
     wait_for(lambda: inspected and control.process is None)
     return inspected
 
@@ -266,7 +263,7 @@ def test_stale_status_and_missing_acknowledged_request(work, tmp_path):
     (tmp_path / key).unlink()
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert ctrl.retry_key is None
+    assert not ctrl.delivery_keys
     assert "acknowledged request" in ctrl.notice.text()
 
 
@@ -281,10 +278,10 @@ def test_retry_after_unacknowledged_request_uses_original_key(work, tmp_path):
     (tmp_path / "lose-reply").unlink()
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert ctrl.retry_key == key
+    assert key in ctrl.delivery_keys
     assert (tmp_path / "calls").read_text().splitlines().count("submit") == 1
-    ctrl.retry_button.click()
-    wait_for(lambda: ctrl.process is None)
+    start(ctrl, QDialogButtonBox.Cancel)
+    start(ctrl, QDialogButtonBox.Ok)
     assert (tmp_path / key).exists()
     assert list(read_requests(win.current_deployment_folder)) == [key]
 
@@ -301,18 +298,19 @@ def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp
     old_job = ctrl.jobs[original]
     previous = {r["deployment"]: r["retry_of"] for r in old_job["rows"]}
     (tmp_path / "retry-preview").write_text(json.dumps(previous))
-    assert "Expected one exact camera; found 0" in ctrl.tree.topLevelItem(0).text(1)
-    assert not ctrl.held_button.isHidden()
+    assert "Camera 08021607 was missing in WI" in ctrl.tree.topLevelItem(0).text(1)
+    assert ctrl.retryable()
     ctrl.unavailable.add(original)
     ctrl.render()
     assert "Last known hold" in ctrl.tree.topLevelItem(0).text(1)
-    assert ctrl.held_button.isHidden()
-    ctrl.unavailable.clear()
-    ctrl.render()
-    start(ctrl, QDialogButtonBox.Cancel, retry_held=True)
+    assert not ctrl.retryable()
+    # The menu remains clickable during a poll and opens once the fresh status arrives.
+    ctrl.poll()
+    assert ctrl.process is not None and ctrl.action.isEnabled()
+    start(ctrl, QDialogButtonBox.Cancel)
     assert list(ctrl.jobs) == [original]
     (tmp_path / "stage").write_text("uploading")
-    start(ctrl, QDialogButtonBox.Ok, retry_held=True)
+    start(ctrl, QDialogButtonBox.Ok)
     replacement, = set(ctrl.jobs) - {original}
     assert ctrl.jobs[original] == old_job
     assert all(s["retry_of"] == previous[s["deployment"]] for s in ctrl.jobs[replacement]["scopes"])
@@ -351,11 +349,10 @@ def test_interrupted_inbox_delivery_replays_saved_identity(work, tmp_path):
     (tmp_path / "stage").write_text("delivery")
     start(ctrl, QDialogButtonBox.Ok)
     key, = ctrl.jobs
-    assert ctrl.held_button.isHidden()
-    assert ctrl.retry_key == key
-    assert ctrl.retry_button.text() == "Finish delivering the saved request"
+    assert not ctrl.retryable()
+    assert key in ctrl.delivery_keys
     (tmp_path / "stage").write_text("verified")
-    ctrl.retry_button.click()
-    wait_for(lambda: ctrl.process is None)
-    assert list(ctrl.jobs) == [key] and ctrl.retry_key is None
+    start(ctrl, QDialogButtonBox.Cancel)
+    start(ctrl, QDialogButtonBox.Ok)
+    assert list(ctrl.jobs) == [key] and not ctrl.delivery_keys
     assert all(r["stage"] == "verified" for r in ctrl.jobs[key]["rows"])
