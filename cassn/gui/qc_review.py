@@ -5,24 +5,41 @@ from collections import Counter
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import QRect, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPalette, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
+    QComboBox, QFrame, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
 from cassn.core.inventory import inventory_storage_relpath
+from cassn.gui.appearance import workspace_label, workspace_stylesheet
 from cassn.gui.dialogs import WindowDialog, WindowMessageBox
 
 
 # Text identifies each level even when the user cannot distinguish the colors.
 _LEVELS = {
-    "error": ("Investigate", "#aa2828", "#ffaaa6"),
-    "warning": ("Review", "#805100", "#ffd185"),
-    "info": ("Notice", "#195c92", "#9ad2ff"),
-    "pending": ("Pending", "#545c64", "#c3cad1"),
+    "error": ("Investigate", "#fbe2df", "#513330"),
+    "warning": ("Review", "#fff1c7", "#4c422a"),
+    "info": ("Notice", "#e5f3e9", "#293f34"),
+    "pending": ("Pending", "#eff1f2", "#333c43"),
 }
+
+
+class FindingsTree(QTreeWidget):
+    def drawRow(self, painter, option, index):
+        # Include the disclosure arrow gutter in the tint. Outline selection
+        # without replacing a warning's color with the normal green selection.
+        rect = QRect(0, option.rect.y(), self.viewport().width(), option.rect.height())
+        painter.fillRect(rect, self.itemFromIndex(index).background(0))
+        super().drawRow(painter, option, index)
+        if self.selectionModel().isRowSelected(index.row(), index.parent()):
+            painter.save()
+            dark = self.palette().color(QPalette.Window).lightness() < 128
+            painter.setPen(QPen(QColor("#8ed0bd" if dark else "#216e62"), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 3, 3)
+            painter.restore()
 
 
 class CollectionReviewDialog(WindowDialog):
@@ -38,25 +55,32 @@ class CollectionReviewDialog(WindowDialog):
         }
         counts = Counter(f["severity"] for f in findings)
         layout = QVBoxLayout(self)
-        heading = QLabel("Review card ingest checks" if findings else "Card ingest checks passed")
-        font = heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        font.setBold(True)
-        heading.setFont(font)
-        layout.addWidget(heading)
-        summary = QLabel(
+        self.setObjectName("fieldWorkspace")
+        zoom = getattr(getattr(parent, "workspace", None), "zoom", 100)
+        self.setStyleSheet(workspace_stylesheet(self.palette(), zoom) + """
+            QTreeWidget#qcFindings { selection-background-color: transparent; }
+            QTreeWidget#qcFindings::item:selected { background: transparent; }
+            QTextEdit#qcEvidence { border: none; }
+        """)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+        banner = QFrame()
+        banner.setObjectName("sidebarBrandBlock")
+        header = QVBoxLayout(banner)
+        header.setContentsMargins(18, 12, 18, 12)
+        heading = "Review card ingest checks" if findings else "Card ingest checks passed"
+        header.addWidget(workspace_label(heading, "sidebarBrand"))
+        event = workspace_label(self._folder.name, "muted")
+        event.setStyleSheet("color: #dcebe5;")
+        header.addWidget(event)
+        layout.addWidget(banner)
+        summary = workspace_label(
             f"Needs investigation: {counts['error']} · To review: {counts['warning']} · Notices: {counts['info']}"
-            if findings else "No findings to address."
+            if findings else "No findings to address.", "contextTitle"
         )
         summary.setObjectName("qcSummary")
         layout.addWidget(summary)
-        explanation = QLabel(
-            "Select a finding for affected files and next steps. Counts above refer to grouped findings.\n"
-            "You can continue to review the staged data. Nothing uploads until you start an upload."
-        )
-        explanation.setWordWrap(True)
-        layout.addWidget(explanation)
-        self.tree = QTreeWidget()
+        self.tree = FindingsTree()
         self.tree.setObjectName("qcFindings")
         self.tree.setAccessibleName("Card ingest findings")
         self.tree.setHeaderLabels(["Finding", "Affected"])
@@ -65,31 +89,43 @@ class CollectionReviewDialog(WindowDialog):
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        dark = self.tree.palette().base().color().lightness() < 128
+        dark = self.palette().color(QPalette.Window).lightness() < 128
         for finding in findings:
             label, light_color, dark_color = _LEVELS[finding["severity"]]
             color = QColor(dark_color if dark else light_color)
             item = QTreeWidgetItem([
                 f"{label} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
             ])
-            item.setData(0, Qt.DecorationRole, color)
+            for column in (0, 1):
+                item.setBackground(column, color)
             item.setToolTip(0, finding["title"])
             item.setData(0, Qt.UserRole, finding)
             self.tree.addTopLevelItem(item)
             for device, description in finding.get("pending_devices", []):
                 child = QTreeWidgetItem(item, [f"Pending · {description}", device])
-                child.setData(0, Qt.DecorationRole, color)
+                for column in (0, 1):
+                    child.setBackground(column, color)
                 child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
-        layout.addWidget(self.tree, 2)
+        layout.addWidget(self.tree, 3)
+        self.tree.ensurePolished()
+        visible_rows = min(6, self.tree.topLevelItemCount())
+        if visible_rows:
+            self.tree.setMinimumHeight(self.tree.header().sizeHint().height() + 8
+                                       + sum(self.tree.sizeHintForRow(i) for i in range(visible_rows)))
+        card = QFrame()
+        card.setObjectName("setupCard")
+        evidence = QVBoxLayout(card)
+        evidence.setContentsMargins(14, 10, 14, 10)
+        layout.addWidget(card, 2)
         self.next_step = QLabel()
         self.next_step.setWordWrap(True)
         self.next_step.setObjectName("qcNextStep")
-        layout.addWidget(self.next_step)
+        evidence.addWidget(self.next_step)
         self.details = QTextEdit()
         self.details.setObjectName("qcEvidence")
         self.details.setAccessibleName("Selected finding evidence")
         self.details.setReadOnly(True)
-        layout.addWidget(self.details, 3)
+        evidence.addWidget(self.details, 1)
         controls = QHBoxLayout()
         self.file_picker = QComboBox()
         self.file_picker.setObjectName("qcAffectedFiles")
@@ -101,10 +137,11 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.setObjectName("qcOpenFile")
         self.open_file.clicked.connect(self._open_file)
         controls.addWidget(self.open_file)
-        layout.addLayout(controls)
+        evidence.addLayout(controls)
         buttons = QDialogButtonBox()
         back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
-        buttons.addButton("Continue to review", QDialogButtonBox.AcceptRole)
+        proceed = buttons.addButton("Continue to review", QDialogButtonBox.AcceptRole)
+        proceed.setProperty("role", "primary")
         back.setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)

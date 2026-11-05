@@ -338,7 +338,11 @@ def test_review_groups_only_empty_pending_devices(workspace_window, tmp_path):
         parent = tree.topLevelItem(2)
         assert parent.childCount() == 2 and not parent.isExpanded()
         assert [parent.child(i).text(1) for i in range(2)] == ["p1_ML", "p2_ML"]
-        assert len({tree.topLevelItem(i).data(0, Qt.DecorationRole).name() for i in range(3)}) == 3
+        assert len({tree.topLevelItem(i).background(0).color().name() for i in range(3)}) == 3
+        for i in range(3):
+            item = tree.topLevelItem(i)
+            assert item.background(0) == item.background(1)
+            assert item.data(0, Qt.DecorationRole) is None
         parent.setExpanded(True)
         tree.setCurrentItem(parent.child(0))
         assert dialog.details.toPlainText() == "p1_ML has no staged files."
