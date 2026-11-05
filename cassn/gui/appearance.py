@@ -300,7 +300,7 @@ class PlatformPanel(QGroupBox):
         layout.addWidget(self._detail_area)
         self.footer = None
         self._expanded_controls = []
-        if purpose in ("box", "soundhub"):
+        if purpose in ("box", "soundhub", "wildlife_insights"):
             self.footer = QFrame()
             self.footer.setObjectName("platformActions")
             self.actions = _PanelActions(self.footer)
@@ -312,7 +312,7 @@ class PlatformPanel(QGroupBox):
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
 
-    def add_action_button(self, label, action, *, details=False, cancel=None):
+    def add_action_button(self, label, action, *, details=False, cancel=None, primary=False):
         button = QPushButton(label)
         button.clicked.connect(action.trigger)
 
@@ -327,8 +327,9 @@ class PlatformPanel(QGroupBox):
         if self.footer is None:
             (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
         else:
-            if cancel is not None:
+            if primary or cancel is not None:
                 self.actions.primary = button
+            if cancel is not None:
                 self.actions.addWidget(cancel)
             self.add_footer_button(button, details_only=details)
         return button

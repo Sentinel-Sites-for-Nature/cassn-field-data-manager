@@ -255,11 +255,11 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
                                                        {"p1": {"p1/old.flac"}, "p2": {"p2/new.flac", "p2/last.flac"}})
         window._soundhub_recording_prepared("p1", "old.wav")
         window._soundhub_recording_prepared("p2", "new.wav")
-        assert window.soundhub_progress_bar.text() == "2 of 3 recordings prepared · 66%"
-        assert window.soundhub_recorder_bars["p1"][1].text() == "1 of 1 prepared · 100%"
-        assert window.soundhub_recorder_bars["p2"][1].text() == "1 of 2 prepared · 50%"
+        assert window.soundhub_recorder_bars["p1"][1].text() == "1 of 1 recording · 100%"
+        assert window.soundhub_recorder_bars["p2"][1].text() == "1 of 2 recordings · 50%"
         window._soundhub_recording_prepared("p2", "new.wav")
-        assert window.soundhub_progress_bar.value() == 2
+        assert window.soundhub_recorder_bars["p2"][1].value() == 1
+        assert window.soundhub_recorder_layout.itemAtPosition(2, 1).widget() is window.soundhub_recorder_bars["p2"][1]
     finally:
         window.current_deployment_folder = None
         window.close()

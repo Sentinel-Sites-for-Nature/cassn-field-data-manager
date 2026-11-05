@@ -467,6 +467,7 @@ def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, t
     assert "Destination project: UCNRS Mammal" in labels["saved-camera-1"]
     assert "Destination project: unavailable" in labels["saved-camera-2"]
     assert "Destination project: UCNRS Small Animal" in labels["full-deployment-p1_SA"]
+    assert ctrl.bar_for_item(next(r for r in all_rows if r.text(0) == "saved-camera-1")).text().endswith("100%")
     for width, zoom in ((1280, 100), (940, 130), (940, 200)):
         opened.workspace.set_zoom(zoom)
         opened.resize(width, 740)
@@ -517,6 +518,23 @@ def test_only_staged_cameras_render_without_creating_requests(work, tmp_path):
     assert ctrl.verified_summary.isHidden() and ctrl.dismiss_button.isHidden()
     assert not ctrl.timer.isActive()
     assert not (ctrl.folder / STATE_FILE).exists()
+    assert not (tmp_path / "calls").exists()
+
+
+def test_web_button_selects_the_exported_project_without_submitting(work, tmp_path, monkeypatch):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    ctrl.refresh()
+    opened = []
+    monkeypatch.setattr("cassn.gui.wi_upload.open_platform_url", lambda _, url: opened.append(url))
+    from PySide6.QtWidgets import QMenu
+    ctrl.web_button.click()
+    menu = ctrl.web_button.findChild(QMenu)
+    assert [a.text() for a in menu.actions()] == ["UCNRS Mammal", "UCNRS Small Animal"]
+    menu.actions()[1].trigger()
+    menu.close()
+    assert opened == ["https://app.wildlifeinsights.org/manage/organizations/2001427/projects/2010517"]
     assert not (tmp_path / "calls").exists()
 
 

@@ -70,6 +70,7 @@ from cassn.box.threads import (
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.review_page import ReviewPage
+from cassn.gui.platform_links import box_web_url, open_platform_url
 from cassn.gui.activity_log import ActivityLog, operation_message
 from cassn.gui.soundhub_stage_dialog import SoundHubStageDialog
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
@@ -1349,16 +1350,18 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group = PlatformPanel("soundhub")
         soundhub_layout = self.soundhub_group.body
 
-        self.soundhub_progress_bar = UploadProgressBar()
-        self.soundhub_progress_bar.setObjectName("eventProgress")
-        self.soundhub_progress_bar.setTextVisible(True)
-        self.soundhub_progress_bar.setMinimum(0)
-        self.soundhub_progress_bar.setMaximum(100)
-        self.soundhub_group.details.addWidget(self.soundhub_progress_bar)
-        self.soundhub_recorder_layout = QVBoxLayout()
-        self.soundhub_group.details.addLayout(self.soundhub_recorder_layout)
+        self.soundhub_recorders = QWidget()
+        self.soundhub_recorder_layout = QGridLayout(self.soundhub_recorders)
+        self.soundhub_recorder_layout.setContentsMargins(0, 0, 0, 0)
+        self.soundhub_recorder_layout.setHorizontalSpacing(12)
+        self.soundhub_recorder_layout.setVerticalSpacing(8)
+        self.soundhub_recorder_layout.setColumnStretch(0, 1)
+        self.soundhub_recorder_layout.setColumnStretch(1, 1)
+        for col, title in enumerate(("Deployment", "Progress")):
+            self.soundhub_recorder_layout.addWidget(workspace_label(title, "muted"), 0, col)
+        self.soundhub_group.details.addWidget(self.soundhub_recorders)
+        self.soundhub_recorders.hide()
         self.soundhub_recorder_bars = {}
-
 
         self.soundhub_status_label = UploadMessage()
         soundhub_layout.addWidget(self.soundhub_status_label)
@@ -1432,6 +1435,11 @@ class FieldDataWizard(QMainWindow):
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
         self.box_panel_button = self.upload_group.add_action_button("Upload to Box", self.upload_now_btn, cancel=self.cancel_upload_btn)
+        box_web = QPushButton("Open in Box")
+        box_web.setToolTip("Open this event’s Box folder, or the project data folder before the event folder is known.")
+        box_web.clicked.connect(lambda: open_platform_url(
+            self, box_web_url(self.current_deployment_folder, self.box_config.field_data_folder_id)))
+        self.upload_group.add_footer_button(box_web)
         self.upload_group.add_action_button("Recheck Box file list", self.box_verify_btn, details=True)
         self.upload_group.add_action_button("Recheck file hashes", self.fixity_btn, details=True)
         self.soundhub_panel_button = self.soundhub_group.add_action_button("Stage bird audio", self.soundhub_stage_btn, cancel=self.cancel_soundhub_btn)
@@ -4591,7 +4599,6 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_group.setVisible(self.box_config.profile != "csu")
             self.soundhub_status_label.setText("No bird recordings are ready to stage.")
             self.soundhub_stage_btn.setEnabled(False)
-            self.soundhub_progress_bar.hide()
             self._show_recorder_progress(None)
             return
         self.soundhub_panel_button.setText("Stage bird audio")
@@ -4612,10 +4619,7 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_status_label.setText(f"Could not check SoundHub staging: {exc}")
             self._soundhub_dismissed = None
             return
-        done, total = counts if counts is not None else (summary.staged, summary.expected)
-        self.soundhub_progress_bar.setVisible(total > 0)
-        if total:
-            event_bar(self.soundhub_progress_bar, done, total, "recordings prepared" if counts else "recordings staged")
+        done = counts[0] if counts is not None else summary.staged
         if done or counts is not None or result.get("state") in {"interrupted", "failed", "cancelled"}:
             self.soundhub_panel_button.setText("Continue SoundHub staging")
         if staged:
@@ -4682,7 +4686,6 @@ class FieldDataWizard(QMainWindow):
     def _record_soundhub_result(self, operation, state, message, *, detail=""):
         self._soundhub_dismissed = None
         self.dismiss_soundhub_btn.hide()
-        self.soundhub_progress_bar.show()
         self.soundhub_group.show()
         if self.current_deployment_folder:
             self._soundhub_result = dict(folder=str(self.current_deployment_folder), operation=operation,
@@ -4760,11 +4763,6 @@ class FieldDataWizard(QMainWindow):
             self._soundhub_event_progress = None
         self._show_recorder_progress(self._soundhub_event_progress)
         self._record_soundhub_result("staging", "interrupted", "Staging started and has no completion result. Continue staging.")
-        progress = self._soundhub_event_progress
-        if progress:
-            event_bar(self.soundhub_progress_bar, progress.done, progress.total, "recordings prepared")
-        else:
-            self.soundhub_progress_bar.setRange(0, 0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_status_label.setText("Checking existing SoundHub batch…")
         self.cancel_soundhub_btn.setText("Cancel")
@@ -4841,9 +4839,6 @@ class FieldDataWizard(QMainWindow):
             return
 
         self._record_soundhub_result("upload", "interrupted", "SoundHub upload started and has no completion result. Check its status.")
-        self.soundhub_progress_bar.setRange(0, 100)
-        self.soundhub_progress_bar.setFormat("%p%")
-        self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
         self.soundhub_status_label.setText("Uploading to SoundHub…")
         self.cancel_soundhub_btn.setText("Cancel")
@@ -4925,35 +4920,39 @@ class FieldDataWizard(QMainWindow):
             for widget in self.soundhub_recorder_bars.pop(name):
                 self.soundhub_recorder_layout.removeWidget(widget)
                 widget.deleteLater()
-        for name, files in sorted(recorders.items()):
+        self.soundhub_recorders.setVisible(bool(recorders))
+        for row, (name, files) in enumerate(sorted(recorders.items()), start=1):
             if name not in self.soundhub_recorder_bars:
                 label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
                 bar = UploadProgressBar()
                 bar.setObjectName("eventProgress")
                 bar.setAccessibleName(f"{name} recording preparation")
-                self.soundhub_recorder_layout.addWidget(label)
-                self.soundhub_recorder_layout.addWidget(bar)
+                label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 self.soundhub_recorder_bars[name] = (label, bar)
-            _, bar = self.soundhub_recorder_bars[name]
-            event_bar(bar, len(files - progress.remaining), len(files), "prepared")
+            label, bar = self.soundhub_recorder_bars[name]
+            for col, widget in enumerate((label, bar)):
+                index = self.soundhub_recorder_layout.indexOf(widget)
+                if index < 0 or self.soundhub_recorder_layout.getItemPosition(index)[0] != row:
+                    self.soundhub_recorder_layout.addWidget(widget, row, col)
+            event_bar(bar, len(files - progress.remaining), len(files), "recording" if len(files) == 1 else "recordings")
 
     def _soundhub_recording_prepared(self, deployment, filename):
         progress = self._soundhub_event_progress
         if progress:
             key = (Path(deployment) / Path(filename).with_suffix(".flac")).as_posix()
             progress.remaining.discard(key)
-            event_bar(self.soundhub_progress_bar, progress.done, progress.total, "recordings prepared")
             self._show_recorder_progress(progress)
 
     def on_soundhub_progress(self, current, total, name):
         if total and not self._soundhub_event_progress:
-            event_bar(self.soundhub_progress_bar, current, total, "items in this pass")
+            self.soundhub_status_label.setText(f"{name} ({current:,}/{total:,})")
+            return
         self.soundhub_status_label.setText(f"Preparing {name}" if total and self._soundhub_event_progress else name)
 
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
-        progress, self._soundhub_event_progress = self._soundhub_event_progress, None
+        self._soundhub_event_progress = None
         self.soundhub_history_label.hide()
         detail = ""
         if success and result:
@@ -4975,12 +4974,6 @@ class FieldDataWizard(QMainWindow):
         if success:
             self._show_bird_audio_staged()
             self.dismiss_soundhub_btn.show()
-            if progress:
-                event_bar(self.soundhub_progress_bar, progress.total, progress.total, "recordings staged")
-            else:
-                self.soundhub_progress_bar.setRange(0, 100)
-                self.soundhub_progress_bar.setFormat("%p%")
-                self.soundhub_progress_bar.setValue(100)
             self.soundhub_panel_button.setText("Bird audio staged")
             self.soundhub_status_label.setText("Staged and validated. Ready for upload.")
             self.soundhub_status_label.setStyleSheet("color: green; font-weight: bold;")
@@ -5006,9 +4999,6 @@ class FieldDataWizard(QMainWindow):
         self.log(operation_message(message, success, warning=cancelled))
 
         if success:
-            self.soundhub_progress_bar.setRange(0, 100)
-            self.soundhub_progress_bar.setFormat("%p%")
-            self.soundhub_progress_bar.setValue(100)
             self.soundhub_status_label.setText(f"✓ {message}")
             self.soundhub_status_label.setStyleSheet("color: green;")
             QMessageBox.information(self, "SoundHub Upload Complete", message)

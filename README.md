@@ -423,6 +423,8 @@ Review the destination project and photo count before confirming.
 If delivery was interrupted, the panel opens the saved selection for confirmation.
 During transfer and verification, the app checks progress once per second while the helper is available.
 The journal-reading helper reports confirmed photo counts. A verification receipt establishes completion.
+**Open Wildlife Insights** opens the destination project. For events with both UC projects, select Mammal or Small Animal.
+In the Box panel, **Open in Box** opens the event folder after Box assigns it an ID. Earlier, it opens the configured project data folder.
 
 At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires event-scoped camera fields in `deployments.csv` and defaults in `wi_config.json`.
 
@@ -561,7 +563,7 @@ landing-zone checks are available through the maintenance CLI below.
 
 After successful staging, the panel shows **Bird audio staged** in gray.
 Adding another plot's bird recordings makes the staging action available again.
-Expand the panel to see each recorder's progress. The completion summary lists recordings converted or reused,
+Expand the panel to see a **Deployment / Progress** row with the count and percentage for each recorder. The completion summary lists recordings converted or reused,
 changed rows in each project CSV, and totals for the entire batch. **Open staging folder** opens the local batch in Finder.
 
 After cancellation or failure, reopen the event and choose

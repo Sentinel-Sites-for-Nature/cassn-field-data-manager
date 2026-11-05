@@ -32,11 +32,12 @@ from collections import Counter
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QSize, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QPushButton,
+    QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QMenu, QPushButton,
     QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from cassn.gui.workspace import UploadProgressBar
+from cassn.gui.platform_links import open_platform_url
 
 from cassn.gui.appearance import style_cancel_button, PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
 from cassn.config import QC_SUBFOLDER
@@ -116,16 +117,44 @@ class WildlifeInsightsControl(QObject):
         self.dismiss_button = QPushButton("Dismiss")
         self.dismiss_button.clicked.connect(self.dismiss)
         self.dismiss_button.hide()
-        self.group.details.addWidget(self.dismiss_button, alignment=Qt.AlignRight)
+        self.group.add_footer_button(self.dismiss_button, details_only=True)
         layout.addWidget(self.group)
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
-        self.panel_button = self.group.add_action_button("Upload images", self.action)
+        self.panel_button = self.group.add_action_button("Upload images", self.action, primary=True)
         self.panel_button.setAccessibleDescription("Review camera deployments for Wildlife Insights.")
+        self.web_button = QPushButton("Open Wildlife Insights")
+        self.web_button.setToolTip("Open the destination project in your browser.")
+        self.web_button.clicked.connect(self._open_website)
+        self.group.add_footer_button(self.web_button)
         self.timer = QTimer(self)
         self.timer.setInterval(QUEUE_POLL_MS)
         self.timer.timeout.connect(self.poll)
         self.action.setEnabled(False)
+
+    def _open_website(self):
+        # Only these projects have a known organization in the UC integration.
+        projects = set(_exported_projects(self.folder, display_only=True).values()) if self.folder else set()
+        for job in self.jobs.values():
+            for record in (*job["scopes"], *job.get("rows", [])):
+                projects.add(str(record.get("project_id", "")))
+                projects.add(str((record.get("integrity") or {}).get("project_id", "")))
+        ids = sorted(projects.intersection(PROJECT_NAMES), key=PROJECT_NAMES.get)
+        manage = "https://app.wildlifeinsights.org/manage"
+        if not ids:
+            open_platform_url(self.window, manage)
+            return
+        def open_project(project):
+            open_platform_url(self.window, f"{manage}/organizations/2001427/projects/{project}")
+
+        if len(ids) == 1:
+            open_project(ids[0])
+            return
+        menu = QMenu(self.web_button)
+        for project in ids:
+            menu.addAction(PROJECT_NAMES[project]).triggered.connect(lambda _, p=project: open_project(p))
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.web_button.mapToGlobal(self.web_button.rect().bottomLeft()))
 
     def refresh(self):
         if self.closed:
@@ -283,7 +312,7 @@ class WildlifeInsightsControl(QObject):
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
-        if total and (stage == "uploading" or (stage == "verifying" and type(row.get("verified_count")) is int)):
+        if total and (stage in {"staged", "queued", "uploading", "verified"} or (stage == "verifying" and type(row.get("verified_count")) is int)):
             label += f" · {100 * count // total}%"
         bar.setFormat(label)
         bar.setAccessibleName(label)
