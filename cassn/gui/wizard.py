@@ -5120,15 +5120,19 @@ class FieldDataWizard(QMainWindow):
         else:
             layout.addWidget(QLabel("All checks passed."))
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
-        buttons.button(QDialogButtonBox.Ok).setText("Proceed")
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dlg)
+        layout.addWidget(buttons)
+        proceed = buttons.button(QDialogButtonBox.Ok)
+        cancel = buttons.button(QDialogButtonBox.Cancel)
+        proceed.setText("Proceed")
+        button_size = proceed.sizeHint().expandedTo(cancel.sizeHint())
+        proceed.setFixedSize(button_size)
+        cancel.setFixedSize(button_size)
         if not all_ok:
-            buttons.button(QDialogButtonBox.Ok).setEnabled(False)
-            ack_cb.toggled.connect(buttons.button(QDialogButtonBox.Ok).setEnabled)
+            proceed.setEnabled(False)
+            ack_cb.toggled.connect(proceed.setEnabled)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
 
         accepted = dlg.exec() == QDialog.Accepted
         if accepted:
