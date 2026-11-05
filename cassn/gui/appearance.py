@@ -76,6 +76,8 @@ QLineEdit, QComboBox, QDateEdit, QSpinBox {{ background: {panel}; color: {text};
 QLineEdit:read-only, QDateEdit:read-only {{ background: {background}; }}
 QComboBox QAbstractItemView {{ background: {panel}; color: {text}; selection-background-color: {tint}; selection-color: {text}; }}
 QCheckBox {{ spacing: 7px; }}
+QCheckBox[role="deviceChoice"] {{ spacing: 7px; padding: 0 5px; }}
+QCheckBox[role="deviceChoice"]::indicator {{ width: {round(19 * zoom / 100)}px; height: {round(19 * zoom / 100)}px; }}
 QTreeWidget, QTextEdit {{ background: {panel}; color: {text}; border: 1px solid {line}; border-radius: 6px; selection-background-color: {tint}; selection-color: {text}; alternate-background-color: {background}; }}
 QTreeWidget {{ outline: none; }}
 QTreeWidget::item {{ padding: 8px 5px; border-bottom: 1px solid {soft}; }}

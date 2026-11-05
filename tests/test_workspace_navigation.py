@@ -497,3 +497,23 @@ def test_device_filter_keeps_card_history_after_panel_removal(workspace_window, 
     assert visible[0].background(0) == visible[0].background(2)
     log.device_filter.setCurrentIndex(0)
     assert all(not row.isHidden() for row in rows)
+
+
+def test_single_placement_label_toggles_only_that_device(workspace_window):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from cassn.gui.preview import sample_lookups
+
+    app, window = workspace_window
+    window.lookups = sample_lookups()
+    event = window.lookups.deployments["SantaCruzIsland"][0]
+    window.lookups.activate_deployment_round(event["deployment_round_id"])
+    window._rebuild_plot_grid("SantaCruzIsland")
+    window.show()
+    app.processEvents()
+    _, checkbox = window.device_checkboxes[1]["ML"][0]
+    assert checkbox.text() == "p1_ML"
+    assert checkbox.isChecked()
+    QTest.mouseClick(checkbox, Qt.LeftButton, pos=QPoint(checkbox.width() - 10, checkbox.height() // 2))
+    assert not checkbox.isChecked()
+    assert window.device_checkboxes[1]["SA"][0][1].isChecked()

@@ -90,7 +90,9 @@ def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, t
     dialog.show()
     app.processEvents()
     assert dialog.title.text() == "Opening your project…"
-    assert dialog.status.text() == "Checking your saved Box connection…"
+    assert dialog.connection_status.isVisible()
+    assert dialog.connection_status.accessibleName() == "Checking your Box connection"
+    assert any(label.accessibleName() == "Box logo" for label in dialog.connection_status.findChildren(QLabel))
     name = "University of California Nature" if profile == "uc" else "California State University"
     assert dialog.organization_logo.accessibleName() == name
     assert not dialog.organization_logo.pixmap().isNull()
@@ -112,6 +114,27 @@ def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, t
     assert any("account that has access to your project folder" in label.text() for label in labels)
     assert any('href="mailto:jtimperato@ucdavis.edu"' in label.text() and label.openExternalLinks() for label in labels)
     dialog.close()
+
+
+def test_loading_settings_replaces_connection_check(app, monkeypatch, tmp_path):
+    from threading import Event
+    ready = Event()
+    snapshot = SimpleNamespace(source="box", lookups=object())
+    def load(*args):
+        assert ready.wait(4)
+        return snapshot
+    monkeypatch.setattr(hosted_setup, "manager_for", lambda _: SimpleNamespace(token=lambda: object()))
+    monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", load)
+    dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
+    dialog.show()
+    try:
+        settle(app, lambda: dialog.status.text() == "Loading your project settings…")
+        assert not dialog.connection_status.isVisible()
+        assert not dialog.connect_button.isVisible()
+    finally:
+        ready.set()
+        settle(app, lambda: dialog.worker is None)
+    assert dialog.result() == QDialog.Accepted
 
 
 def test_valid_config_accepts_startup_and_offline_stays_disconnected(app, monkeypatch, tmp_path):

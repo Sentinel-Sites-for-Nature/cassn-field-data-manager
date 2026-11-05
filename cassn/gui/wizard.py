@@ -1569,8 +1569,10 @@ class FieldDataWizard(QMainWindow):
                     cell_layout.setSpacing(2)
                     for row in rows:
                         sequence = int(row.get("deployment_sequence") or 0)
-                        label = "" if len(rows) == 1 else f"Deployment {sequence + 1}"
+                        label = deployment_storage_label(row) if len(rows) == 1 else f"Deployment {sequence + 1}"
                         cb = QCheckBox(label)
+                        cb.setProperty("role", "deviceChoice")
+                        cb.setAccessibleName(f"Plot {plot_num}, {dev_code}, {label}")
                         cb.setChecked(True)
                         cb.toggled.connect(self._refresh_workspace_context)
                         identity_lines = []
@@ -1596,6 +1598,7 @@ class FieldDataWizard(QMainWindow):
                     self.device_cells.append(cell)
                 else:
                     cb = QCheckBox()
+                    cb.setProperty("role", "deviceChoice")
                     cb.setEnabled(False)
                     cb.setToolTip("No curated deployment in the selected event")
                     self.grid_layout.addWidget(cb, row_idx, col, Qt.AlignCenter)

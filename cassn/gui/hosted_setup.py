@@ -1,5 +1,5 @@
 """Responsive hosted setup, including a recoverable empty-project state."""
-from PySide6.QtCore import QSize, QThread, QTimer, Qt, QUrl
+from PySide6.QtCore import QSize, Signal, QThread, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLayout, QLabel, QPushButton, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
@@ -7,7 +7,7 @@ from cassn.gui.dialogs import WindowDialog as QDialog
 from cassn.gui.box_button import BoxConnectButton
 from cassn.box.hosted import HostedError, manager_for
 from cassn.config import LOCAL_DATA_DIR
-from cassn.gui.appearance import ARTWORK, workspace_label, workspace_stylesheet
+from cassn.gui.appearance import ARTWORK, platform_logo, workspace_label, workspace_stylesheet
 from cassn.lookup_sync import bootstrap_lookup_tables, LookupBootstrapError
 
 
@@ -70,6 +70,8 @@ class HostedDisconnectDialog(QDialog):
 
 
 class HostedSetupDialog(QDialog):
+    loading_settings = Signal()
+
     def __init__(self, config, parent=None, *, cache_dir=LOCAL_DATA_DIR):
         super().__init__(parent)
         self.project_name = config.profile.upper()
@@ -126,7 +128,19 @@ class HostedSetupDialog(QDialog):
         self.intro_note = workspace_label("", "muted", wrap=True)
         self.intro_note.hide()
         layout.addWidget(self.intro_note)
-        self.status = workspace_label("Checking your saved Box connection…", "muted", wrap=True)
+        self.connection_status = QWidget()
+        self.connection_status.setAccessibleName("Checking your Box connection")
+        checking = QHBoxLayout(self.connection_status)
+        checking.setContentsMargins(0, 0, 0, 0)
+        checking.setSpacing(4)
+        checking.addWidget(workspace_label("Checking your", "contextTitle"))
+        checking.addWidget(platform_logo("box", height=18))
+        checking.addWidget(workspace_label("connection…", "contextTitle"))
+        checking.addStretch()
+        layout.addWidget(self.connection_status)
+        self.loading_settings.connect(self._show_loading_settings)
+        self.status = workspace_label("", "muted", wrap=True)
+        self.status.hide()
         layout.addWidget(self.status)
         self.details = workspace_label("", "muted", wrap=True)
         self.details.hide()
@@ -170,6 +184,12 @@ class HostedSetupDialog(QDialog):
         self.close_button.clicked.connect(self.reject)
         QTimer.singleShot(0, self.load_project)
 
+    def _show_loading_settings(self):
+        if not self._closing:
+            self.connection_status.hide()
+            self.status.setText("Loading your project settings…")
+            self.status.show()
+
     def _show_sign_in(self):
         self.title.setText("Connect your Box account")
         self.intro_note.setText(
@@ -196,8 +216,8 @@ class HostedSetupDialog(QDialog):
         self.intro_note.hide()
         self.connect_button.hide()
         self.retry_button.hide()
-        self.status.show()
-        self.status.setText("Checking your saved Box connection…")
+        self.status.hide()
+        self.connection_status.show()
         def load():
             manager = manager_for(self.config)
             connected = False
@@ -211,6 +231,7 @@ class HostedSetupDialog(QDialog):
                     # Keep recovery visible; do not retry credentials or silently
                     # enter offline mode after an authentication failure.
                     return None, False, auth_error
+            self.loading_settings.emit()
             try:
                 snapshot = bootstrap_lookup_tables(self.config, self.cache_dir)
                 if (require_live or connected) and snapshot.source != "box":
@@ -228,6 +249,8 @@ class HostedSetupDialog(QDialog):
         self.worker.start()
 
     def loaded(self):
+        self.connection_status.hide()
+        self.status.show()
         worker, self.worker = self.worker, None
         self._busy(False)
         if self._closing:
@@ -281,6 +304,7 @@ class HostedSetupDialog(QDialog):
         if self.worker is not None:
             return
         self._busy(True)
+        self.connection_status.hide()
         self._signing_in = True
         self._login_cancel_pending = False
         self.details.hide()
