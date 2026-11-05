@@ -51,27 +51,6 @@ def departure_warning_message(labels: list[str]) -> str:
     return f"Proceeded with {len(tasks)} outstanding {noun}: " + "; ".join(tasks)
 
 
-def _departure_review(entry, diagnostic):
-    message = str(entry.get("message") or "")
-    legacy = re.fullmatch(r"Acknowledged with (\d+) unmet item\(s\): (.+)", message)
-    if legacy:
-        labels = legacy[2].split(", ")
-        if len(labels) == int(legacy[1]):
-            message = departure_warning_message(labels)
-    when = str(entry.get("timestamp") or "").replace("T", " ")
-    level = "error" if entry["severity"] == "error" else "warning"
-    return {
-        "severity": entry["severity"], "title": f"Saved deployment checklist {level}",
-        "affected": "Deployment", "files": [],
-        "action": "Complete any tasks that are still outstanding; this saved warning is not a current completion status.",
-        "message": (f"Saved checklist {level}{(' from ' + when) if when else ''}:\n{message}\n\n"
-                    "This checklist entry records requirements that were still unmet at that time. "
-                    "Acknowledging it does not complete an upload or verify file hashes.\n\n"
-                    "This is a deployment-wide checklist; no individual file list applies."),
-        "technical": diagnostic,
-    }
-
-
 def quantity(count, unit):
     """Format the small set of plural units used in the review."""
     return f"{count:,} {unit[:-1] if count == 1 and unit.endswith('s') else unit}"
@@ -82,7 +61,7 @@ def _review_message(code, evidence):
         return (
             "This usually happens when someone turns off the camera during a burst "
             "while setting it up or retrieving it. "
-            "Let the camera finish the burst before turning off the power."
+            "This is usually harmless. You can review the images if you want."
             f"\n\n{evidence}"
         )
     return evidence
@@ -159,16 +138,14 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
     file_issues = defaultdict(list)
     grouped = defaultdict(list)
     fallback = []
+    low_voltage = []
     for entry in entries:
-        if entry.get("severity") not in {"error", "warning"}:
+        if entry.get("severity") not in {"error", "warning"} or entry.get("check") == "pre_departure":
             continue
         scope = entry.get("_device") or "Deployment"
         diagnostic = f"{scope} · {entry.get('check', 'QC')}: {entry.get('message', '')}"
         if entry.get("description"):
             diagnostic += f"\nCheck explanation: {entry['description']}"
-        if entry.get("check") == "pre_departure":
-            fallback.append(_departure_review(entry, diagnostic))
-            continue
         issues = entry.get("findings")
         if issues is None:
             issues = _legacy_findings(entry, by_device.get(entry.get("_device", ""), []))
@@ -183,10 +160,17 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
                 messages = check_recording_stop_reasons(by_device[scope], scope, affected_files=files)
                 if "\n".join(messages) != entry.get("message"):
                     files.clear()
+                reasons = entry.get("message", "").splitlines()
+                if reasons and entry["severity"] == "warning" and all(
+                    re.fullmatch(r"\d+ recording\(s\) stopped due to: (?:low voltage|low battery)", reason, re.I)
+                    for reason in reasons
+                ):
+                    low_voltage.append((scope, diagnostic, files))
+                    continue
             fallback.append({"severity": entry["severity"], "title": title,
                 "affected": scope, "action": "Review the check details and ingest log before uploading.",
                 "message": _review_message(entry.get("check"), f"{scope}: {entry.get('message', '')}" + (
-                    "\n\nCompare the affected recordings with nearby files in their folder." if files
+                    "\n\nOpen the folder below to inspect the affected recordings." if files
                     else "\n\nFile details were not retained for this check.")),
                 "technical": diagnostic, "files": files})
             continue
@@ -209,6 +193,17 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
         signature = tuple(sorted((code, issue["severity"], issue["title"]) for code, issue in unique.items()))
         combinations[signature].append((identity, list(unique.values())))
     result = fallback
+    if low_voltage:
+        devices = ", ".join(sorted({scope for scope, _, _ in low_voltage}))
+        files = [file for _, _, refs in low_voltage for file in refs]
+        result.append({
+            "title": "Recording stopped early due to low voltage", "severity": "warning",
+            "affected": devices, "explanation": "The recorders reported low voltage and stopped recording early.",
+            "action": "Open the folder below to inspect the recordings if you wish." if files else
+                      "Review the recorder details below.",
+            "message": "\n".join(diagnostic for _, diagnostic, _ in low_voltage),
+            "technical": "\n".join(diagnostic for _, diagnostic, _ in low_voltage), "files": files,
+        })
     for signature, affected in combinations.items():
         severity = "error" if any(level == "error" for _, level, _ in signature) else "warning"
         files = [{"device_label": device, "filename": name} for (device, name), _ in affected]
@@ -231,9 +226,17 @@ def collection_review_findings(entries: list[dict], inventory: list[dict]) -> li
         detail = "\n\n".join(f"{i['scope']} · {quantity(i['count'], i.get('unit', 'items'))}\n{i['message']}"
             + ("\nObserved files:\n" + "\n".join(f["filename"] or "Unnamed file" for f in i["files"]) if i["files"] else "")
             for i in issues)
-        result.append({"severity": severity, "title": title,
+        action = issues[0]["action"]
+        explanation = title
+        if code == "resolved_camera_offset":
+            explanation = "Processing used the local Pacific time offset for these images."
+            action = "No action needed."
+        elif code == "sequence_gap":
+            explanation = _review_message(code, "").strip()
+            action = "Review the observed images if you wish."
+        result.append({"severity": severity, "title": title, "explanation": explanation,
             "affected": f"{quantity(count, unit)} · {quantity(len(devices), 'devices')}",
-            "action": issues[0]["action"], "message": _review_message(code, detail + "\n\n" + issues[0]["action"]),
+            "action": action, "message": detail,
             "technical": "\n\n".join(dict.fromkeys(i["technical"] for i in issues)),
             "files": [f for i in issues for f in i["files"]]})
     return sorted(result, key=lambda i: {"error": 0, "warning": 1, "info": 2}[i["severity"]])

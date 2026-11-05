@@ -186,16 +186,6 @@ class FieldWorkspace(QWidget):
         side.addWidget(workflow)
         side.addStretch()
 
-        status = QFrame()
-        status.setObjectName("sidebarStatus")
-        status_layout = QVBoxLayout(status)
-        status_layout.setContentsMargins(12, 14, 12, 0)
-        status_layout.setSpacing(8)
-        self.header_status = workspace_label("", "muted", wrap=True)
-        status_layout.addWidget(self.header_status)
-        self.box_status = workspace_label("", "muted", wrap=True)
-        status_layout.addWidget(self.box_status)
-        side.addWidget(status)
         shell.addWidget(sidebar)
 
         content = QWidget()
@@ -265,19 +255,6 @@ class FieldWorkspace(QWidget):
                     label.style().unpolish(label)
                     label.style().polish(label)
 
-    def set_context(self, *, site, dates, devices, staging, box_connected, active_jobs):
-        self.box_status.setText("● Box connected" if box_connected else "○ Box not connected")
-        role = "connected" if box_connected else "muted"
-        if self.box_status.property("role") != role:
-            self.box_status.setProperty("role", role)
-            self.box_status.style().unpolish(self.box_status)
-            self.box_status.style().polish(self.box_status)
-        self.header_status.setVisible(bool(active_jobs))
-        self.header_status.setText(
-            f"{active_jobs} card{'s' if active_jobs != 1 else ''} copying"
-            if active_jobs else ""
-        )
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         compact = self.width() < 1180
@@ -316,13 +293,13 @@ class DeviceGridScroll(QScrollArea):
         super().__init__()
         self.setWidgetResizable(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWidget(content)
         content.installEventFilter(self)
 
     def eventFilter(self, watched, event):
         if watched is self.widget() and event.type() == QEvent.LayoutRequest:
             height = self.widget().sizeHint().height() + self.horizontalScrollBar().sizeHint().height() + 4
-            if self.height() != height:
-                self.setFixedHeight(height)
+            if self.minimumHeight() != height:
+                self.setMinimumHeight(height)
         return super().eventFilter(watched, event)

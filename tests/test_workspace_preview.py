@@ -50,7 +50,7 @@ def test_preview_navigation_never_runs_export_or_upload(tmp_path, monkeypatch):
         for page in (0, 1, 2, 0, 2):
             window.workspace.navigation[page].click()
             assert window.tabs.currentIndex() == page
-            assert "Preview" in window.workspace.header_status.text()
+            assert "Preview" in window.windowTitle()
         for operation in operations:
             operation.assert_not_called()
     finally:

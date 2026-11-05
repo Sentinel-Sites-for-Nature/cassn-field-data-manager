@@ -146,7 +146,8 @@ def test_eject_pending_failure_retry_and_success(window, tmp_path, monkeypatch):
     assert "card" in window.card_ingest_panels
     pending.pop()(None, "Disk is busy")
     assert panel["eject"].isEnabled()
-    assert "Disk is busy" in panel["messages"].toPlainText()
+    assert any("Disk is busy" in window.log_text.topLevelItem(i).text(0)
+               for i in range(window.log_text.topLevelItemCount()))
     panel["eject"].click()
     pending.pop()(None, "")
     assert "card" not in window.card_ingest_panels
@@ -187,7 +188,8 @@ def test_discovery_timeout_recovers_after_copy(window, tmp_path, monkeypatch):
     volume, panel = make_card(window, tmp_path, monkeypatch)
     window._on_card_completed("card", {"ok": True, "source_dir": str(volume)})
     assert panel["eject"].text() == "Retry card check"
-    assert "timed out" in panel["messages"].toPlainText()
+    assert any("timed out" in window.log_text.topLevelItem(i).text(0)
+               for i in range(window.log_text.topLevelItemCount()))
     monkeypatch.setattr(w, "identify_card", identify)
     panel["eject"].click()
     assert panel["eject"].text() == "Eject CAMERA"
@@ -202,7 +204,8 @@ def test_completed_card_retries_once_and_refuses_replacement(window, tmp_path, m
     monkeypatch.setattr(w, "card_attachment", lambda *args: ("disk8s1", "disk8", (3, 4)))
     window._on_card_completed("card", {"ok": True, "source_dir": str(volume)})
     assert not panel.get("card_identity")
-    assert "original card is no longer connected" in panel["messages"].toPlainText()
+    assert any("original card is no longer connected" in window.log_text.topLevelItem(i).text(0)
+               for i in range(window.log_text.topLevelItemCount()))
 
 
 def test_late_initial_failure_retries_automatically_after_completion(window, tmp_path, monkeypatch):

@@ -802,11 +802,12 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
         )
         # These synthetic images deliberately have no EXIF. Copying still
         # completes, but the new camera timezone check must not call them valid.
-        assert all(
-            "QC error: Camera timezone QC" in panel["messages"].toPlainText()
-            and "QC: All checks passed." not in panel["messages"].toPlainText()
-            for panel in window.card_ingest_panels.values()
-        )
+        for device in window.card_ingest_panels:
+            window._show_device_activity(device)
+            entries = [window.log_text.topLevelItem(i) for i in range(window.log_text.topLevelItemCount())]
+            visible = [row for row in entries if not row.isHidden()]
+            assert all(row.text(0).startswith(device) for row in visible)
+            assert any("Camera timezone QC" in row.text(0) and row.text(1) == "Error" for row in visible)
 
         window._populate_staged_event_tree()
         tree_root = window.staged_event_tree.topLevelItem(0)

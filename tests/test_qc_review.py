@@ -90,7 +90,7 @@ def test_resolved_offsets_retain_counts_without_unbounded_file_lists():
     assert findings[0]["severity"] == "info"
     assert findings[0]["affected"] == "2,000 photos · 2 devices"
     assert "expected-" not in findings[0]["message"]
-    assert "clock accuracy has not been verified" in findings[0]["action"]
+    assert findings[0]["action"] == "No action needed."
 
 
 def test_historical_offset_errors_and_ambiguous_times_remain_errors():
@@ -137,22 +137,14 @@ def test_saved_departure_warning_names_pending_tasks_without_changing_history():
     entry = {"check": "pre_departure", "severity": "warning", "timestamp": "2026-10-25T09:35:31",
              "message": "Acknowledged with 2 unmet item(s): Hash verification passed, Box upload completed"}
     before = json.dumps(entry)
-    finding, = collection_review_findings([entry], [])
-    assert "Verify file hashes; Complete the Box upload" in finding["message"]
-    assert "2026-10-25 09:35:31" in finding["message"]
-    assert "no individual file list applies" in finding["message"]
-    assert "not retained" not in finding["message"]
-    assert finding["files"] == [] and finding["severity"] == "warning"
-    assert entry["message"] in finding["technical"]
+    assert collection_review_findings([entry], []) == []
     assert json.dumps(entry) == before
 
 
 def test_new_departure_message_stays_outstanding_when_reopened():
     message = departure_warning_message(["Hash verification passed", "Box upload completed"])
     assert message == "Proceeded with 2 outstanding tasks: Verify file hashes; Complete the Box upload"
-    finding, = collection_review_findings([{"check": "pre_departure", "severity": "warning", "message": message}], [])
-    assert message in finding["message"] and finding["severity"] == "warning"
-    assert "does not complete an upload" in finding["message"]
+    assert collection_review_findings([{"check": "pre_departure", "severity": "warning", "message": message}], []) == []
 
 
 def test_all_burst_findings_and_observed_file_context_survive_report_reload(tmp_path):
@@ -165,7 +157,7 @@ def test_all_burst_findings_and_observed_file_context_survive_report_reload(tmp_
     report = json.loads((tmp_path / "qc/qc_report.json").read_text())
     findings = collection_review_findings(report["current_state"], rows)
     assert len(findings) == 1
-    assert findings[0]["message"].startswith("This usually happens when someone turns off the camera during a burst")
+    assert findings[0]["explanation"].startswith("This usually happens when someone turns off the camera during a burst")
     legacy, = collection_review_findings([{"check": "sequence_gap", "severity": "warning",
                                            "message": "Missing frame."}], [])
     assert legacy["message"].startswith("This usually happens")

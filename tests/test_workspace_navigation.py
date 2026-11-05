@@ -145,6 +145,11 @@ def test_collection_checks_require_explicit_continue(
         for expected in ("p1_ML", "Small image", "Invalid offset", "Missing latitude", "Missing elevation"):
             assert expected in text
         buttons = dialog.findChild(QDialogButtonBox)
+        if accept:
+            for i, finding in enumerate(findings):
+                if finding["severity"] in {"error", "warning"}:
+                    tree.setCurrentItem(tree.topLevelItem(i))
+                    dialog.acknowledge.click()
         target = "Continue to review" if accept else "Back to card ingest"
         next(button for button in buttons.buttons() if button.text() == target).click()
         return dialog.result()
@@ -295,6 +300,14 @@ def test_deployment_page_fits_desktop_and_stacks_on_laptop(monkeypatch, connecte
         assert window.metadata_columns.direction() == QBoxLayout.LeftToRight
         assert scroll.verticalScrollBar().maximum() == 0
         assert scroll.horizontalScrollBar().maximum() == 0
+        from cassn.gui.workspace import DeviceGridScroll
+        matrix = window.findChild(DeviceGridScroll)
+        previous = matrix.viewport().height()
+        window.resize(1380, 1070)
+        for _ in range(3):
+            app.processEvents()
+        assert matrix.viewport().height() > previous
+        assert matrix.viewport().height() >= matrix.widget().sizeHint().height()
         window.resize(1000, 740)
         for _ in range(3):
             app.processEvents()
@@ -470,3 +483,20 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     assert "Disk full" in window.soundhub_status_label.text()
     window._dismiss_soundhub_progress()
     assert not window.soundhub_group.isHidden()
+
+
+def test_device_filter_keeps_card_history_after_panel_removal(workspace_window, tmp_path):
+    _, window = workspace_window
+    window._create_card_panel("p1_BD", tmp_path)
+    window._on_card_log("p1_BD", "Warning: Low battery")
+    window.log("Error: [p2_BD] Card unavailable")
+    window._show_device_activity("p1_BD")
+    window._remove_card_panel("p1_BD")
+    log = window.log_text
+    assert log.device_filter.currentText() == "p1_BD"
+    rows = [log.topLevelItem(i) for i in range(log.topLevelItemCount())]
+    visible = [r for r in rows if not r.isHidden()]
+    assert [r.text(0) for r in visible] == ["p1_BD · Low battery"]
+    assert visible[0].background(0) == visible[0].background(2)
+    log.device_filter.setCurrentIndex(0)
+    assert all(not row.isHidden() for row in rows)

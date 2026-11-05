@@ -133,7 +133,7 @@ def test_failed_reconnect_does_not_publish_old_connected_flag(app, monkeypatch, 
     window.close()
 
 
-def test_connection_changes_update_every_window_sidebar(app, monkeypatch, tmp_path):
+def test_connection_changes_update_every_window(app, monkeypatch, tmp_path):
     from cassn.gui.windows import DeploymentWindows
     from cassn.gui.wizard import FieldDataWizard
     from cassn.gui.preview import sample_lookups
@@ -148,8 +148,7 @@ def test_connection_changes_update_every_window_sidebar(app, monkeypatch, tmp_pa
         first._publish_connection(connected)
         for window in (first, second):
             assert window.box_authenticated == connected
-            assert window.workspace.box_status.text() == (
-                "● Box connected" if connected else "○ Box not connected")
+            assert window.box_connection_label.text() == ("✓ Connected" if connected else "Box disconnected — connect to upload")
     for window in (first, second):
         window.current_deployment_folder = None
         window.close()

@@ -94,3 +94,41 @@ def test_invalid_inventory_paths_cannot_be_opened(app, tmp_path, stored):
         assert not dialog.open_file.isEnabled()
     finally:
         dialog.close()
+
+
+def test_acknowledgement_persists_only_for_unchanged_evidence(app, tmp_path):
+    saved = set()
+    def save(keys):
+        saved.update(keys)
+        return True
+
+    rows = findings()
+    dialog = CollectionReviewDialog(rows, [], tmp_path, save_acknowledgements=save)
+    assert not dialog.proceed.isEnabled()
+    dialog.acknowledge.click()
+    assert dialog.proceed.isEnabled()
+    assert dialog.tree.currentItem().text(2) == "Acknowledged"
+    dialog.close()
+    reopened = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved)
+    assert reopened.proceed.isEnabled()
+    reopened.close()
+    rows[0]["message"] += " A second file now needs review."
+    changed = CollectionReviewDialog(rows, [], tmp_path, acknowledged=saved,
+                                    save_acknowledgements=lambda keys: False)
+    assert not changed.proceed.isEnabled()
+    changed.acknowledge.click()
+    assert not changed.proceed.isEnabled()
+    changed.close()
+
+
+def test_low_voltage_groups_devices_and_keeps_their_files(app, tmp_path):
+    entries, inventory = [], []
+    for device in ("p1_BD", "p2_BD", "p3_BD"):
+        entries.append({"_device": device, "check": "recording_stop_reason", "severity": "warning",
+                        "message": "1 recording(s) stopped due to: low voltage"})
+        inventory.append({"device_label": device, "file_type": "audio", "new_filename": device + ".wav",
+                          "recording_stop_reason": "low voltage"})
+    finding, = collection_review_findings(entries, inventory)
+    assert finding["title"] == "Recording stopped early due to low voltage"
+    assert finding["affected"] == "p1_BD, p2_BD, p3_BD"
+    assert len(finding["files"]) == 3

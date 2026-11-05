@@ -155,3 +155,33 @@ def test_box_dismiss_restores_from_current_proof_and_never_hides_an_unverified_b
     reopen()
     assert reopened.dismiss_box_btn.isHidden() and not reopened.upload_group.isHidden()
     assert not reopened.box_upload_complete
+
+
+def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, monkeypatch):
+    from cassn.gui.qc_review import CollectionReviewDialog
+
+    window = windows()
+    _, path = saved_work(window)
+    finding = dict(title="Recording stopped early", message="One file", action="Check the folder",
+                   severity="warning", files=[], affected="p1_BD", technical="low voltage")
+    monkeypatch.setattr(FieldDataWizard, "_collection_review_findings", lambda self, _: [finding])
+
+    def accept(dialog):
+        assert not dialog.proceed.isEnabled()
+        dialog.acknowledge.click()
+        assert dialog.proceed.isEnabled()
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CollectionReviewDialog, "exec", accept)
+    assert window._confirm_collection_review([])
+    reopened = windows()
+    reopened.restore_session(json.loads(path.read_text()))
+
+    def inspect(dialog):
+        return dialog.DialogCode.Accepted if dialog.proceed.isEnabled() else dialog.DialogCode.Rejected
+
+    monkeypatch.setattr(CollectionReviewDialog, "exec", inspect)
+    assert reopened._confirm_collection_review([])
+    finding["message"] = "Two files"
+    assert not reopened._confirm_collection_review([])
+    assert json.loads(path.read_text())["qc_acknowledgements"] == []

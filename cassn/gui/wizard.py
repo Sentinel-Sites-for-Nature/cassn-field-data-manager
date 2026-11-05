@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
+from PySide6.QtGui import QAction, QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -169,7 +169,7 @@ from cassn.core.quality_control import (
 from cassn.core.qc_review import (
     checklist_task, collection_review_findings, departure_warning_message, small_file_findings,
 )
-from cassn.gui.qc_review import CollectionReviewDialog
+from cassn.gui.qc_review import CollectionReviewDialog, acknowledgement_key
 from cassn.export.metadata_csv import write_metadata_outputs
 from cassn.export.wildlife_insights import generate_wi_deployments_from_image_csv
 from cassn.lookups import (
@@ -216,6 +216,7 @@ class FieldDataWizard(QMainWindow):
         self.current_deployment_folder = None
         self.file_inventory = []
         self.camera_date_reviews = {}
+        self.qc_acknowledgements = []
         self.seen_file_hashes = set()  # session-wide duplicate detection
         self.card_ingest_threads: dict[str, CardIngestThread] = {}
         self._retiring_card_threads: set[CardIngestThread] = set()
@@ -426,6 +427,7 @@ class FieldDataWizard(QMainWindow):
             "device_statuses": device_statuses,
             "file_inventory": self.file_inventory,
             "camera_date_reviews": self.camera_date_reviews,
+            "qc_acknowledgements": self.qc_acknowledgements,
             "deployment_folder": str(self.current_deployment_folder),
         }
 
@@ -595,6 +597,10 @@ class FieldDataWizard(QMainWindow):
             migrated_site_metadata = True
         self.devices = [tuple(d) for d in session_data.get("devices", [])]
         self.file_inventory = session_data.get("file_inventory", [])
+        saved_keys = session_data.get("qc_acknowledgements")
+        self.qc_acknowledgements = [key for key in saved_keys if isinstance(key, str)] if isinstance(saved_keys, list) else []
+        if self.current_deployment_folder != Path(session_data["deployment_folder"]):
+            self.log_text.clear()
         self.camera_date_reviews = session_data.get("camera_date_reviews", {})
         self.current_deployment_folder = Path(session_data["deployment_folder"])
         saved_result = session_data.get("soundhub_display")
@@ -777,34 +783,15 @@ class FieldDataWizard(QMainWindow):
             return
         if getattr(self, "wi_control", None):
             self.wi_control.refresh()
-        metadata = self.metadata
-        if self.current_deployment_folder:
-            site = metadata.get("site_name", "")
-            start = metadata.get("deployment_event_start_date", "")
-            end = metadata.get("deployment_event_end_date", "")
-            count = len(self.devices)
-        else:
-            site = self.site_name_combo.currentText()
-            event = self.deploy_event_combo.currentData() or {}
-            start = event.get("deployment_event_start_date", "")
-            end = event.get("deployment_event_end_date", "")
-            count = sum(
-                checkbox.isChecked()
-                for slots in self.device_checkboxes.values()
-                for placements in slots.values()
-                for _row, checkbox in placements
-            )
         complete = sum(
             self.device_tree.topLevelItem(i).text(2) == "Complete"
             for i in range(self.device_tree.topLevelItemCount())
         )
-        copying = len(self.card_ingest_threads)
-        self.workspace.set_context(
-            site=site, dates=f"{start} → {end}" if start and end else "",
-            devices=f"{count} devices" + (f" · {complete} complete" if self.current_deployment_folder else " selected"),
-            staging=str(self.current_deployment_folder or self.staging_root),
-            box_connected=self.box_authenticated, active_jobs=copying,
+        count = len(self.devices) if self.current_deployment_folder else sum(
+            box.isChecked() for slots in self.device_checkboxes.values()
+            for placements in slots.values() for _, box in placements
         )
+        copying = len(self.card_ingest_threads)
         self.collection_status.setText(
             f"{complete} complete · {copying} copying · {count} devices"
         )
@@ -987,7 +974,7 @@ class FieldDataWizard(QMainWindow):
         device_layout.addLayout(button_layout)
 
         device_group.setLayout(device_layout)
-        layout.addWidget(device_group)
+        layout.addWidget(device_group, 1)
 
         # Staging location
         staging_group = QGroupBox("Local Staging Location")
@@ -1071,8 +1058,6 @@ class FieldDataWizard(QMainWindow):
         next_btn.clicked.connect(self.validate_and_next)
         nav_layout.addWidget(next_btn)
         layout.addLayout(nav_layout)
-
-        layout.addStretch()
 
         scroll.setWidget(scroll_widget)
 
@@ -1203,7 +1188,15 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(self.activity_log_toggle, alignment=Qt.AlignLeft)
 
         self.log_text = ActivityLog()
-        self.activity_log_group = self.log_text
+        self.activity_log_group = QWidget()
+        log_layout = QVBoxLayout(self.activity_log_group)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Device"))
+        filter_row.addWidget(self.log_text.device_filter)
+        filter_row.addStretch()
+        log_layout.addLayout(filter_row)
+        log_layout.addWidget(self.log_text)
         self.activity_log_group.hide()
         layout.addWidget(self.activity_log_group)
 
@@ -1916,18 +1909,9 @@ class FieldDataWizard(QMainWindow):
         detail.setWordWrap(True)
         detail.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         findings = QLabel("Warnings: 0 · Errors: 0")
-        messages = QTextEdit()
-        messages.setReadOnly(True)
-        messages.setMaximumHeight(90)
-        messages.setPlaceholderText("Card and device QC messages appear here.")
-        messages.hide()
         details_toggle = QToolButton()
         details_toggle.setText("Show details")
-        details_toggle.setCheckable(True)
-        details_toggle.toggled.connect(messages.setVisible)
-        details_toggle.toggled.connect(
-            lambda expanded: details_toggle.setText("Hide details" if expanded else "Show details")
-        )
+        details_toggle.clicked.connect(lambda: self._show_device_activity(device_label))
         cancel = QPushButton("Cancel card")
         cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
         eject = QPushButton("Eject card")
@@ -1947,7 +1931,6 @@ class FieldDataWizard(QMainWindow):
         actions.addWidget(cancel)
         actions.addWidget(eject)
         layout.addLayout(actions)
-        layout.addWidget(messages)
 
         self.card_ingest_panels[device_label] = {
             "group": group,
@@ -1955,7 +1938,6 @@ class FieldDataWizard(QMainWindow):
             "progress": progress,
             "detail": detail,
             "findings": findings,
-            "messages": messages,
             "warnings": 0,
             "errors": 0,
             "cancel": cancel,
@@ -1996,7 +1978,6 @@ class FieldDataWizard(QMainWindow):
                 identity = None
             if error:
                 panel["identity_error"] = error
-                panel["messages"].append(f"Card identification failed: {error}")
                 self.log(f"Error: [{label}] Could not identify the card: {error}")
             else:
                 self._card_identified(label, panel, identity, "")
@@ -2084,8 +2065,6 @@ class FieldDataWizard(QMainWindow):
         if error:
             panel["eject"].setEnabled(True)
             panel["eject"].setText(f"Eject {panel['card_identity'].name}")
-            panel["messages"].show()
-            panel["messages"].append(f"Could not eject card: {error}")
             self.log(f"✗ [{label}] Could not eject card: {error}")
         else:
             self._remove_card_panel(label)
@@ -2235,26 +2214,14 @@ class FieldDataWizard(QMainWindow):
                 stripped.startswith("[") and " MB)" in stripped
             )
             if not routine_progress:
-                self._append_card_message(
-                    device_label, message, alert=is_error or is_warning
-                )
-        # The shared log is now for actionable cross-device information, not
-        # routine per-file progress already represented by each card panel.
-        if is_error or is_warning:
+                self.log(f"[{device_label}] {message}")
+        elif is_error or is_warning:
             self.log(f"[{device_label}] {message}")
 
-    def _append_card_message(
-        self, device_label: str, message: str, *, alert: bool = False
-    ) -> None:
-        """Append a meaningful device message to its own compact log."""
-        panel = self.card_ingest_panels.get(device_label)
-        if panel is None:
-            return
-        messages = panel["messages"]
-        default_color = messages.palette().color(QPalette.Text)
-        messages.setTextColor(QColor("#cc0000") if alert else default_color)
-        messages.append(message)
-        messages.setTextColor(default_color)
+    def _show_device_activity(self, device_label):
+        self.log_text.select_device(device_label)
+        self.activity_log_toggle.setChecked(True)
+        self.log_text.setFocus()
 
     def _on_card_progress(
         self, device_label: str, copied: int, expected: int, filename: str
@@ -2343,7 +2310,6 @@ class FieldDataWizard(QMainWindow):
                 panel["progress"].setRange(0, 100)
                 panel["cancel"].hide()
             message = result.get("error", "Unknown card ingest error")
-            self._append_card_message(device_label, message, alert=True)
             self.log(f"{'⚠' if cancelled else '✗'} [{device_label}] {message}")
             self.save_session()
             if not cancelled:
@@ -2390,9 +2356,6 @@ class FieldDataWizard(QMainWindow):
             panel["progress"].setRange(0, max(total_for_device, 1))
             panel["progress"].setValue(total_for_device)
             panel["detail"].setText(f"{total_for_device:,} files inventoried")
-            panel["messages"].append(
-                f"Complete: {total_for_device:,} files inventoried. Safe to eject card."
-            )
             panel["cancel"].hide()
             panel["complete"] = True
             panel["eject"].setVisible(bool(panel.get("card_identity")))
@@ -2440,11 +2403,6 @@ class FieldDataWizard(QMainWindow):
                 message,
             )
             if unexplained > 0:
-                self._append_card_message(
-                    device_label,
-                    f"QC warning: unexplained file shortfall of {unexplained}.",
-                    alert=True,
-                )
                 self.log(f"⚠ [{device_label}] Inventory is short by {unexplained}. Check the card.")
 
         if device_entries:
@@ -2471,13 +2429,7 @@ class FieldDataWizard(QMainWindow):
                     severity,
                     message,
                 )
-                self._append_card_message(
-                    device_label,
-                    f"QC: {message}",
-                    alert=severity in {"warning", "error"},
-                )
-                if severity in {"warning", "error"}:
-                    self.log(f"[{device_label}] {message}")
+                self.log(f"QC [{device_label}] {severity}: {message}")
         self._run_device_qc_checks(device_entries, device_label)
 
     def _reserve_ingest_hash(self, file_hash: str, file_type: str) -> bool:
@@ -3310,9 +3262,23 @@ class FieldDataWizard(QMainWindow):
         return findings
 
     def _confirm_collection_review(self, coord_warnings: list[str]) -> bool:
+        def save_acknowledgements(keys):
+            previous = self.qc_acknowledgements
+            self.qc_acknowledgements = sorted(keys)
+            if self.save_session():
+                return True
+            self.qc_acknowledgements = previous
+            return False
+
+        findings = self._collection_review_findings(coord_warnings)
+        current = {acknowledgement_key(f) for f in findings}
+        retained = set(self.qc_acknowledgements) & current
+        if retained != set(self.qc_acknowledgements) and not save_acknowledgements(retained):
+            return False
         dialog = CollectionReviewDialog(
-            self._collection_review_findings(coord_warnings), self.file_inventory,
+            findings, self.file_inventory,
             self.current_deployment_folder, parent=self,
+            acknowledged=self.qc_acknowledgements, save_acknowledgements=save_acknowledgements,
         )
         return dialog.exec() == QDialog.Accepted
 
@@ -4231,7 +4197,6 @@ class FieldDataWizard(QMainWindow):
             if warnings_list:
                 any_warnings = True
                 for msg in warnings_list:
-                    self._append_card_message(device_label, f"QC warning: {msg}", alert=True)
                     self.log(f"  QC [{device_label}] {msg}")
                 append_qc_report(
                     self.current_deployment_folder, check_name, device_label, "warning",
@@ -4256,9 +4221,7 @@ class FieldDataWizard(QMainWindow):
                 )
                 if not resolved:
                     any_warnings = True
-                    self._append_card_message(
-                        device_label, "QC error: camera dates need review before continuing.", alert=True,
-                    )
+                    self.log(f"Error: [{device_label}] Review the camera dates before continuing.")
             else:
                 append_qc_report(
                     self.current_deployment_folder, "camera_date_review", device_label,
@@ -4272,11 +4235,10 @@ class FieldDataWizard(QMainWindow):
             )
             if severity != "pass":
                 any_warnings = True
-                self._append_card_message(device_label, f"QC {severity}: {message}", alert=True)
                 self.log(f"  QC [{device_label}] {severity}: {message}")
 
         if not any_warnings:
-            self._append_card_message(device_label, "QC: All checks passed.")
+            self.log(f"QC [{device_label}] pass: All checks passed.")
 
     def run_camera_timezone_check(self):
         """Recheck retained EXIF evidence without rewriting any image."""
@@ -4298,7 +4260,6 @@ class FieldDataWizard(QMainWindow):
                 self.current_deployment_folder, "camera_timezone_consistency", label, severity, message,
                 findings=timezone_findings,
             )
-            self._append_card_message(label, f"QC {severity}: {message}", alert=severity != "pass")
             self.log(f"QC [{label}] {severity}: {message}")
             summaries.append(f"{label}: {severity}\n{message}")
         QMessageBox.information(self, "Camera Timezone QC", "\n\n".join(summaries) or "No camera images in this session.")
@@ -5144,6 +5105,7 @@ class FieldDataWizard(QMainWindow):
             self.devices = []
             self.file_inventory = []
             self.camera_date_reviews = {}
+            self.qc_acknowledgements = []
             self.seen_file_hashes = set()
             self._ingest_hash_registry = IngestHashRegistry()
             self._active_card_sources.clear()

@@ -1,19 +1,22 @@
 """A compact collection check summary with selected evidence."""
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPalette, QPen
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QPushButton, QTextEdit, QTreeWidgetItem, QVBoxLayout,
 )
 
 from cassn.core.inventory import inventory_storage_relpath
 from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.severity_tree import SeverityTree
 from cassn.gui.dialogs import WindowDialog, WindowMessageBox
 
 
@@ -26,28 +29,22 @@ _LEVELS = {
 }
 
 
-class FindingsTree(QTreeWidget):
-    def drawRow(self, painter, option, index):
-        # Include the disclosure arrow gutter in the tint. Outline selection
-        # without replacing a warning's color with the normal green selection.
-        rect = QRect(0, option.rect.y(), self.viewport().width(), option.rect.height())
-        painter.fillRect(rect, self.itemFromIndex(index).background(0))
-        super().drawRow(painter, option, index)
-        if self.selectionModel().isRowSelected(index.row(), index.parent()):
-            painter.save()
-            dark = self.palette().color(QPalette.Window).lightness() < 128
-            painter.setPen(QPen(QColor("#8ed0bd" if dark else "#216e62"), 2))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 3, 3)
-            painter.restore()
+def acknowledgement_key(finding):
+    if finding["severity"] not in {"error", "warning"}:
+        return None
+    encoded = json.dumps(finding, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class CollectionReviewDialog(WindowDialog):
-    def __init__(self, findings, inventory, deployment_folder, parent=None):
+    def __init__(self, findings, inventory, deployment_folder, parent=None, *,
+                 acknowledged=(), save_acknowledgements=None):
         super().__init__(parent)
         self.setWindowTitle("Card ingest checks")
         self.resize(900, 640)
-        self._findings = findings
+        self._save_acknowledgements = save_acknowledgements
+        self._acknowledged = set(acknowledged)
+        self._required = set()
         self._folder = Path(deployment_folder)
         self._inventory = {
             (row.get("device_label", ""), row.get("new_filename", "")): row
@@ -80,10 +77,10 @@ class CollectionReviewDialog(WindowDialog):
         )
         summary.setObjectName("qcSummary")
         layout.addWidget(summary)
-        self.tree = FindingsTree()
+        self.tree = SeverityTree()
         self.tree.setObjectName("qcFindings")
         self.tree.setAccessibleName("Card ingest findings")
-        self.tree.setHeaderLabels(["Finding", "Affected"])
+        self.tree.setHeaderLabels(["Finding", "Affected", "Status"])
         self.tree.setRootIsDecorated(any(f.get("pending_devices") for f in findings))
         self.tree.setWordWrap(True)
         self.tree.header().setStretchLastSection(False)
@@ -96,14 +93,19 @@ class CollectionReviewDialog(WindowDialog):
             item = QTreeWidgetItem([
                 f"{label} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
             ])
-            for column in (0, 1):
+            for column in range(self.tree.columnCount()):
                 item.setBackground(column, color)
             item.setToolTip(0, finding["title"])
             item.setData(0, Qt.UserRole, finding)
+            key = acknowledgement_key(finding)
+            if key:
+                self._required.add(key)
+                item.setData(0, Qt.UserRole + 1, key)
+                item.setText(2, "Acknowledged" if key in self._acknowledged else "To review")
             self.tree.addTopLevelItem(item)
             for device, description in finding.get("pending_devices", []):
                 child = QTreeWidgetItem(item, [f"Pending · {description}", device])
-                for column in (0, 1):
+                for column in range(self.tree.columnCount()):
                     child.setBackground(column, color)
                 child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
         layout.addWidget(self.tree, 3)
@@ -112,6 +114,7 @@ class CollectionReviewDialog(WindowDialog):
         if visible_rows:
             self.tree.setMinimumHeight(self.tree.header().sizeHint().height() + 8
                                        + sum(self.tree.sizeHintForRow(i) for i in range(visible_rows)))
+        layout.addSpacing(8)
         card = QFrame()
         card.setObjectName("setupCard")
         evidence = QVBoxLayout(card)
@@ -137,10 +140,15 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.setObjectName("qcOpenFile")
         self.open_file.clicked.connect(self._open_file)
         controls.addWidget(self.open_file)
+        self.acknowledge = QPushButton("Acknowledge finding")
+        self.acknowledge.clicked.connect(self._acknowledge_current)
+        controls.addWidget(self.acknowledge)
         evidence.addLayout(controls)
         buttons = QDialogButtonBox()
         back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
         proceed = buttons.addButton("Continue to review", QDialogButtonBox.AcceptRole)
+        self.proceed = proceed
+        proceed.setEnabled(self._required <= self._acknowledged)
         proceed.setProperty("role", "primary")
         back.setDefault(True)
         buttons.accepted.connect(self.accept)
@@ -151,6 +159,7 @@ class CollectionReviewDialog(WindowDialog):
         if findings:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         else:
+            self.acknowledge.hide()
             self.tree.hide()
             self.details.setPlainText("No findings to address.")
             self.file_picker.hide()
@@ -162,7 +171,11 @@ class CollectionReviewDialog(WindowDialog):
         if not item:
             return
         finding = item.data(0, Qt.UserRole)
-        self.next_step.setText(f"<b>Next step:</b> {escape(finding['action'])}")
+        key = item.data(0, Qt.UserRole + 1)
+        self.acknowledge.setVisible(bool(key))
+        self.acknowledge.setEnabled(bool(key and key not in self._acknowledged))
+        explanation = finding.get("explanation", finding["title"])
+        self.next_step.setText(f"<b>{escape(explanation)}</b><br>{escape(finding['action'])}")
         seen = set()
         for file in finding["files"]:
             key = (file.get("device_label", ""), file["filename"])
@@ -174,6 +187,19 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.setVisible(bool(seen))
         self._update_open_button()
         self.details.setPlainText(finding["message"])
+
+    def _acknowledge_current(self):
+        item = self.tree.currentItem()
+        key = item.data(0, Qt.UserRole + 1)
+        if key not in self._required:
+            return
+        updated = (self._acknowledged & self._required) | {key}
+        if self._save_acknowledgements and not self._save_acknowledgements(updated):
+            return
+        self._acknowledged = updated
+        item.setText(2, "Acknowledged")
+        self.acknowledge.setEnabled(False)
+        self.proceed.setEnabled(self._required <= updated)
 
     def _audio_selected(self):
         row = self._inventory.get(self.file_picker.currentData(), {})
