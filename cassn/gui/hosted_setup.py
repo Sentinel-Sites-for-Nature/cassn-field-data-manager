@@ -1,13 +1,13 @@
 """Responsive hosted setup, including a recoverable empty-project state."""
-from PySide6.QtCore import QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPalette
+from PySide6.QtCore import QSize, QThread, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLayout, QLabel, QPushButton, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from cassn.gui.dialogs import WindowDialog as QDialog
 from cassn.gui.box_button import BoxConnectButton
 from cassn.box.hosted import HostedError, manager_for
 from cassn.config import LOCAL_DATA_DIR
-from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.appearance import ARTWORK, workspace_label, workspace_stylesheet
 from cassn.lookup_sync import bootstrap_lookup_tables, LookupBootstrapError
 
 
@@ -101,41 +101,52 @@ class HostedSetupDialog(QDialog):
         layout.setAlignment(Qt.AlignTop)
         self.scroll.setWidget(body)
         outer.addWidget(self.scroll, 1)
-        self.title = workspace_label(f"Open your {self.project_name} project", "pageTitle", wrap=True)
+        self.title = workspace_label("Opening your project…", "pageTitle", wrap=True)
         layout.addWidget(self.title)
 
-        card = QFrame()
-        card.setObjectName("setupCard")
-        content = QVBoxLayout(card)
-        content.setContentsMargins(20, 20, 20, 20)
-        content.setSpacing(14)
-        self.intro_heading = workspace_label("Loading project settings", "sectionTitle", wrap=True)
-        content.addWidget(self.intro_heading)
+        organization = QFrame()
+        organization.setObjectName("sidebarOrganization")
+        brand = QVBoxLayout(organization)
+        brand.setContentsMargins(16, 10, 16, 14)
+        brand.setSpacing(6)
+        brand.addWidget(workspace_label("Organization", "organizationCaption"))
+        if config.profile == "csu":
+            name, artwork = "California State University", "csu-wordmark-stacked.svg"
+            size = QSize(205, 70)
+        else:
+            name, artwork = "University of California Nature", "uc-nature-lockup-hori-black.png"
+            size = QSize(190, 46)
+        self.organization_logo = QLabel(name)
+        self.organization_logo.setAccessibleName(name)
+        logo = QIcon(str(ARTWORK / artwork)).pixmap(size, self.devicePixelRatioF())
+        if not logo.isNull():
+            self.organization_logo.setPixmap(logo)
+        brand.addWidget(self.organization_logo, alignment=Qt.AlignLeft)
+        layout.addWidget(organization)
         self.intro_note = workspace_label("", "muted", wrap=True)
         self.intro_note.hide()
-        content.addWidget(self.intro_note)
+        layout.addWidget(self.intro_note)
         self.status = workspace_label("Checking your saved Box connection…", "muted", wrap=True)
-        content.addWidget(self.status)
+        layout.addWidget(self.status)
         self.details = workspace_label("", "muted", wrap=True)
         self.details.hide()
-        content.addWidget(self.details)
+        layout.addWidget(self.details)
         self.connect_button = BoxConnectButton()
         self.connect_button.setAccessibleDescription("Sign in to Box to load your project settings.")
         self.connect_button.setDefault(True)
         self.connect_button.hide()
-        content.addWidget(self.connect_button)
+        layout.addWidget(self.connect_button)
         self.retry_button = QPushButton("Reload project settings")
         self.retry_button.setProperty("role", "primary")
         self.retry_button.setToolTip("Reload project settings from Box using your saved connection. You do not need to sign in again.")
         self.retry_button.hide()
-        content.addWidget(self.retry_button)
+        layout.addWidget(self.retry_button)
         self.reopen_browser = QPushButton("Open browser again")
         self.reopen_browser.hide()
         self.reopen_browser.clicked.connect(lambda: self.open_browser(self._browser_url) if self._browser_url else None)
-        content.addWidget(self.reopen_browser)
-        layout.addWidget(card)
+        layout.addWidget(self.reopen_browser)
         link_color = "#8ed0bd" if QApplication.palette().color(QPalette.Window).lightness() < 128 else "#216e62"
-        help_label = QLabel('Project access questions? Contact John at '
+        help_label = QLabel('Contact John at '
                             f'<a style="color: {link_color}" href="mailto:jtimperato@ucdavis.edu">jtimperato@ucdavis.edu</a>.')
         help_label.setWordWrap(True)
         help_label.setOpenExternalLinks(True)
@@ -160,7 +171,7 @@ class HostedSetupDialog(QDialog):
         QTimer.singleShot(0, self.load_project)
 
     def _show_sign_in(self):
-        self.intro_heading.setText("Connect your Box account")
+        self.title.setText("Connect your Box account")
         self.intro_note.setText(
             "Sign in with the account that has access to your project folder. "
             "The app will load your settings. You can upload staged files to Box later."
@@ -181,7 +192,7 @@ class HostedSetupDialog(QDialog):
         require_live = self._require_live
         self._busy(True)
         self.details.hide()
-        self.intro_heading.setText("Loading project settings")
+        self.title.setText("Opening your project…")
         self.intro_note.hide()
         self.connect_button.hide()
         self.retry_button.hide()
@@ -225,7 +236,7 @@ class HostedSetupDialog(QDialog):
             return
         if worker.error:
             if self.connected:
-                self.intro_heading.setText("Project settings need attention")
+                self.title.setText("Project settings need attention")
                 self.retry_button.show()
             else:
                 self._show_sign_in()
@@ -259,7 +270,7 @@ class HostedSetupDialog(QDialog):
             self.connect_button.setDefault(not self.connected)
             self.retry_button.setDefault(self.connected)
             if self.connected:
-                self.intro_heading.setText("Project settings need attention")
+                self.title.setText("Project settings need attention")
                 self.intro_note.hide()
             else:
                 self._show_sign_in()
@@ -274,7 +285,7 @@ class HostedSetupDialog(QDialog):
         self._login_cancel_pending = False
         self.details.hide()
         self.connect_button.hide()
-        self.intro_heading.setText("Sign in to Box in your browser")
+        self.title.setText("Sign in to Box in your browser")
         self.intro_note.setText("Return here after sign-in. Your project will open when the settings are ready.")
         self.intro_note.show()
         self.status.show()

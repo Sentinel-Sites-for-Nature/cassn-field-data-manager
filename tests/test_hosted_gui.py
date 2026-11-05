@@ -89,8 +89,11 @@ def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, t
     dialog = hosted_setup.HostedSetupDialog(replace(csu_config(), profile=profile), cache_dir=tmp_path)
     dialog.show()
     app.processEvents()
-    assert dialog.title.text() == f"Open your {profile.upper()} project"
-    assert dialog.intro_heading.text() == "Loading project settings"
+    assert dialog.title.text() == "Opening your project…"
+    assert dialog.status.text() == "Checking your saved Box connection…"
+    name = "University of California Nature" if profile == "uc" else "California State University"
+    assert dialog.organization_logo.accessibleName() == name
+    assert not dialog.organization_logo.pixmap().isNull()
     assert not dialog.connect_button.isVisible()
     from cassn.box.hosted import HostedError
     def no_session():
@@ -98,7 +101,7 @@ def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, t
     monkeypatch.setattr(hosted_setup, "manager_for", lambda _: SimpleNamespace(token=no_session, session=None))
     dialog.load_project()
     settle(app, lambda: dialog.worker is None)
-    assert dialog.intro_heading.text() == "Connect your Box account"
+    assert dialog.title.text() == "Connect your Box account"
     assert dialog.connect_button.isVisible()
     assert not dialog.status.isVisible()
     assert not dialog.connect_button.icon().isNull()
