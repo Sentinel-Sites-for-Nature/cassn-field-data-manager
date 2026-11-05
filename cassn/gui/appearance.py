@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QIcon, QPalette, QPixmap
-from PySide6.QtWidgets import QGraphicsOpacityEffect, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -63,7 +63,10 @@ QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus, QDateEdi
 QGroupBox {{ background: {panel}; border: 1px solid {line}; border-radius: 10px; margin-top: 18px; padding: 18px 12px 12px; font-weight: 600; }}
 QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; padding: 0 5px; color: {text}; }}
 QGroupBox[role="cardJob"] {{ padding: 0px 8px 8px; }}
-QGroupBox[role="platformPanel"] {{ margin-top: 0; padding: 8px; }}
+QGroupBox[role="platformPanel"] {{ margin-top: 0; padding: 0; }}
+QFrame#platformHeader {{ background: {"#c8ddd1" if dark else "#deede4"}; border: none;
+    border-bottom: 1px solid #b8d1c3; border-top-left-radius: 9px; border-top-right-radius: 9px; }}
+QLabel[role="platformTitle"] {{ color: #163f31; font-size: 18px; font-weight: 700; }}
 QLabel[role="platformLogo"] {{ background: transparent; padding: 2px 4px; }}
 QToolButton#prepareUpload {{ background: {accent}; color: {on_accent}; border-color: {accent}; padding: 10px 16px; font-weight: 600; }}
 QToolButton#prepareUpload::menu-indicator {{ image: none; width: 0; height: 0; }}
@@ -169,15 +172,24 @@ class PlatformPanel(QGroupBox):
         super().__init__()
         self._platform_name = _PLATFORMS[platform][0]
         self.setProperty("role", "platformPanel")
-        self.body = QVBoxLayout(self)
-        header = QHBoxLayout()
-        height = 31 if platform == "wildlife_insights" else 20
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.header = QFrame()
+        self.header.setObjectName("platformHeader")
+        header = QHBoxLayout(self.header)
+        header.setContentsMargins(14, 5, 14, 5)
+        header.setSpacing(12)
+        height = {"box": 26, "soundhub": 60, "wildlife_insights": 33}[platform]
         logo = platform_logo(platform, height=height)
         logo.setMaximumWidth(170)
         header.addWidget(logo, alignment=Qt.AlignVCenter)
-        self._heading = workspace_label("", "sectionTitle", wrap=True)
+        self._heading = workspace_label("", "platformTitle", wrap=True)
         header.addWidget(self._heading, 1)
-        self.body.addLayout(header)
+        layout.addWidget(self.header)
+        self.body = QVBoxLayout()
+        self.body.setContentsMargins(14, 10, 14, 12)
+        layout.addLayout(self.body)
         self.setTitle(title)
 
     def setTitle(self, title):
