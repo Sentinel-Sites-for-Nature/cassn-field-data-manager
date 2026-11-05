@@ -32,7 +32,7 @@ from collections import Counter
 
 from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QSize, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QHeaderView, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QPushButton,
     QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -48,6 +48,8 @@ from cassn.core.wi_requests import (
 
 
 PROJECT_NAMES = {"2010517": "UCNRS Small Animal", "2010527": "UCNRS Mammal"}
+ACTIVE_POLL_MS = 1000
+QUEUE_POLL_MS = 3000
 
 
 def _exported_projects(folder, *, display_only=False):
@@ -81,7 +83,7 @@ class WildlifeInsightsControl(QObject):
         self.menu_waiting = False
         self.closed = False
         self.panel_error = False
-        self.next_job = 0
+        self.poll_remaining = []
         self.read_error = False
         self._unproven_verified = False
         self.has_selection = False
@@ -121,7 +123,7 @@ class WildlifeInsightsControl(QObject):
         self.panel_button = self.group.add_action_button("Upload images", self.action)
         self.panel_button.setAccessibleDescription("Review camera deployments for Wildlife Insights.")
         self.timer = QTimer(self)
-        self.timer.setInterval(3000)
+        self.timer.setInterval(QUEUE_POLL_MS)
         self.timer.timeout.connect(self.poll)
         self.action.setEnabled(False)
 
@@ -131,6 +133,7 @@ class WildlifeInsightsControl(QObject):
         folder = self.window.current_deployment_folder
         if folder != self.folder:
             self.folder = folder
+            self.poll_remaining.clear()
             self.group.disclosure.setChecked(False)
             self.dismissed = None
             self.jobs = {}
@@ -216,10 +219,14 @@ class WildlifeInsightsControl(QObject):
         if not finished:
             self.dismissed = None
         self.panel_button.setVisible(not finished)
-        self.panel_button.setText("Continue uploads" if self.jobs else "Upload images")
+        self.panel_button.setText("Continue WI uploads" if self.jobs else "Upload images")
         self.dismiss_button.setVisible(finished and self.dismissed != frozenset(self.jobs))
         if any(not complete(j, sources) for j in self.jobs.values()):
-            self.timer.start()
+            interval = ACTIVE_POLL_MS if states["uploading"] or states["verifying"] else QUEUE_POLL_MS
+            if self.timer.interval() != interval:
+                self.timer.setInterval(interval)
+            if not self.timer.isActive():
+                self.timer.start()
         else:
             self.timer.stop()
 
@@ -276,6 +283,8 @@ class WildlifeInsightsControl(QObject):
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
+        if total and (stage == "uploading" or (stage == "verifying" and type(row.get("verified_count")) is int)):
+            label += f" · {100 * count // total}%"
         bar.setFormat(label)
         bar.setAccessibleName(label)
         bar.setProperty("wrapProgressText", True)
@@ -342,7 +351,7 @@ class WildlifeInsightsControl(QObject):
             self.tree.headerItem().setText(1, "Camera progress" if compact else "Progress")
             if not compact:
                 self.tree.setColumnWidth(0, min(420, width - needed))
-            progress_width = max(1, self.tree.columnWidth(1) - 14)
+            progress_width = max(1, (width if compact else width - self.tree.columnWidth(0)) - 14)
             name_width = progress_width if compact else max(1, self.tree.columnWidth(0) - 14)
             for item in items:
                 left = self.tree.itemWidget(item, 0)
@@ -448,6 +457,8 @@ class WildlifeInsightsControl(QObject):
                     self.menu_waiting = False
                     if succeeded and not self.closed and self.folder == folder:
                         self.preview()
+                elif operation == "status" and not self.closed and self.folder == folder:
+                    self.poll_next()
 
         def started():
             process.write(json.dumps(body).encode())
@@ -515,6 +526,7 @@ class WildlifeInsightsControl(QObject):
         return dict(sorted(counts.items()))
 
     def preview(self):
+        self.poll_remaining.clear()
         self.refresh()
         if not self.action.isEnabled():
             return
@@ -563,20 +575,12 @@ class WildlifeInsightsControl(QObject):
         layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(14)
         banner = QFrame()
-        banner.setObjectName("sidebarBrandBlock")
+        banner.setObjectName("platformHeader")
         heading = QVBoxLayout(banner)
-        heading.setContentsMargins(18, 14, 18, 14)
-        brand = QHBoxLayout()
-        brand.addWidget(workspace_label("Wildlife Insights", "sidebarBrand"), 1)
-        logo_plate = QFrame()
-        logo_plate.setStyleSheet("background: white; border-radius: 5px;")
-        plate = QHBoxLayout(logo_plate)
-        plate.setContentsMargins(8, 4, 8, 4)
-        plate.addWidget(platform_logo("wildlife_insights", height=22))
-        brand.addWidget(logo_plate)
-        heading.addLayout(brand)
+        heading.setContentsMargins(18, 12, 18, 12)
+        heading.addWidget(platform_logo("wildlife_insights", height=34), alignment=Qt.AlignLeft)
         event_label = workspace_label(folder.name, "subtitle", wrap=True)
-        event_label.setStyleSheet("color: #e0ebde; margin: 0;")
+        event_label.setStyleSheet("color: #244638; margin: 0;")
         heading.addWidget(event_label)
         layout.addWidget(banner)
         layout.addWidget(workspace_label("Resume the saved upload" if delivery_key else "Select camera deployments", "sectionTitle"))
@@ -633,7 +637,13 @@ class WildlifeInsightsControl(QObject):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        dialog.resize(680, 305 + min(len(scope_list), 6) * 30)
+        tree.ensurePolished()
+        visible_rows = min(len(scope_list), 6)
+        table_height = tree.header().sizeHint().height() + 4 + sum(
+            tree.sizeHintForRow(i) for i in range(visible_rows)
+        )
+        tree.setMinimumHeight(tree.header().sizeHint().height() + tree.sizeHintForRow(0) + 4)
+        dialog.resize(680, layout.minimumSize().height() - tree.minimumHeight() + table_height)
         self.timer.stop()
         try:
             if dialog.exec() != QDialog.Accepted or self.window.current_deployment_folder != folder:
@@ -674,6 +684,8 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The uploader request identity changed.")
             if old.get("manifest_sha256") and old["manifest_sha256"] != row.get("manifest_sha256"):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
+            if old.get("manifest_sha256"):
+                row["confirmed"] = max(row["confirmed"], old["confirmed"])
             if row["stage"] == "verifying":
                 values = (old.get("verified_count"), row.get("verified_count"))
                 known = [value for value in values if type(value) is int and value >= 0]
@@ -702,14 +714,17 @@ class WildlifeInsightsControl(QObject):
 
     def poll(self):
         self.refresh()
-        sources = replacement_sources(self.jobs)
-        pending = [k for k, job in self.jobs.items() if not complete(job, sources)]
-        if self.closed or self.process or not pending or self.read_error:
+        if self.closed or self.process or self.read_error:
             return
-        key = pending[self.next_job % len(pending)]
-        self.next_job += 1
+        sources = replacement_sources(self.jobs)
+        self.poll_remaining = [key for key, job in self.jobs.items() if not complete(job, sources)]
+        self.poll_next()
 
-        self.check_status(key)
+    def poll_next(self):
+        # A status call includes every camera in one operator request. Drain
+        # all active requests each tick, with only one helper running at once.
+        if self.poll_remaining and not self.process:
+            self.check_status(self.poll_remaining.pop(0))
 
     def check_status(self, key):
         def received(result):
@@ -719,7 +734,7 @@ class WildlifeInsightsControl(QObject):
                 self.unavailable.add(key)
                 self.render()
                 self.delivery_keys.add(key)
-                self.message("Choose Continue uploads to resume the saved selection.")
+                self.message("Choose Continue WI uploads to resume the saved selection.")
             else:
                 self.accept_status(key, result)
 

@@ -131,6 +131,9 @@ def start(control, decision):
         tree = dlg.findChild(QTreeWidget)
         logos = [label for label in dlg.findChildren(QLabel) if label.accessibleName() == "Wildlife Insights logo"]
         assert len(logos) == 1 and not logos[0].pixmap().isNull()
+        assert logos[0].pixmap().hasAlphaChannel()
+        assert not any(label.text() == "Wildlife Insights" for label in dlg.findChildren(QLabel))
+        assert any(label.text() == control.folder.name for label in dlg.findChildren(QLabel))
         inspected.extend((tree.topLevelItem(i).text(0), tree.topLevelItem(i).text(1))
                          for i in range(tree.topLevelItemCount()))
         dlg.findChild(QDialogButtonBox).button(decision).click()
@@ -148,6 +151,7 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     first._set_box_controls_busy(True)
     first.soundhub_group.show()
     first.upload_group.show()
+    assert control.panel_button.text() == "Upload images"
     names = start(control, QDialogButtonBox.Cancel)
     assert dict(names) == {"full-deployment-p1_ML": "UCNRS Mammal",
                            "full-deployment-p1_SA": "UCNRS Small Animal"}
@@ -168,17 +172,18 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     again.validate_and_next()
     ctrl = again.wi_control
     assert ctrl.tree.topLevelItemCount() == 2
+    assert ctrl.panel_button.text() == "Continue WI uploads"
     assert ctrl.dismiss_button.isHidden()
     (tmp_path / "stage").write_text("verifying")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
     bar = ctrl.bar_for_item(ctrl.tree.topLevelItem(0))
-    assert bar.value() == 1 and bar.text() == "Verifying 1 of 2 photos"
+    assert bar.value() == 1 and bar.text() == "Verifying 1 of 2 photos · 50%"
     for count in (2, 0):
         (tmp_path / "verified-count").write_text(str(count))
         ctrl.poll()
         wait_for(lambda: ctrl.process is None)
-        assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).text() == "Verifying 2 of 2 photos"
+        assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).text() == "Verifying 2 of 2 photos · 100%"
         assert ctrl.dismiss_button.isHidden()
         assert not inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     (tmp_path / "stage").write_text("verified")

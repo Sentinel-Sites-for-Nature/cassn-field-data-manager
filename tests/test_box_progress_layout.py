@@ -127,8 +127,8 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                 assert not logos[0].pixmap().isNull()
                 if name == "Wildlife Sound Hub":
                     assert logos[0].pixmap().deviceIndependentSize().width() >= 90
-            for index, value, text in [(0, 2100, "Uploading 2,100 of 8,150 photos"),
-                                       (1, 3130, "Verifying 3,130 of 4,044 photos")]:
+            for index, value, text in [(0, 2100, "Uploading 2,100 of 8,150 photos · 25%"),
+                                       (1, 3130, "Verifying 3,130 of 4,044 photos · 77%")]:
                 bar = control.bar_for_item(control.tree.topLevelItem(index))
                 assert bar.value() == value
                 assert bar.text() == text
