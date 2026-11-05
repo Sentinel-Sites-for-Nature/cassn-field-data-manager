@@ -8,8 +8,8 @@ from cassn.box.metadata_merge import CSV_NAMES, read_csv, read_object
 from cassn.box.publication import STATE_PATH
 
 
-def previously_uploaded(folder: Path, inventory: list) -> int | None:
-    """Count current originals in this event's published records. None means unknown.
+def published_file_keys(folder: Path, inventory: list) -> set[tuple[str, str]] | None:
+    """Find current originals in this event's published records. None means unknown.
 
     Each CSV candidate is the accumulated file list for that media type.
     Its hash must match the saved Box version. This historical count never
@@ -54,6 +54,11 @@ def previously_uploaded(folder: Path, inventory: list) -> int | None:
                 found = True
             if not remaining:
                 break
-        return len(matches) if found else None
+        return matches if found else None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def previously_uploaded(folder: Path, inventory: list) -> int | None:
+    keys = published_file_keys(folder, inventory)
+    return len(keys) if keys is not None else None

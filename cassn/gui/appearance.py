@@ -3,9 +3,9 @@ from functools import lru_cache
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtGui import QIcon, QPalette, QPixmap
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QVBoxLayout
+from PySide6.QtCore import QEvent, QRect, QSize, Qt
+from PySide6.QtGui import QIcon, QPalette, QPixmap, QRegion
+from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -68,6 +68,9 @@ QFrame#platformHeader {{ background: {"#c8ddd1" if dark else "#deede4"}; border:
     border-bottom: 1px solid #b8d1c3; border-top-left-radius: 9px; border-top-right-radius: 9px; }}
 QLabel[role="platformTitle"] {{ color: #163f31; font-size: 18px; font-weight: 700; }}
 QLabel[role="platformLogo"] {{ background: transparent; padding: 2px 4px; }}
+QFrame#platformHeader QLabel[role="platformLogo"] {{ padding: 2px 0; }}
+QToolButton#progressDisclosure {{ padding: 5px; border: none; background: transparent; color: #163f31; }}
+QToolButton#progressDisclosure:hover, QToolButton#progressDisclosure:focus {{ background: #c1d9cb; }}
 QToolButton#prepareUpload {{ background: {accent}; color: {on_accent}; border-color: {accent}; padding: 10px 16px; font-weight: 600; }}
 QToolButton#prepareUpload::menu-indicator {{ image: none; width: 0; height: 0; }}
 QToolButton#prepareUpload:pressed {{ background: {"#a4dccc" if dark else "#174c3c"}; color: {on_accent}; }}
@@ -83,7 +86,7 @@ QTreeWidget::item:selected {{ background: {tint}; color: {text}; }}
 QHeaderView::section {{ background: {background}; color: {muted}; border: none; border-bottom: 1px solid {line}; padding: 10px 5px; font-weight: normal; }}
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
-QProgressBar#boxUploadProgress {{ min-height: 24px; max-height: 16777215px; color: {text}; text-align: center; }}
+QProgressBar#boxUploadProgress, QProgressBar#eventProgress {{ min-height: 24px; max-height: 16777215px; color: {text}; text-align: center; }}
 QProgressBar#boxUploadProgress::chunk {{ background: {accent}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: {background}; }}
@@ -125,11 +128,15 @@ _PLATFORMS = {
 
 
 @lru_cache(maxsize=64)
-def platform_pixmap(platform, *, width, height, ratio=1):
+def platform_pixmap(platform, *, width, height, ratio=1, trim=False):
     """Keep the original aspect ratio and limit sampling to the source pixels."""
     source = QPixmap(str(ARTWORK / _PLATFORMS[platform][1]))
     if source.isNull():
         return source
+    if trim and source.hasAlphaChannel():
+        ink = QRegion(source.mask()).boundingRect()
+        if not ink.isEmpty():
+            source = source.copy(ink)
     bounds = QSize(min(source.width(), max(1, round(width * ratio))),
                    min(source.height(), max(1, round(height * ratio))))
     image = source.scaled(bounds, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -165,39 +172,110 @@ def platform_logo(platform, *, height=20):
     return _PlatformLogo(platform, height)
 
 
-class PlatformPanel(QGroupBox):
-    """Keep a platform mark beside its changing job title at every window width."""
+_PANEL_TITLES = {
+    "box": "Archive event files in cloud storage",
+    "box_check": "Compare local and archived file hashes",
+    "soundhub": "Compress and stage bird audio locally",
+    "wildlife_insights": "Upload camera deployments and photos",
+}
 
-    def __init__(self, platform, title):
+
+class PlatformPanel(QGroupBox):
+    """A fixed-purpose header, an always-visible summary, and optional progress details."""
+
+    def __init__(self, purpose):
         super().__init__()
-        self._platform_name = _PLATFORMS[platform][0]
+        self.platform = "box" if purpose == "box_check" else purpose
+        name = _PLATFORMS[self.platform][0]
         self.setProperty("role", "platformPanel")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.header = QFrame()
         self.header.setObjectName("platformHeader")
-        header = QHBoxLayout(self.header)
-        header.setContentsMargins(14, 5, 14, 5)
-        header.setSpacing(12)
-        height = {"box": 26, "soundhub": 60, "wildlife_insights": 33}[platform]
-        logo = platform_logo(platform, height=height)
-        logo.setMaximumWidth(170)
-        header.addWidget(logo, alignment=Qt.AlignVCenter)
-        self._heading = workspace_label("", "platformTitle", wrap=True)
-        header.addWidget(self._heading, 1)
+        header = QGridLayout(self.header)
+        header.setColumnStretch(1, 1)
+        self._stacked = False
+        header.setContentsMargins(14, 4, 14, 4)
+        header.setSpacing(10)
+        self.logo = QLabel()
+        self.logo.setProperty("role", "platformLogo")
+        self.logo.setAccessibleName(f"{name} logo")
+        self.logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.addWidget(self.logo, 0, 0, alignment=Qt.AlignVCenter | Qt.AlignLeft)
+        self._heading = workspace_label(_PANEL_TITLES[purpose], "platformTitle", wrap=True)
+        self._heading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        header.addWidget(self._heading, 0, 1)
+        self.disclosure = QToolButton()
+        self.disclosure.setObjectName("progressDisclosure")
+        self.disclosure.setCheckable(True)
+        header.addWidget(self.disclosure, 0, 2)
         layout.addWidget(self.header)
         self.body = QVBoxLayout()
         self.body.setContentsMargins(14, 10, 14, 12)
         layout.addLayout(self.body)
-        self.setTitle(title)
-
-    def setTitle(self, title):
-        self._heading.setText(title)
-        self.setAccessibleName(f"{self._platform_name} {title}")
+        self._detail_area = QWidget()
+        self.details = QVBoxLayout(self._detail_area)
+        self.details.setContentsMargins(14, 0, 14, 12)
+        layout.addWidget(self._detail_area)
+        self._set_expanded(False)
+        self.disclosure.toggled.connect(self._set_expanded)
+        self.setAccessibleName(f"{name} {self.title()}")
+        self._heading.installEventFilter(self)
 
     def title(self):
         return self._heading.text()
+
+    def _set_expanded(self, expanded):
+        self._detail_area.setVisible(expanded)
+        self.disclosure.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        verb = "Hide" if expanded else "Show"
+        label = f"{verb} {_PLATFORMS[self.platform][0]} progress details"
+        self.disclosure.setAccessibleName(label)
+        self.disclosure.setToolTip(label)
+
+    def _size_header(self):
+        # Size every band from the same set of titles so even wrapped headings align.
+        metrics = self._heading.fontMetrics()
+        scale = metrics.height() / 22
+        slot = min(round(136 * scale), 160, max(85, self.width() // 3))
+        logo_height = min(62, round(45 * scale))
+        self.logo.setFixedSize(slot, logo_height + 4)
+        ink_height = round(27 * scale) if self.platform == "box" else logo_height
+        self.logo.setPixmap(platform_pixmap(self.platform, width=slot - 8, height=ink_height,
+                                            ratio=self.devicePixelRatioF(), trim=True))
+        inner = max(1, self.width() - 30)
+        controls = self.disclosure.sizeHint()
+        beside = inner - 20 - slot - controls.width()
+        longest_word = max(metrics.horizontalAdvance(word) for title in _PANEL_TITLES.values() for word in title.split())
+        stacked = beside < longest_word
+        if stacked != self._stacked:
+            self._stacked = stacked
+            grid = self.header.layout()
+            grid.removeWidget(self._heading)
+            if stacked:
+                grid.addWidget(self._heading, 1, 0, 1, 3)
+            else:
+                grid.addWidget(self._heading, 0, 1)
+        text_width = inner if stacked else beside
+        tallest = max(metrics.boundingRect(QRect(0, 0, text_width, 4096), Qt.TextWordWrap, title).height()
+                      for title in _PANEL_TITLES.values())
+        marks = max(self.logo.height(), controls.height())
+        height = marks + 10 + tallest if stacked else max(marks, tallest)
+        self.header.setFixedHeight(height + 10)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._size_header()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._size_header()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.FontChange, QEvent.DevicePixelRatioChange):
+            self._size_header()
+        return super().eventFilter(obj, event)
 
 
 class PlatformMenu(QMenu):

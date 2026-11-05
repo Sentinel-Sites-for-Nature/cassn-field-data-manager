@@ -28,6 +28,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
         groups = [window.upload_group, window.hash_group, window.soundhub_group, window.wi_control.group]
         for group in groups:
             group.show()
+            group.disclosure.setChecked(True)
         wi = window.wi_control
         wi.jobs = {"sample": {"scopes": [{"deployment": "p1_ML", "images": 40}],
                               "rows": [{"deployment": "p1_ML", "stage": "uploading", "confirmed": 28}]}}
@@ -48,9 +49,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             for group in [window.review_splitter.widget(i) for i in range(2)] + groups:
                 if isinstance(group, PlatformPanel):
                     header = group.header.geometry()
-                    body = next(group.body.itemAt(i) for i in range(group.body.count())
-                                if not group.body.itemAt(i).isEmpty())
-                    assert 0 <= header.top() < header.bottom() < body.geometry().top()
+                    assert 0 <= header.top() < header.bottom() < group.body.geometry().top()
                     assert header.width() >= group.width() - 4
                     assert group._heading.geometry().height() >= group._heading.fontMetrics().height()
                     continue

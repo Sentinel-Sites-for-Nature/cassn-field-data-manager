@@ -48,6 +48,12 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         assert control.dismiss_button.isHidden()
         assert window.dismiss_box_btn.isHidden()
         assert window.dismiss_soundhub_btn.isHidden()
+        panels = [window.upload_group, window.hash_group, window.soundhub_group, control.group]
+        for panel in panels:
+            assert not panel.disclosure.isChecked()
+            assert panel.disclosure.arrowType() == Qt.RightArrow
+            panel.disclosure.click()
+            assert panel.disclosure.arrowType() == Qt.DownArrow
         window.show()
         page = window.tabs.widget(2)
         path = "raw_data/p3_ML/p3_ML_1/" + "CameraImage" * 20 + ".jpg"
@@ -68,20 +74,26 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             assert f"{count}.00 files/s" in window.upload_metrics_label.text()
             for label in (status, window.upload_metrics_label, window.hash_status_label):
                 assert label.height() >= label.heightForWidth(label.width())
+            assert len({p.header.height() for p in panels}) == 1
+            assert len({p.logo.x() for p in panels}) == 1
+            assert len({p._heading.x() for p in panels}) == 1
             for group, name, title in [
-                (window.upload_group, "Box", "Upload progress"),
-                (window.hash_group, "Box", "↔ Local hash verification progress"),
-                (window.soundhub_group, "Wildlife Sound Hub", "Staging process progress"),
-                (control.group, "Wildlife Insights", "Upload progress"),
+                (window.upload_group, "Box", "Archive event files in cloud storage"),
+                (window.hash_group, "Box", "Compare local and archived file hashes"),
+                (window.soundhub_group, "Wildlife Sound Hub", "Compress and stage bird audio locally"),
+                (control.group, "Wildlife Insights", "Upload camera deployments and photos"),
             ]:
                 assert not group.isHidden()
                 assert group.title() == title
                 assert group.accessibleName() == f"{name} {title}"
+                heading = group._heading
+                bounds = heading.fontMetrics().boundingRect(heading.rect(), Qt.TextWordWrap, title)
+                assert bounds.width() <= heading.width() and bounds.height() <= heading.height()
                 logos = [label for label in group.findChildren(QLabel) if label.property("role") == "platformLogo"]
                 assert [label.accessibleName() for label in logos] == [f"{name} logo"]
                 assert not logos[0].pixmap().isNull()
                 if name == "Wildlife Sound Hub":
-                    assert logos[0].pixmap().deviceIndependentSize().width() >= 130
+                    assert logos[0].pixmap().deviceIndependentSize().width() >= 90
             for index, value, text in [(0, 2100, "Uploading 2,100 of 8,150 photos"),
                                        (1, 3130, "Verifying 3,130 of 4,044 photos")]:
                 bar = control.bar_for_item(control.tree.topLevelItem(index))
@@ -169,6 +181,57 @@ def test_platform_menu_keeps_native_actions_and_accessible_logos(monkeypatch, zo
         window.upload_now_btn.setEnabled(True)
         QTest.mouseClick(menu, Qt.LeftButton, pos=logos[0].geometry().center())
         assert clicked == [True]
+    finally:
+        window.current_deployment_folder = None
+        window.close()
+        app.processEvents()
+
+
+def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatch, tmp_path):
+    from cassn.gui.event_progress import EventProgress
+    from cassn.box.publication import STATE_PATH
+    import json
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: setattr(self, "wi_upload_helper", ""))
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
+    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
+    monkeypatch.setattr(window, "_box_callback_is_current", lambda *_: True)
+    window.current_deployment_folder = tmp_path
+    window.file_inventory = [{"new_filename": name, "device_label": "p1_ML", "deployment_id": "d"}
+                             for name in ("old.jpg", "new.jpg")]
+    monkeypatch.setattr("cassn.box.upload_history.published_file_keys", lambda *_: {("d", "old.jpg")})
+    monkeypatch.setattr("cassn.gui.wizard.previously_uploaded", lambda *_: 1)
+    try:
+        state_path = tmp_path / STATE_PATH
+        state_path.parent.mkdir()
+        state = dict(status="needs_recovery", phase="initial", error="Legacy deployment mapping needs review for p1_ML",
+                     files={"event": {"status": "read"}})
+        state_path.write_text(json.dumps(state))
+        window._show_saved_box_result(False)
+        assert window.upload_progress_bar.text() == "1 of 2 files uploaded"
+        assert "Ready to continue" in window.upload_status_label.text()
+        assert "Legacy" not in window.upload_status_label.text()
+        assert window.dismiss_box_btn.isHidden()
+        state["error"] = "A Box file changed during publication"
+        state_path.write_text(json.dumps(state))
+        window._show_saved_box_result(False)
+        assert state["error"] in window.upload_status_label.text()
+
+        window._box_event_progress = EventProgress.box(tmp_path, window.file_inventory)
+        for action in ("skipped: raw_data/p1_ML/old.jpg", "uploaded: qc/notes.json", "failed: raw_data/p1_ML/new.jpg"):
+            window.on_upload_progress(1, 4, action)
+            assert window.upload_progress_bar.value() == 1
+        for _ in range(2):
+            window.on_upload_progress(3, 4, "uploaded: raw_data/p1_ML/new.jpg")
+            assert window.upload_progress_bar.value() == 2
+            assert not window.box_upload_complete
+
+        window._soundhub_event_progress = EventProgress(3, {"new.wav", "last.wav"})
+        for index, name, done in ((1, "old.wav", 1), (2, "new.wav", 1), (3, "last.wav", 2)):
+            window.on_soundhub_progress(index, 3, name)
+            assert window.soundhub_progress_bar.text() == f"{done} of 3 recordings prepared"
     finally:
         window.current_deployment_folder = None
         window.close()

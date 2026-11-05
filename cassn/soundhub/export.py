@@ -382,6 +382,7 @@ class EventStagingSummary:
     staged: int = 0
     expected: int = 0
     complete: bool = False
+    matched_paths: frozenset[str] = frozenset()
 
 
 def event_staging_summary(event_folder, staging_root) -> EventStagingSummary:
@@ -401,18 +402,18 @@ def event_staging_summary(event_folder, staging_root) -> EventStagingSummary:
     staged_deployments = [r for r in _read_csv(root / DEPLOYMENT_CSV) if r["deployment_id"] in ids]
     by_path = {r["path"]: r for r in staged}
     matching_ids = {r["deployment_id"] for r in event_deployments if r in staged_deployments}
-    ready = 0
+    matched = set()
     for row in expected:
         media = root / row["path"]
         if (row["deployment_id"] in matching_ids and row == by_path.get(row["path"])
                 and media.is_file() and media.stat().st_size > 0):
-            ready += 1
-    complete = (ready == len(expected)
+            matched.add(row["path"])
+    complete = (len(matched) == len(expected)
                 and sorted(staged, key=lambda r: r["path"]) == sorted(expected, key=lambda r: r["path"])
                 and {r["deployment_id"] for r in event_deployments} == ids
                 and sorted(staged_deployments, key=lambda r: r["deployment_id"]) ==
                 sorted(event_deployments, key=lambda r: r["deployment_id"]))
-    return EventStagingSummary(ready, len(expected), complete)
+    return EventStagingSummary(len(matched), len(expected), complete, frozenset(matched))
 
 
 def event_audio_is_staged(event_folder, staging_root) -> bool:

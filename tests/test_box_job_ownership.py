@@ -185,7 +185,7 @@ def test_automatic_pipeline_keeps_lock_until_final_verification(setup):
     assert context._box_operation_active
     verify = context.box_verify_thread
     assert verify.started
-    context.upload_group.setTitle.assert_called_with("Upload verification")
+    context.upload_progress_bar.setFormat.assert_called_with("Verifying · %p%")
     context.hash_group.show.assert_not_called()
     context.dismiss_box_btn.hide.assert_called()
     verify.result.emit(True, 'listed', [])

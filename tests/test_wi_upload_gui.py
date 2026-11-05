@@ -186,9 +186,9 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     wait_for(lambda: ctrl.process is None)
     assert "upload verified" in ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format()
     assert ctrl.verified_summary.text() == "2 cameras verified · 4 photos"
-    assert ctrl.tree.isHidden()
-    ctrl.show_verified.click()
-    assert not ctrl.tree.isHidden()
+    assert not ctrl.group.disclosure.isChecked()
+    ctrl.group.disclosure.click()
+    assert ctrl.tree.isVisibleTo(ctrl.group)
     assert inspect_deployment_for_cleanup(folder, tmp_path, None, "", force=True).clearable
     again.wi_control.preview()
     assert "No new" in ctrl.notice.text()
@@ -405,3 +405,118 @@ def test_dismiss_only_verified_wi_panel_and_restore(work, tmp_path):
     reopened.validate_and_next()
     assert not reopened.wi_control.group.isHidden()
     assert not reopened.wi_control.dismiss_button.isHidden()
+
+
+def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, tmp_path):
+    from cassn.core.wi_requests import save_requests, scope_key
+    from cassn.gui.workspace import UploadProgressBar
+
+    first = work()
+    prepare(first)
+    folder = first.current_deployment_folder
+    # Leave the two completed inventory cameras available for their first request.
+    scopes, rows = [], []
+    for number, stage in enumerate(("verified", "verified", "held", "verifying"), 1):
+        scope = dict(deployment=f"saved-camera-{number}", images=2, selection_sha256=str(number)*64)
+        scopes.append(scope)
+        row = dict(deployment=scope["deployment"], selection_sha256=scope["selection_sha256"],
+                   stage=stage, confirmed=0 if stage == "held" else 2)
+        if stage != "held":
+            row["manifest_sha256"] = "a"*64
+        if stage == "verified":
+            row["integrity"] = dict(kind="integrity_verified_image_batch", image_count=2,
+                                    manifest_sha256="a"*64, receipt_sha256="b"*64)
+        if number == 1:
+            row["integrity"]["project_id"] = 2010527
+        if stage == "held":
+            row["hold_reason"] = "Missing camera"
+        rows.append(row)
+    jobs = {scope_key(folder.name, scopes): {"scopes": scopes, "rows": rows}}
+    save_requests(folder, jobs)
+    saved = (folder / STATE_FILE).read_bytes()
+    first.current_deployment_folder = None
+    first.close()
+
+    opened = work()
+    opened.validate_and_next()
+    opened.tabs.setCurrentIndex(2)
+    opened.show()
+    ctrl = opened.wi_control
+    ctrl.timer.stop()
+    ctrl.refresh_new_cameras()
+    assert not ctrl.group.disclosure.isChecked()
+    assert ctrl.verified_summary.text() == "2 cameras verified · 4 photos"
+    assert "1 camera held for review" in ctrl.active_summary.text()
+    assert "1 camera with unknown status" in ctrl.active_summary.text()
+    assert ctrl.new_cameras.text() == "2 new cameras in staging · 4 photos"
+    assert ctrl.dismiss_button.isHidden()
+    ctrl.group.disclosure.click()
+    assert ctrl.tree.topLevelItemCount() == 6
+    all_rows = [ctrl.tree.topLevelItem(i) for i in range(6)]
+    labels = {}
+    for item in all_rows:
+        cell = ctrl.tree.itemWidget(item, 1)
+        labels[item.text(0)] = [label.text() for label in cell.findChildren(QLabel)]
+        assert cell.findChild(UploadProgressBar)
+    assert "Verified project: UCNRS Mammal" in labels["saved-camera-1"]
+    assert "WI project unavailable" in labels["saved-camera-2"]
+    assert "Exported destination: UCNRS Small Animal" in labels["full-deployment-p1_SA"]
+    for width, zoom in ((1280, 100), (940, 130), (940, 200)):
+        opened.workspace.set_zoom(zoom)
+        opened.resize(width, 740)
+        for _ in range(3):
+            QApplication.processEvents()
+        assert ctrl.tree.verticalScrollBar().maximum() == 0
+        assert ctrl.tree.viewport().rect().contains(ctrl.tree.visualItemRect(all_rows[-1]))
+    assert (folder / STATE_FILE).read_bytes() == saved
+    assert not (tmp_path / "calls").exists()
+
+
+def test_missing_counter_and_unreadable_export_preserve_status(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    folder = window.current_deployment_folder
+    (tmp_path / "stage").write_text("uploading")
+    start(ctrl, QDialogButtonBox.Ok)
+    key, = ctrl.jobs
+    (folder / "WI_metadata" / "wildlife_insights_ML_deployments.csv").write_bytes(b"\xff\xff")
+    rows = [dict(row, stage="verifying") for row in ctrl.jobs[key]["rows"]]
+    ctrl.accept_status(key, {"rows": rows})
+    ctrl.timer.stop()
+    for index in range(ctrl.tree.topLevelItemCount()):
+        item = ctrl.tree.topLevelItem(index)
+        assert "count unavailable" in ctrl.bar_for_item(item).text()
+        labels = [label.text() for label in ctrl.tree.itemWidget(item, 1).findChildren(QLabel)]
+        project = "WI project unavailable" if item.text(0).endswith("ML") else "Exported destination: UCNRS Small Animal"
+        assert project in labels
+    assert all("verified_count" not in row for row in read_requests(folder)[key]["rows"])
+    assert ctrl.dismiss_button.isHidden()
+
+
+def test_only_staged_cameras_render_without_creating_requests(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    ctrl.refresh_new_cameras()
+    assert not ctrl.group.isHidden() and not ctrl.group.disclosure.isChecked()
+    assert ctrl.tree.topLevelItemCount() == 2
+    assert ctrl.new_cameras.text() == "2 new cameras in staging · 4 photos"
+    assert ctrl.verified_summary.isHidden() and ctrl.dismiss_button.isHidden()
+    assert not ctrl.timer.isActive()
+    assert not (ctrl.folder / STATE_FILE).exists()
+    assert not (tmp_path / "calls").exists()
+
+
+def test_verified_without_a_receipt_cannot_be_dismissed(work):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    scopes = [dict(deployment="full-deployment-p1_" + code, images=2, selection_sha256="a"*64)
+              for code in ("ML", "SA")]
+    ctrl.jobs = {"invalid": dict(scopes=scopes, rows=[dict(scope, stage="verified", confirmed=2,
+                                                           manifest_sha256="b"*64) for scope in scopes])}
+    ctrl.render()
+    assert ctrl.verified_summary.isHidden()
+    assert ctrl.active_summary.text() == "2 cameras with unknown status"
+    assert not ctrl.can_dismiss()

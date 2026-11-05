@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from cassn.gui.workspace import UploadProgressBar
 
 from cassn.gui.appearance import PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
+from cassn.config import QC_SUBFOLDER
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
     all_requests_verified, checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
@@ -49,20 +50,23 @@ from cassn.core.wi_requests import (
 PROJECT_NAMES = {"2010517": "UCNRS Small Animal", "2010527": "UCNRS Mammal"}
 
 
-def _exported_projects(folder):
-    """Read the small deployment exports used by the uploader's preview."""
+def _exported_projects(folder, *, display_only=False):
+    """Read project IDs from complete local export files; duplicate names are ambiguous."""
     projects = {}
     for device in ("ML", "SA"):
         path = folder / "WI_metadata" / f"wildlife_insights_{device}_deployments.csv"
         try:
             with path.open(encoding="utf-8-sig", newline="") as stream:
-                for row in csv.DictReader(stream):
-                    name = row["deployment_id"]
-                    projects[name] = row["project_id"] if name not in projects else None
+                entries = [(row["deployment_id"], row["project_id"]) for row in csv.DictReader(stream)]
         except FileNotFoundError:
             continue
+        except (OSError, ValueError, KeyError, csv.Error):
+            if display_only:
+                continue
+            raise
+        for name, project in entries:
+            projects[name] = project if name not in projects else None
     return projects
-
 
 class WildlifeInsightsControl(QObject):
     def __init__(self, window, helper, layout):
@@ -79,20 +83,13 @@ class WildlifeInsightsControl(QObject):
         self.panel_error = False
         self.next_job = 0
         self.read_error = False
-        self.group = PlatformPanel("wildlife_insights", "Upload progress")
+        self._unproven_verified = False
+        self.group = PlatformPanel("wildlife_insights")
         box = self.group.body
-        self.verified_line = QWidget()
-        line = QHBoxLayout(self.verified_line)
-        line.setContentsMargins(0, 0, 0, 0)
         self.verified_summary = workspace_label("", "contextTitle", wrap=True)
-        line.addWidget(self.verified_summary, 1)
-        self.show_verified = QPushButton("Details")
-        self.show_verified.setAccessibleName("Show verified camera details")
-        self.show_verified.setCheckable(True)
-        self.show_verified.clicked.connect(self.render)
-        line.addWidget(self.show_verified)
-        self.verified_line.hide()
-        box.addWidget(self.verified_line)
+        box.addWidget(self.verified_summary)
+        self.active_summary = workspace_label("", "contextTitle", wrap=True)
+        box.addWidget(self.active_summary)
         self.new_cameras = workspace_label("", "muted", wrap=True)
         self.new_cameras.hide()
         box.addWidget(self.new_cameras)
@@ -105,10 +102,12 @@ class WildlifeInsightsControl(QObject):
         self._tree_viewport = self.tree.viewport()
         self._tree_viewport.installEventFilter(self)
         self.tree.header().sectionResized.connect(self._fit_progress_column)
-        box.addWidget(self.tree)
+        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.group.details.addWidget(self.tree)
         self.notice = QLabel()
         self.notice.setTextFormat(Qt.PlainText)
         self.notice.setWordWrap(True)
+        self.notice.hide()
         box.addWidget(self.notice)
         self.dismissed = None
         self.dismiss_button = QPushButton("Dismiss")
@@ -130,7 +129,7 @@ class WildlifeInsightsControl(QObject):
         folder = self.window.current_deployment_folder
         if folder != self.folder:
             self.folder = folder
-            self.show_verified.setChecked(False)
+            self.group.disclosure.setChecked(False)
             self.dismissed = None
             self.jobs = {}
             self.read_error = False
@@ -150,82 +149,133 @@ class WildlifeInsightsControl(QObject):
 
     def render(self):
         self.tree.clear()
+        self.notice.setVisible(bool(self.notice.text()))
         verified = {}
+        states = Counter()
         sources = replacement_sources(self.jobs)
+        new, eligibility_error = self._new_selections()
+        projects = _exported_projects(self.folder, display_only=True) if self.folder else {}
+        self._unproven_verified = False
         for key, job in self.jobs.items():
             rows = {r["deployment"]: r for r in job.get("rows", [])}
             for scope in job["scopes"]:
-                name, total = scope["deployment"], scope["images"]
+                name = scope["deployment"]
                 row = rows.get(name, {})
                 if superseded(scope, row, sources):
                     continue
                 stage = row.get("stage", "unknown")
-                count = row.get("confirmed", 0)
-                if stage == "verifying":
-                    # A transfer count is not a verification count.
-                    value = row.get("verified_count", 0)
-                    count = min(total, max(0, value)) if type(value) is int else 0
                 if key in self.unavailable and stage not in {"verified", "held"}:
                     stage = "unknown"
-                item = QTreeWidgetItem(self.tree, [name])
                 if stage == "verified":
-                    verified[name] = total
-                    item.setHidden(not self.show_verified.isChecked())
-                item.setToolTip(0, name)
-                labels = {
-                    "queued": "Queued", "waiting_retry": "Waiting to retry",
-                    "cleaning": "Finishing checks", "held": "Needs review",
-                    "transferred_or_waiting": "Waiting for verification",
-                    "unknown": "Status unknown", "verifying": f"Verifying {count:,} of {total:,} photos",
-                    "verified": f"WI upload verified · {total:,} photos",
-                    "uploading": f"Uploading {count:,} of {total:,} photos",
-                }
-                cell = QWidget()
-                cell.setAutoFillBackground(True)
-                cell.setBackgroundRole(self.tree.viewport().backgroundRole())
-                lines = QVBoxLayout(cell)
-                lines.setContentsMargins(0, 0, 0, 0)
-                lines.setSpacing(2)
-                name_label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
-                name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-                lines.addWidget(name_label)
-                if stage == "held":
-                    reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
-                    label = "Last known hold" if key in self.unavailable else "Needs review"
-                    missing = re.fullmatch(r"Added deployment held: expected one exact camera ([A-Za-z0-9_-]+); found 0", reason)
-                    if missing:
-                        item.setText(1, f"{label} · Camera {missing[1]} was missing in WI at the last attempt.")
+                    # Only an exact, checked integrity receipt establishes completion.
+                    try:
+                        checked_status([scope], [row])
+                    except ValueError:
+                        self._unproven_verified = True
+                        stage = "unknown"
                     else:
-                        item.setText(1, f"{label} · {reason}")
-                    item.setToolTip(1, reason)
-                    lines.addWidget(workspace_label(item.text(1), "muted", wrap=True))
-                else:
-                    bar = UploadProgressBar()
-                    bar.setRange(0, total)
-                    bar.setValue(count)
-                    bar.setFormat(labels[stage])
-                    bar.setAccessibleName(labels[stage])
-                    bar.setProperty("wrapProgressText", True)
-                    lines.addWidget(bar)
-                self.tree.setItemWidget(item, 1, cell)
-        self.verified_line.setVisible(bool(verified))
+                        verified[name] = scope["images"]
+                if stage != "verified":
+                    states[stage] += 1
+                self._add_camera(scope, row, stage, key in self.unavailable, projects.get(name))
+        for name, photos in new.items():
+            self._add_camera({"deployment": name, "images": photos}, {}, "staged", False, projects.get(name))
+
+        self.verified_summary.setVisible(bool(verified))
         cameras = "camera" if len(verified) == 1 else "cameras"
         self.verified_summary.setText(f"{len(verified)} {cameras} verified · {sum(verified.values()):,} photos")
-        self.refresh_new_cameras()
-        self.show_verified.setText("Hide" if self.show_verified.isChecked() else "Details")
-        self.show_verified.setAccessibleName("Hide verified camera details" if self.show_verified.isChecked()
-                                            else "Show verified camera details")
-        self.tree.setVisible(any(not self.tree.topLevelItem(i).isHidden() for i in range(self.tree.topLevelItemCount())))
+        descriptions = {"held": "held for review", "unknown": "with unknown status", "uploading": "uploading",
+                        "verifying": "verifying", "queued": "queued", "waiting_retry": "waiting to retry",
+                        "cleaning": "finishing checks", "transferred_or_waiting": "waiting for verification"}
+        summary = []
+        for stage, count in states.items():
+            noun = "camera" if count == 1 else "cameras"
+            summary.append(f"{count} {noun} {descriptions[stage]}")
+        self.active_summary.setText(" · ".join(summary))
+        self.active_summary.setVisible(bool(summary))
+        self.new_cameras.setVisible(bool(new or eligibility_error))
+        if eligibility_error:
+            self.new_cameras.setText(f"Cannot check newly staged cameras. {eligibility_error}")
+        if new:
+            cameras = "camera" if len(new) == 1 else "cameras"
+            total = sum(new.values())
+            unit = "photo" if total == 1 else "photos"
+            self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {total:,} {unit}")
+        self.tree.setVisible(bool(self.tree.topLevelItemCount()))
         self._fit_progress_column()
         finished = self.can_dismiss()
         if not finished:
             self.dismissed = None
         self.dismiss_button.setVisible(finished)
-        self.group.setVisible(bool(self.jobs or self.notice.text()) and self.dismissed != frozenset(self.jobs))
+        self.group.setVisible(bool(self.jobs or new or eligibility_error or self.notice.text()) and self.dismissed != frozenset(self.jobs))
         if any(not complete(j, sources) for j in self.jobs.values()):
             self.timer.start()
         else:
             self.timer.stop()
+
+    def _add_camera(self, scope, row, stage, unavailable, exported_project):
+        name, total = scope["deployment"], scope["images"]
+        confirmed = row.get("confirmed", 0)
+        count = confirmed
+        labels = {"queued": "Queued", "waiting_retry": "Waiting to retry", "cleaning": "Finishing checks",
+                  "transferred_or_waiting": "Waiting for verification", "unknown": "Status unknown",
+                  "verified": f"WI upload verified · {total:,} photos", "staged": f"Ready to upload · {total:,} photos",
+                  "uploading": f"Uploading {confirmed:,} of {total:,} photos"}
+        item = QTreeWidgetItem(self.tree, [name])
+        item.setToolTip(0, name)
+        if stage == "verifying":
+            value = row.get("verified_count")
+            count = min(total, max(0, value)) if type(value) is int else 0
+            label = (f"Verifying {count:,} of {total:,} photos" if type(value) is int
+                     else "Verifying photos · count unavailable")
+        elif stage == "held":
+            reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
+            status = "Last known hold" if unavailable else "Needs review"
+            missing = re.fullmatch(r"Added deployment held: expected one exact camera ([A-Za-z0-9_-]+); found 0", reason)
+            label = (f"{status} · Camera {missing[1]} was missing in WI at the last attempt."
+                     if missing else f"{status} · {reason}")
+            item.setText(1, label)
+            item.setToolTip(1, reason)
+        else:
+            label = labels[stage]
+            if stage == "unknown":
+                count = 0
+
+        cell = QWidget()
+        cell.setAutoFillBackground(True)
+        cell.setBackgroundRole(self.tree.viewport().backgroundRole())
+        lines = QVBoxLayout(cell)
+        lines.setContentsMargins(0, 0, 0, 0)
+        lines.setSpacing(2)
+        name_label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lines.addWidget(name_label)
+        project = self._project_label(scope, row, stage, exported_project)
+        project_label = workspace_label(project, "muted", wrap=True)
+        project_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lines.addWidget(project_label)
+        bar = UploadProgressBar()
+        bar.setRange(0, total)
+        bar.setValue(count)
+        bar.setFormat(label)
+        bar.setAccessibleName(label)
+        bar.setProperty("wrapProgressText", True)
+        lines.addWidget(bar)
+        self.tree.setItemWidget(item, 1, cell)
+
+    @staticmethod
+    def _project_label(scope, row, stage, exported_project):
+        candidates = []
+        if stage == "verified":
+            candidates.append(("Verified project", row["integrity"].get("project_id")))
+        candidates.extend((("Recorded project", row.get("project_id")),
+                           ("Requested project", scope.get("project_id")),
+                           ("Exported destination", exported_project)))
+        for source, value in candidates:
+            if type(value) in {str, int} and str(value).strip():
+                value = str(value).strip()
+                return f"{source}: {PROJECT_NAMES.get(value, value)}"
+        return "WI project unavailable"
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Resize and obj is self._tree_viewport and not self.closed:
@@ -237,24 +287,23 @@ class WildlifeInsightsControl(QObject):
         return cell.findChild(UploadProgressBar) if cell else None
 
     def refresh_new_cameras(self):
-        self.new_cameras.hide()
-        if not self.jobs or not self.folder or self.read_error:
-            return
+        self.render()
+
+    def _new_selections(self):
+        if not self.folder or self.read_error:
+            return {}, ""
         try:
-            available = self.selection()
-        except (OSError, ValueError):
-            return
+            if not self.folder.is_dir() or not self.window.metadata.get("deployment_event_id"):
+                return {}, ""
+            # The standard hold check creates the qc folder. Reading the panel
+            # must not create it for an event that has never had a report.
+            if (self.folder / QC_SUBFOLDER).is_dir():
+                require_no_ingest_holds(self.folder)
+            available = self._selected_counts()
+        except (OSError, ValueError) as exc:
+            return {}, str(exc)
         requested = {s["deployment"] for job in self.jobs.values() for s in job["scopes"]}
-        new = available.keys() - requested
-        if new:
-            cameras = "camera" if len(new) == 1 else "cameras"
-            photos = sum(available[name] for name in new)
-            unit = "photo" if photos == 1 else "photos"
-            self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {photos:,} {unit}")
-            self.new_cameras.show()
-            self.dismissed = None
-            self.dismiss_button.hide()
-            self.group.show()
+        return {name: photos for name, photos in available.items() if name not in requested}, ""
 
     def _fit_progress_column(self):
         """Stack names above bars when both columns cannot fit at the current zoom."""
@@ -286,17 +335,17 @@ class WildlifeInsightsControl(QObject):
                     continue
                 name = cell.layout().itemAt(0).widget()
                 name.setVisible(compact)
-                content = cell.layout().itemAt(1).widget()
-                text = content.format() if isinstance(content, UploadProgressBar) else content.text()
-                content_height = text_height(content, text)
-                if isinstance(content, UploadProgressBar) and content.minimumHeight() != content_height:
+                project = cell.layout().itemAt(1).widget()
+                content = cell.layout().itemAt(2).widget()
+                content_height = text_height(content, content.format())
+                if content.minimumHeight() != content_height:
                     content.setStyleSheet(f"min-height: {content_height}px; max-height: {content_height}px;")
-                row_height = content_height + 17  # Tree cell padding and bottom rule.
+                row_height = content_height + text_height(project, project.text()) + 19  # Tree cell padding and bottom rule.
                 if compact:
                     row_height += max(name.heightForWidth(text_width), text_height(name, name.text())) + 2
                 item.setSizeHint(1, QSize(0, row_height))
             self.tree.doItemsLayout()
-            visible_height = sum(self.tree.visualItemRect(item).height() for item in items[:3])
+            visible_height = sum(self.tree.visualItemRect(item).height() for item in items)
             self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + visible_height)
         finally:
             self._fitting_columns = False
@@ -305,12 +354,13 @@ class WildlifeInsightsControl(QObject):
         self.dismissed = None
         self.panel_error = error
         self.notice.setText(text)
+        self.notice.setVisible(bool(text))
         self.dismiss_button.setVisible(self.can_dismiss())
         self.group.show()
 
     def can_dismiss(self):
         return bool(self.jobs and self.new_cameras.isHidden() and not self.read_error
-                    and not self.panel_error and all_requests_verified(self.jobs))
+                    and not self.panel_error and not self._unproven_verified and all_requests_verified(self.jobs))
 
     def dismiss(self):
         if self.can_dismiss():
@@ -412,6 +462,9 @@ class WildlifeInsightsControl(QObject):
 
     def selection(self):
         require_no_ingest_holds(self.folder)
+        return self._selected_counts()
+
+    def _selected_counts(self):
         if self.window.metadata.get("deployment_event_id") != self.folder.name:
             raise ValueError("The selected event does not match the local staging folder.")
         labels = set()
@@ -602,8 +655,11 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
             if row["stage"] == "verifying":
                 values = (old.get("verified_count"), row.get("verified_count"))
-                floor = max((value for value in values if type(value) is int and value >= 0), default=0)
-                row["verified_count"] = min(totals[row["deployment"]], floor)
+                known = [value for value in values if type(value) is int and value >= 0]
+                if known:
+                    row["verified_count"] = min(totals[row["deployment"]], max(known))
+                else:
+                    row.pop("verified_count", None)
             if old.get("stage") == "verified" and (
                     row["stage"] != "verified" or old.get("integrity") != row.get("integrity")):
                 raise ValueError("The saved verification receipt changed.")
