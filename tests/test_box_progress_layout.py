@@ -68,11 +68,15 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             assert f"{count}.00 files/s" in window.upload_metrics_label.text()
             for label in (status, window.upload_metrics_label, window.hash_status_label):
                 assert label.height() >= label.heightForWidth(label.width())
-            for group, name in [
-                (window.upload_group, "Box"), (window.hash_group, "Box"),
-                (window.soundhub_group, "Wildlife Sound Hub"), (control.group, "Wildlife Insights"),
+            for group, name, title in [
+                (window.upload_group, "Box", "Upload progress"),
+                (window.hash_group, "Box", "↔ Local hash verification progress"),
+                (window.soundhub_group, "Wildlife Sound Hub", "Staging process progress"),
+                (control.group, "Wildlife Insights", "Upload progress"),
             ]:
                 assert not group.isHidden()
+                assert group.title() == title
+                assert group.accessibleName() == f"{name} {title}"
                 logos = [label for label in group.findChildren(QLabel) if label.property("role") == "platformLogo"]
                 assert [label.accessibleName() for label in logos] == [f"{name} logo"]
                 assert not logos[0].pixmap().isNull()

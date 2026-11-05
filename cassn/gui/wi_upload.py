@@ -79,7 +79,7 @@ class WildlifeInsightsControl(QObject):
         self.panel_error = False
         self.next_job = 0
         self.read_error = False
-        self.group = PlatformPanel("wildlife_insights", "Wildlife Insights")
+        self.group = PlatformPanel("wildlife_insights", "Upload progress")
         box = self.group.body
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Deployment", "Progress"])

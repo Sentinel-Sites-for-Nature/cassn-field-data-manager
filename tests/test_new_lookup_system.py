@@ -747,7 +747,7 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
         window.activity_log_toggle.setChecked(False)
         assert window.activity_log_group.isHidden()
 
-        assert window.upload_group.title() == "Box Upload Progress"
+        assert window.upload_group.title() == "Upload progress"
         window.upload_progress_bar.hide()
         window._on_wi_split_progress(1, 4, "camera folder")
         assert window.upload_progress_bar.isHidden()

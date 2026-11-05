@@ -1281,7 +1281,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(scroll.progress_heading)
 
         # Box upload progress (hidden by default)
-        self.upload_group = PlatformPanel("box", "Box Upload Progress")
+        self.upload_group = PlatformPanel("box", "Upload progress")
         upload_layout = self.upload_group.body
 
         self.upload_progress_bar = UploadProgressBar()
@@ -1317,7 +1317,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(self.upload_group)
 
         # Box verification progress (hidden by default)
-        self.hash_group = PlatformPanel("box", "Box Verification Progress")
+        self.hash_group = PlatformPanel("box", "↔ Local hash verification progress")
         hash_layout = self.hash_group.body
 
         self.hash_progress_bar = QProgressBar()
@@ -1332,7 +1332,7 @@ class FieldDataWizard(QMainWindow):
         layout.addWidget(self.hash_group)
 
         # SoundHub progress (hidden by default)
-        self.soundhub_group = PlatformPanel("soundhub", "SoundHub staging progress")
+        self.soundhub_group = PlatformPanel("soundhub", "Staging process progress")
         soundhub_layout = self.soundhub_group.body
 
         self.soundhub_progress_bar = QProgressBar()
@@ -3502,7 +3502,7 @@ class FieldDataWizard(QMainWindow):
 
     def _show_saved_box_result(self, verified):
         self.box_upload_complete = verified
-        self.upload_group.setTitle("Box Upload Complete" if verified else "Box Upload Needs Review")
+        self.upload_group.setTitle("Upload complete" if verified else "Upload needs review")
         self.upload_group.show()
         self.upload_metrics_label.clear()
         self.cancel_upload_btn.hide()
@@ -3665,7 +3665,7 @@ class FieldDataWizard(QMainWindow):
         self.dismiss_box_btn.hide()
         self.hash_group.hide()
         self.upload_metrics_label.clear()
-        self.upload_group.setTitle("Box Upload Progress")
+        self.upload_group.setTitle("Upload progress")
         self.upload_group.show()
         self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
@@ -3870,7 +3870,7 @@ class FieldDataWizard(QMainWindow):
         self.cancel_upload_btn.hide()
 
         if success:
-            self.upload_group.setTitle("Box Metadata Publication")
+            self.upload_group.setTitle("Metadata publication")
             self.upload_metrics_label.clear()
             self.upload_progress_bar.setRange(0, 0)
             self.upload_status_label.setText("Media transfer complete. Publishing event metadata before verification…")
@@ -3981,7 +3981,7 @@ class FieldDataWizard(QMainWindow):
 
         self._post_upload_box_summary = ""
         self._post_upload_box_issues = []
-        self.upload_group.setTitle("Box Upload Verification")
+        self.upload_group.setTitle("Upload verification")
         self.upload_group.show()
         self.dismiss_box_btn.hide()
         self.cancel_upload_btn.hide()
@@ -4324,7 +4324,7 @@ class FieldDataWizard(QMainWindow):
 
         FieldDataWizard._set_box_controls_busy(self, True)
         self.fixity_btn.setText("Checking…")
-        self.hash_group.setTitle("Box ↔ Local Hash Verification Progress")
+        self.hash_group.setTitle("↔ Local hash verification progress")
         self.hash_group.show()
         self.hash_progress_bar.setValue(0)
         self.hash_status_label.setStyleSheet("")
@@ -4590,7 +4590,7 @@ class FieldDataWizard(QMainWindow):
             self._soundhub_dismissed = None
             self.soundhub_group.show()
             operation = result.get("operation", "staging")
-            self.soundhub_group.setTitle(f"SoundHub {operation} progress")
+            self.soundhub_group.setTitle("Staging process progress" if operation == "staging" else "Upload progress")
             self.soundhub_progress_bar.setValue(0)
             self.soundhub_status_label.setText(result.get("message") or "Review the unfinished SoundHub operation.")
             self.soundhub_status_label.setStyleSheet("color: red;" if result["state"] == "failed" else "color: orange;")
@@ -4603,7 +4603,7 @@ class FieldDataWizard(QMainWindow):
             completed, total = counts
             self.soundhub_stage_btn.setText("Continue SoundHub Staging…")
             self.soundhub_group.show()
-            self.soundhub_group.setTitle("SoundHub staging progress")
+            self.soundhub_group.setTitle("Staging process progress")
             self.soundhub_status_label.setStyleSheet("")
             self.soundhub_progress_bar.setValue(round(100 * completed / max(total, 1)))
             self.soundhub_status_label.setText(
@@ -4616,7 +4616,7 @@ class FieldDataWizard(QMainWindow):
                     and result.get("generation") == generation)
         if staged or uploaded:
             operation = "upload" if uploaded else "staging"
-            self.soundhub_group.setTitle(f"SoundHub {operation} progress")
+            self.soundhub_group.setTitle("Staging process progress" if operation == "staging" else "Upload progress")
             self.soundhub_status_label.setStyleSheet("color: green;")
             self.soundhub_status_label.setText(result["message"] if uploaded else "Bird audio staging is complete.")
             self.soundhub_progress_bar.setValue(100)
@@ -4707,7 +4707,7 @@ class FieldDataWizard(QMainWindow):
         self._record_soundhub_result("staging", "interrupted", "Staging started and has no completion result. Continue staging.")
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
-        self.soundhub_group.setTitle("SoundHub staging progress")
+        self.soundhub_group.setTitle("Staging process progress")
         self.soundhub_status_label.setText("Checking existing SoundHub batch…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
@@ -4784,7 +4784,7 @@ class FieldDataWizard(QMainWindow):
         self._record_soundhub_result("upload", "interrupted", "SoundHub upload started and has no completion result. Check its status.")
         self.soundhub_progress_bar.setValue(0)
         self.soundhub_status_label.setStyleSheet("")
-        self.soundhub_group.setTitle("SoundHub upload progress")
+        self.soundhub_group.setTitle("Upload progress")
         self.soundhub_status_label.setText("Uploading to SoundHub…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)

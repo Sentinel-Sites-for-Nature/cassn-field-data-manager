@@ -167,6 +167,7 @@ class PlatformPanel(QGroupBox):
 
     def __init__(self, platform, title):
         super().__init__()
+        self._platform_name = _PLATFORMS[platform][0]
         self.setProperty("role", "platformPanel")
         self.body = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -178,7 +179,7 @@ class PlatformPanel(QGroupBox):
 
     def setTitle(self, title):
         self._heading.setText(title)
-        self.setAccessibleName(title)
+        self.setAccessibleName(f"{self._platform_name} {title}")
 
     def title(self):
         return self._heading.text()
