@@ -63,6 +63,9 @@ def checked_status(scopes, rows):
         if "retry_of" in row and (row["stage"] != "held" or manifest or row["confirmed"] or
                                    not row.get("request_sha") or row["retry_of"] != row["request_sha"]):
             raise ValueError("Retry reference differs from the held request.")
+        if "delivery_pending" in row and (row["delivery_pending"] is not True or row["stage"] != "held"
+                                          or manifest or row["confirmed"] or "retry_of" in row):
+            raise ValueError("Invalid partial request delivery status.")
         if manifest is not None or row["confirmed"] > 0 or row["stage"] == "verified":
             if not isinstance(manifest, str) or not re.fullmatch(r"[a-f0-9]{64}", manifest):
                 raise ValueError("Missing admitted Wildlife Insights manifest.")

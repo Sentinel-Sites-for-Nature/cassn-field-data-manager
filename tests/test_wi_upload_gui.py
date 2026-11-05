@@ -46,6 +46,10 @@ else:
                      retry_of=sha,stage='held',confirmed=0,hold_reason='Expected one exact camera; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
+        if stage=='delivery':
+            row=dict(deployment=s['deployment'],selection_sha256=s['selection_sha256'],stage='held',
+                     confirmed=0,delivery_pending=True,hold_reason='Delivery is incomplete.')
+        row.setdefault('request_sha', hashlib.sha256((req['request_id']+s['deployment']).encode()).hexdigest())
         rows.append(row)
     out['rows']=rows
 print(json.dumps(out))
@@ -338,3 +342,20 @@ def test_partial_retry_cannot_clear_another_held_deployment(tmp_path):
     save_requests(tmp_path, jobs)
     with pytest.raises(ValueError, match="Retain"):
         require_wi_complete(tmp_path)
+
+
+def test_interrupted_inbox_delivery_replays_saved_identity(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / "stage").write_text("delivery")
+    start(ctrl, QDialogButtonBox.Ok)
+    key, = ctrl.jobs
+    assert ctrl.held_button.isHidden()
+    assert ctrl.retry_key == key
+    assert ctrl.retry_button.text() == "Finish delivering the saved request"
+    (tmp_path / "stage").write_text("verified")
+    ctrl.retry_button.click()
+    wait_for(lambda: ctrl.process is None)
+    assert list(ctrl.jobs) == [key] and ctrl.retry_key is None
+    assert all(r["stage"] == "verified" for r in ctrl.jobs[key]["rows"])

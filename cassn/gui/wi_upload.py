@@ -435,7 +435,11 @@ class WildlifeInsightsControl(QObject):
             self.jobs = jobs
         self.unavailable.discard(key)
         self.notice.clear()
-        if self.retry_key == key:
+        if any(row.get("delivery_pending") for row in rows):
+            self.retry_key = key
+            self.retry_button.setText("Finish delivering the saved request")
+            self.retry_button.show()
+        elif self.retry_key == key:
             self.retry_key = None
             self.retry_button.hide()
         self.render()
@@ -456,6 +460,7 @@ class WildlifeInsightsControl(QObject):
                 self.unavailable.add(key)
                 self.render()
                 self.retry_key = key
+                self.retry_button.setText("Retry the saved request")
                 self.retry_button.show()
                 self.message("The helper has no record of this saved request. Retry to submit the same selection.")
             else:
