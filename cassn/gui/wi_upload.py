@@ -140,7 +140,7 @@ class WildlifeInsightsControl(QObject):
                     continue
                 stage = row.get("stage", "unknown")
                 count = row.get("confirmed", 0)
-                if key in self.unavailable and stage != "verified":
+                if key in self.unavailable and stage not in {"verified", "held"}:
                     stage, count = "unknown", 0
                 item = QTreeWidgetItem(self.tree, [name])
                 item.setToolTip(0, name)
@@ -154,7 +154,8 @@ class WildlifeInsightsControl(QObject):
                 }
                 if stage == "held":
                     reason = row.get("hold_reason") or "Check the uploader’s hold receipt."
-                    item.setText(1, f"Needs review · {reason}")
+                    label = "Last known hold" if key in self.unavailable else "Needs review"
+                    item.setText(1, f"{label} · {reason}")
                     item.setToolTip(1, item.text(1))
                 elif stage == "verifying":
                     self.tree.setItemWidget(item, 1, QLabel(labels[stage]))

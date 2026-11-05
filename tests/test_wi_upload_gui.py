@@ -299,6 +299,12 @@ def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp
     (tmp_path / "retry-preview").write_text(json.dumps(previous))
     assert "Expected one exact camera; found 0" in ctrl.tree.topLevelItem(0).text(1)
     assert not ctrl.held_button.isHidden()
+    ctrl.unavailable.add(original)
+    ctrl.render()
+    assert "Last known hold" in ctrl.tree.topLevelItem(0).text(1)
+    assert ctrl.held_button.isHidden()
+    ctrl.unavailable.clear()
+    ctrl.render()
     start(ctrl, QDialogButtonBox.Cancel, retry_held=True)
     assert list(ctrl.jobs) == [original]
     (tmp_path / "stage").write_text("uploading")
