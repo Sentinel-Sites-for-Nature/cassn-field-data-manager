@@ -111,6 +111,20 @@ QToolTip {{ background: {panel}; color: {text}; border: 1px solid {line}; paddin
 
 
 
+def style_cancel_button(button: QPushButton) -> QPushButton:
+    """Use the same cancel treatment in the workspace and standalone dialogs."""
+    button.setStyleSheet("""
+        QPushButton { background-color: #a32935; color: white; border: 2px solid #a32935;
+                      border-radius: 6px; padding: 7px 11px; }
+        QPushButton:hover { background-color: #8b2230; border-color: #8b2230; }
+        QPushButton:pressed { background-color: #711a26; border-color: #711a26; }
+        QPushButton:focus { border-color: #ffbfc3; }
+        QPushButton:disabled { background-color: palette(mid); color: palette(button-text);
+                               border-color: palette(mid); }
+    """)
+    return button
+
+
 def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
     label = QLabel(text)
     label.setProperty("role", role)
@@ -222,7 +236,7 @@ class PlatformPanel(QGroupBox):
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
 
-    def add_action_button(self, label, action, *, details=False):
+    def add_action_button(self, label, action, *, details=False, cancel=None):
         button = QPushButton(label)
         button.clicked.connect(action.trigger)
 
@@ -234,7 +248,16 @@ class PlatformPanel(QGroupBox):
         action.visibleChanged.connect(lambda: button.setVisible(action.isVisible()))
         button.setVisible(action.isVisible())
         sync()
-        (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
+        if cancel is None:
+            (self.details if details else self.body).addWidget(button, alignment=Qt.AlignRight)
+        else:
+            self.action_row = QHBoxLayout()
+            self.action_row.setContentsMargins(0, 6, 0, 0)
+            self.action_row.setSpacing(12)
+            self.action_row.addWidget(cancel, alignment=Qt.AlignLeft)
+            self.action_row.addStretch()
+            self.action_row.addWidget(button, alignment=Qt.AlignRight)
+            self.body.addLayout(self.action_row)
         return button
 
     def title(self):

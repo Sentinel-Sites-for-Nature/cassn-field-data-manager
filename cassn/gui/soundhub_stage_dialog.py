@@ -4,7 +4,7 @@ import csv
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
-from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.appearance import style_cancel_button, workspace_label, workspace_stylesheet
 from cassn.gui.dialogs import WindowDialog
 from cassn.soundhub.stage_display import batch_bytes, event_preview
 from cassn.soundhub.staging import SoundHubStagingError
@@ -85,7 +85,7 @@ class SoundHubStageDialog(WindowDialog):
         layout.addWidget(scroll, 1)
         actions = QHBoxLayout()
         actions.setSpacing(14)
-        cancel = QPushButton("Cancel")
+        cancel = style_cancel_button(QPushButton("Cancel"))
         cancel.clicked.connect(self.reject)
         actions.addWidget(cancel)
         actions.addStretch()

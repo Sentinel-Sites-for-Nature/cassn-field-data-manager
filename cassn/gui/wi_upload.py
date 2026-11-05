@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from cassn.gui.workspace import UploadProgressBar
 
-from cassn.gui.appearance import PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
+from cassn.gui.appearance import style_cancel_button, PlatformPanel, platform_logo, workspace_label, workspace_stylesheet
 from cassn.config import QC_SUBFOLDER
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
@@ -617,6 +617,7 @@ class WildlifeInsightsControl(QObject):
         summary = workspace_label("", "contextTitle")
         layout.addWidget(summary)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
         begin = buttons.button(QDialogButtonBox.Ok)
         begin.setText("Upload images to Wildlife Insights")
 

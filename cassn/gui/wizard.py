@@ -75,7 +75,7 @@ from cassn.gui.soundhub_stage_dialog import SoundHubStageDialog
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.card_eject import CardDiskThread, card_attachment, identify_card, eject_card
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
-from cassn.gui.appearance import PlatformPanel, platform_logo
+from cassn.gui.appearance import style_cancel_button, PlatformPanel, platform_logo
 from cassn.gui.workspace import (
     CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
     UploadMessage, UploadProgressBar, workspace_label,
@@ -820,6 +820,9 @@ class FieldDataWizard(QMainWindow):
         self.collection_splitter.setSizes([190, 300] if compact else [400, 660])
         self.review_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
         self.review_splitter.setSizes([420, 480])
+        # Keep the start button at the right. A second click there cannot cancel the job.
+        for group in (self.upload_group, self.soundhub_group):
+            group.action_row.setDirection(QBoxLayout.BottomToTop if compact else QBoxLayout.LeftToRight)
         self._reflow_card_panels()
 
     def create_metadata_tab(self):
@@ -1313,14 +1316,13 @@ class FieldDataWizard(QMainWindow):
         self.upload_group.details.addWidget(self.upload_metrics_label)
 
         # Cancel button (shown only while an upload is running)
-        self.cancel_upload_btn = QPushButton("Cancel Upload")
+        self.cancel_upload_btn = style_cancel_button(QPushButton("Cancel Upload"))
         self.cancel_upload_btn.clicked.connect(self.cancel_upload)
         self.cancel_upload_btn.setToolTip(
             "Stop after the in-flight files finish. Already-uploaded files stay on Box; "
             "re-running the upload resumes from where it stopped."
         )
         self.cancel_upload_btn.hide()
-        upload_layout.addWidget(self.cancel_upload_btn, alignment=Qt.AlignRight)
 
         self.dismiss_box_btn = QPushButton("Dismiss")
         self.dismiss_box_btn.setToolTip("Collapse the details for this verified Box upload.")
@@ -1366,14 +1368,13 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_history_label.hide()
         soundhub_layout.addWidget(self.soundhub_history_label)
 
-        self.cancel_soundhub_btn = QPushButton("Cancel")
+        self.cancel_soundhub_btn = style_cancel_button(QPushButton("Cancel"))
         self.cancel_soundhub_btn.clicked.connect(self.cancel_soundhub)
         self.cancel_soundhub_btn.setToolTip(
             "Stop after the current file. Completed work is kept — re-running "
             "resumes from where it stopped."
         )
         self.cancel_soundhub_btn.hide()
-        soundhub_layout.addWidget(self.cancel_soundhub_btn, alignment=Qt.AlignRight)
         self.dismiss_soundhub_btn = QPushButton("Dismiss")
         self.dismiss_soundhub_btn.clicked.connect(self._dismiss_soundhub_progress)
         self.dismiss_soundhub_btn.hide()
@@ -1432,10 +1433,10 @@ class FieldDataWizard(QMainWindow):
             # The existing SoundHub staging configuration belongs to UC.
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
-        self.box_panel_button = self.upload_group.add_action_button("Upload to Box", self.upload_now_btn)
+        self.box_panel_button = self.upload_group.add_action_button("Upload to Box", self.upload_now_btn, cancel=self.cancel_upload_btn)
         self.upload_group.add_action_button("Recheck Box file list", self.box_verify_btn, details=True)
         self.upload_group.add_action_button("Recheck file hashes", self.fixity_btn, details=True)
-        self.soundhub_panel_button = self.soundhub_group.add_action_button("Stage bird audio", self.soundhub_stage_btn)
+        self.soundhub_panel_button = self.soundhub_group.add_action_button("Stage bird audio", self.soundhub_stage_btn, cancel=self.cancel_soundhub_btn)
         self.soundhub_group.add_action_button("Open staging folder", self.open_soundhub_btn)
         if self.wi_upload_helper:
             from cassn.gui.wi_upload import WildlifeInsightsControl
@@ -1902,7 +1903,7 @@ class FieldDataWizard(QMainWindow):
         details_toggle = QToolButton()
         details_toggle.setText("Show details")
         details_toggle.clicked.connect(lambda: self._show_device_activity(device_label))
-        cancel = QPushButton("Cancel card")
+        cancel = style_cancel_button(QPushButton("Cancel card"))
         cancel.clicked.connect(lambda: self.cancel_card_ingest(device_label))
         eject = QPushButton("Eject card")
         eject.hide()
@@ -3014,6 +3015,7 @@ class FieldDataWizard(QMainWindow):
         layout.addLayout(dev_row)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
         buttons.button(QDialogButtonBox.Ok).setText("Add Device")
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
@@ -3118,6 +3120,7 @@ class FieldDataWizard(QMainWindow):
         note.setPlaceholderText("For example: setup and retrieval frames align after a two-day camera-date offset.")
         layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
         save = buttons.button(QDialogButtonBox.Save)
         save.setEnabled(False)
 
@@ -5140,6 +5143,7 @@ class FieldDataWizard(QMainWindow):
             layout.addWidget(QLabel("All checks passed."))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
         buttons.button(QDialogButtonBox.Ok).setText("Proceed")
         if not all_ok:
             buttons.button(QDialogButtonBox.Ok).setEnabled(False)

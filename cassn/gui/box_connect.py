@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from cassn.gui.dialogs import WindowDialog as QDialog
-from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.appearance import style_cancel_button, workspace_label, workspace_stylesheet
 from cassn.gui.box_button import BoxConnectButton
 from cassn.box.auth import BoxConfig, load_box_config
 from cassn.box.connect import REDIRECT_URI, browser_login, save_connection
@@ -112,7 +112,7 @@ class BoxConnectDialog(QDialog):
         layout.addWidget(self.reopen_browser)
         footer = QHBoxLayout()
         footer.addStretch()
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = style_cancel_button(QPushButton("Cancel"))
         self.cancel_button.clicked.connect(self.reject)
         footer.addWidget(self.cancel_button)
         layout.addLayout(footer)

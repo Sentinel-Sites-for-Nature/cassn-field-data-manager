@@ -7,7 +7,7 @@ from cassn.gui.dialogs import WindowDialog as QDialog
 from cassn.gui.box_button import BoxConnectButton
 from cassn.box.hosted import HostedError, manager_for
 from cassn.config import LOCAL_DATA_DIR
-from cassn.gui.appearance import ARTWORK, platform_logo, workspace_label, workspace_stylesheet
+from cassn.gui.appearance import style_cancel_button, ARTWORK, platform_logo, workspace_label, workspace_stylesheet
 from cassn.lookup_sync import bootstrap_lookup_tables, LookupBootstrapError
 
 
@@ -171,7 +171,7 @@ class HostedSetupDialog(QDialog):
         self.disconnect_button.hide()
         self.close_button = QPushButton("Close")
         row.addWidget(self.disconnect_button)
-        self.cancel_login_button = QPushButton("Cancel sign-in")
+        self.cancel_login_button = style_cancel_button(QPushButton("Cancel sign-in"))
         self.cancel_login_button.hide()
         self.cancel_login_button.clicked.connect(self.cancel_login)
         row.addWidget(self.cancel_login_button)

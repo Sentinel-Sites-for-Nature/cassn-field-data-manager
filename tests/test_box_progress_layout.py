@@ -100,6 +100,10 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             for _ in range(3):
                 app.processEvents()
 
+            start, cancel = window.box_panel_button.geometry(), window.cancel_upload_btn.geometry()
+            horizontal_gap = start.left() - cancel.right() - 1
+            vertical_gap = cancel.top() - start.bottom() - 1
+            assert max(horizontal_gap, vertical_gap) >= 12
             assert page.widget().width() == page.viewport().width()
             assert page.horizontalScrollBar().maximum() == 0
             assert window.upload_progress_bar.value() == 25 * count
