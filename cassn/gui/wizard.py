@@ -23,7 +23,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QTimer, Qt
+from PySide6.QtCore import QDate, QThreadPool, QTimer, Qt, Slot
 from PySide6.QtGui import QAction, QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -81,6 +81,7 @@ from cassn.gui.workspace import (
     CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
     UploadMessage, UploadProgressBar, workspace_label,
 )
+from cassn.gui.box_session_count import BoxSessionCount
 from cassn.gui.event_progress import EventProgress
 from cassn.box.upload_history import previously_uploaded
 from cassn.box.publication import STATE_PATH
@@ -237,6 +238,10 @@ class FieldDataWizard(QMainWindow):
         self._last_session_save = 0.0  # time.monotonic() of the last session.json write
         self.upload_thread = None
         self.wi_split_thread = None
+        self._box_count_folder = None
+        self._box_count_reader = None
+        self._box_present_paths = None
+        self._box_count_error = ""
         self._box_event_progress = None
         self._soundhub_event_progress = None
         self._box_operation_active = False
@@ -321,6 +326,8 @@ class FieldDataWizard(QMainWindow):
             from cassn.box.hosted import manager_for
             self.disconnect_box_btn.setEnabled(manager_for(self.box_config).session is not None)
         self._refresh_workspace_context()
+        if self._box_count_folder and not self._box_operation_active:
+            self._restore_box_result()
 
     def connect_to_box(self):
         from cassn.gui.box_connect import BoxConnectDialog
@@ -1321,6 +1328,11 @@ class FieldDataWizard(QMainWindow):
             "re-running the upload resumes from where it stopped."
         )
         self.cancel_upload_btn.hide()
+
+        self.box_count_retry = QPushButton("Refresh Box count")
+        self.box_count_retry.clicked.connect(self._restore_box_result)
+        self.box_count_retry.hide()
+        self.upload_group.add_footer_button(self.box_count_retry)
 
         self.dismiss_box_btn = QPushButton("Dismiss")
         self.dismiss_box_btn.setToolTip("Collapse the details for this verified Box upload.")
@@ -3486,6 +3498,13 @@ class FieldDataWizard(QMainWindow):
         if not self.file_inventory and not verified:
             self.upload_status_label.setText("No event files are ready to upload.")
             return
+        live_count = (self._box_count_folder is not None
+                      and self._box_count_folder == self.current_deployment_folder)
+        if live_count:
+            self._show_box_count_on_reopen(verified)
+            if not verified:
+                self._show_box_recovery_reason(self.current_deployment_folder)
+            return
         if verified:
             total = len(self.file_inventory)
             event_bar(self.upload_progress_bar, total, total, "files verified")
@@ -3506,6 +3525,14 @@ class FieldDataWizard(QMainWindow):
             self.box_history_label.show()
         else:
             self.upload_metrics_label.setText("A confirmed file count is unavailable for this earlier upload.")
+        if self._show_box_recovery_reason(folder):
+            return
+        if recorded is not None and recorded < total:
+            self.upload_status_label.setText("Ready to upload the remaining event files.")
+        else:
+            self.upload_status_label.setText("The current file list still needs Box verification.")
+
+    def _show_box_recovery_reason(self, folder):
         try:
             state = json.loads((folder / STATE_PATH).read_text())
         except (OSError, ValueError):
@@ -3521,11 +3548,53 @@ class FieldDataWizard(QMainWindow):
                 self.upload_status_label.setToolTip("The previous version stopped before sending new files. " + reason)
             else:
                 self.upload_status_label.setText(f"{reason}\nChoose Continue Box upload when ready to retry.")
-        elif recorded is not None and recorded < total:
-            self.upload_status_label.setText("Ready to upload the remaining event files.")
-        else:
-            self.upload_status_label.setText("The current file list still needs Box verification.")
+            return True
+        return False
 
+    def _show_box_count_on_reopen(self, verified):
+        paths = self._box_present_paths
+        total = len(self.file_inventory)
+        self.box_history_label.show()
+        self.box_panel_button.setText("Continue Box upload")
+        self.box_count_retry.setVisible(bool(self._box_count_error) and self.box_authenticated)
+        if paths is None:
+            self.upload_progress_bar.hide()
+            if not self.box_authenticated:
+                self.box_history_label.setText("Connect to Box to see the current file count.")
+            else:
+                self.box_history_label.setText(self._box_count_error or "Checking files on Box…")
+            self.upload_status_label.setText("Previous upload verified." if verified else "Upload started previously.")
+            return
+        current = sum(inventory_storage_relpath(entry) in paths for entry in self.file_inventory)
+        event_bar(self.upload_progress_bar, current, total, "event files on Box")
+        self.upload_progress_bar.show()
+        self.box_history_label.setText(self.upload_progress_bar.text())
+        complete = verified and current == total
+        self.box_upload_complete = complete
+        self.box_panel_button.setHidden(complete)
+        self.dismiss_box_btn.setVisible(complete)
+        self.upload_status_label.setStyleSheet("color: green; font-weight: bold;" if complete else "")
+        if complete:
+            self.upload_status_label.setText("All event files verified against Box.")
+        elif current == total:
+            self.upload_status_label.setText("All event files are present. Box verification is still required.")
+        else:
+            self.upload_status_label.setText(f"{total - current:,} event files still need to reach Box.")
+
+    @Slot(object, object, str)
+    def _received_box_count(self, reader, paths, error):
+        if reader is not self._box_count_reader or reader.folder != self.current_deployment_folder:
+            return
+        self._box_count_reader = None
+        self._box_count_error = error
+        self._box_present_paths = paths
+        if self._box_operation_active:
+            if (paths is not None and self._box_event_progress and self.upload_thread
+                    and self.upload_thread.isRunning()):
+                self._box_event_progress.remaining.difference_update(paths)
+                self._show_box_transfer_count(0, 0)
+            return
+        self._show_saved_box_result(self.box_upload_complete)
 
     def _restore_box_result(self):
         """A reopened session can show success only from matching persisted evidence."""
@@ -3533,7 +3602,18 @@ class FieldDataWizard(QMainWindow):
         self.upload_group.disclosure.setChecked(False)
         self.hash_group.hide()
         self.box_upload_complete = False
+        self._box_count_reader = None
+        self._box_count_folder = None
+        self._box_present_paths = None
+        self._box_count_error = ""
+        self.box_count_retry.hide()
         if (self.current_deployment_folder / STATE_PATH).is_file() or has_box_upload_history(self.current_deployment_folder):
+            self._box_count_folder = self.current_deployment_folder
+            if self.box_authenticated:
+                reader = BoxSessionCount(self.current_deployment_folder, self.metadata, self.box_config)
+                self._box_count_reader = reader
+                reader.signals.result.connect(self._received_box_count, Qt.QueuedConnection)
+                QThreadPool.globalInstance().start(reader)
             _, verified = readiness(self.current_deployment_folder, self.file_inventory,
                                     self.metadata, self.box_config)
             self._show_saved_box_result(verified)
@@ -3672,6 +3752,7 @@ class FieldDataWizard(QMainWindow):
         # Hold through callbacks between preparation, upload, and verification.
         self._box_operation_token = object()
         self._box_operation_active = True
+        self.box_count_retry.hide()
         self._update_copy_action()
         self.box_upload_complete = False
         self.dismiss_box_btn.hide()
@@ -3789,7 +3870,11 @@ class FieldDataWizard(QMainWindow):
         self._box_operation_active = True
         self._update_copy_action()
         try:
-            self._box_event_progress = EventProgress.box(self.current_deployment_folder, self.file_inventory)
+            if self._box_count_folder == self.current_deployment_folder and (
+                    self._box_present_paths is not None or self._box_count_reader):
+                self._box_event_progress = EventProgress.from_box_paths(self.file_inventory, self._box_present_paths or set())
+            else:
+                self._box_event_progress = EventProgress.box(self.current_deployment_folder, self.file_inventory)
         except (OSError, ValueError, KeyError, TypeError):
             self._box_event_progress = None
         self.upload_progress_bar.show()
@@ -3905,6 +3990,8 @@ class FieldDataWizard(QMainWindow):
         # A successful upload still owns this deployment through provenance
         # and verification. Do not let their callbacks follow a new session.
         self.cancel_upload_btn.hide()
+        self._box_count_reader = self._box_count_folder = self._box_present_paths = None
+        self.box_count_retry.hide()
 
         if success:
             self.upload_metrics_label.clear()
@@ -5260,6 +5347,8 @@ class FieldDataWizard(QMainWindow):
             if hasattr(self, "card_jobs_group"):
                 self.card_jobs_group.hide()
             self.current_deployment_folder = None
+            self._box_count_reader = self._box_count_folder = self._box_present_paths = None
+            self.box_count_retry.hide()
             self.fixity_check_run = False
             self.box_upload_complete = False
 

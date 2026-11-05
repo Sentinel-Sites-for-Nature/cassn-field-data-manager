@@ -30,6 +30,11 @@ class EventProgress:
         return cls(len(paths), {path for path, key in paths.items() if key not in known})
 
     @classmethod
+    def from_box_paths(cls, inventory, present):
+        expected = {inventory_storage_relpath(row) for row in inventory}
+        return cls(len(expected), expected - present)
+
+    @classmethod
     def soundhub(cls, folder, root, summary=None):
         if summary is None:
             summary = event_staging_summary(folder, root)

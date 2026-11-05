@@ -128,7 +128,19 @@ class BoxStorage:
         self._folder_files[folder_id] = existing
         return existing
 
-    def collect_file_paths(self, folder_id, *, fields: list[str] | None = None) -> set[str]:
+    def _marker_folder_items(self, folder_id, *, fields):
+        """Box marker pagination also covers folders beyond the offset limit."""
+        marker = None
+        while True:
+            page = self.client.folders.get_folder_items(
+                folder_id, fields=fields, limit=self.PAGE_LIMIT, usemarker=True, marker=marker)
+            yield from page.entries or ()
+            marker = page.next_marker
+            if not marker:
+                return
+
+    def collect_file_paths(self, folder_id, *, fields: list[str] | None = None,
+                           use_markers=False) -> set[str]:
         """Recursively collect every file's path under ``folder_id``.
 
         Paths are relative to ``folder_id`` and always use POSIX separators
@@ -137,8 +149,10 @@ class BoxStorage:
         """
         paths: set[str] = set()
 
+        listing = self._marker_folder_items if use_markers else self.iter_folder_items
+
         def _walk(fid, prefix: tuple) -> None:
-            for item in self.iter_folder_items(fid, fields=fields):
+            for item in listing(fid, fields=fields):
                 if item.type == "file":
                     paths.add(PurePosixPath(*prefix, item.name).as_posix())
                 elif item.type == "folder":

@@ -41,7 +41,7 @@ class Harness(QObject):
         '_on_provenance_upload_finished', '_start_post_upload_verification',
         '_on_auto_box_verify_finished', '_on_auto_fixity_progress',
         '_on_auto_fixity_finished', '_finish_post_upload_verification', '_show_saved_box_result',
-        '_on_fixity_progress', '_on_fixity_finished', '_on_box_verify_finished',
+        '_show_box_recovery_reason', '_on_fixity_progress', '_on_fixity_finished', '_on_box_verify_finished',
         'run_fixity_check', 'run_box_verify', 'open_different_deployment',
         'start_new_deployment', 'closeEvent',
     ):
@@ -55,6 +55,7 @@ class Harness(QObject):
         self.metadata = {'observer': 'Test'}
         self.devices = []
         self.box_config = SimpleNamespace(field_data_folder_id='test-root', profile='uc')
+        self._box_count_folder = None
         self.box_authenticated = True
         self._box_operation_active = True
         self.box_upload_complete = False
@@ -69,7 +70,7 @@ class Harness(QObject):
             setattr(self, name, None)
         for name in ('open_btn', 'switch_deployment_btn', 'new_btn', 'exit_btn',
                      'upload_now_btn', 'box_verify_btn', 'fixity_btn', 'cancel_upload_btn',
-                     'dismiss_box_btn', 'box_panel_button', 'upload_group', 'box_history_label',
+                     'dismiss_box_btn', 'box_count_retry', 'box_panel_button', 'upload_group', 'box_history_label',
                      'upload_progress_bar', 'upload_status_label', 'upload_metrics_label', 'hash_group',
                      'hash_progress_bar', 'hash_status_label', 'log', 'save_session',
                      '_update_copy_action', '_start_box_upload_thread',
