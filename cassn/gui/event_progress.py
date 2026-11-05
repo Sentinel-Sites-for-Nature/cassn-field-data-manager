@@ -1,7 +1,7 @@
 """Display-only event totals. A filled transfer bar is not a verification receipt."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cassn.box.upload_history import published_file_keys
@@ -14,6 +14,7 @@ from cassn.soundhub.staging import work_root
 class EventProgress:
     total: int
     remaining: set[str]
+    recorders: dict[str, set[str]] = field(default_factory=dict)
 
     @property
     def done(self):
@@ -29,19 +30,25 @@ class EventProgress:
         return cls(len(paths), {path for path, key in paths.items() if key not in known})
 
     @classmethod
-    def soundhub(cls, folder, root):
-        summary = event_staging_summary(folder, root)
+    def soundhub(cls, folder, root, summary=None):
+        if summary is None:
+            summary = event_staging_summary(folder, root)
         rows = read_bd_audio_rows(folder)
-        names = {r["filename"] for r in rows}
-        if not rows or len(names) != len(rows):
+        if not rows:
             return None
         remaining = set()
+        recorders = {}
         for row in rows:
             name = row["filename"]
             flac = Path(row["deployment_id"]) / Path(name).with_suffix(".flac").name
             if flac.is_absolute() or ".." in flac.parts:
                 return None
+            key = flac.as_posix()
+            files = recorders.setdefault(row["deployment_id"], set())
+            if key in files:
+                return None
+            files.add(key)
             work = work_root(root) / flac
             if flac.as_posix() not in summary.matched_paths and not (work.is_file() and work.stat().st_size > 0):
-                remaining.add(name)
-        return cls(len(names), remaining)
+                remaining.add(key)
+        return cls(len(rows), remaining, recorders)

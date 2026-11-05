@@ -72,8 +72,8 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
     assert not window.soundhub_stage_btn.isEnabled()
     assert window.soundhub_stage_btn.text() == "Bird Audio Already Staged"
-    assert "nothing was uploaded" in notice.call_args.args[2]
-    assert "Upload Bird Data to SoundHub" not in notice.call_args.args[2]
+    notice.assert_not_called()
+    assert window.soundhub_status_label.text() == "Staged and validated. Ready for upload."
     upload.assert_not_called()
     window.soundhub_stage_thread = None
 
@@ -462,7 +462,12 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     monkeypatch.setattr(wizard.QMessageBox, "information", lambda *args: None)
     monkeypatch.setattr(wizard.QMessageBox, "warning", lambda *args: None)
 
-    window.on_soundhub_stage_complete(True, False, "Bird audio staged.", {})
+    window.on_soundhub_stage_complete(True, False, "Bird audio staged.", {
+        "converted": 26, "skipped": 13, "deployment_ids": ["recorder1", "recorder2"],
+        "manifest_changes": {"deployment.csv": {"added": 2, "updated": 1, "removed": 0},
+                             "recording.csv": {"added": 26, "updated": 0, "removed": 0}},
+        "csvs": {"deployment_count": 57, "recording_count": 788},
+    })
     session = event / "session.json"
     before = session.read_bytes()
     window.dismiss_soundhub_btn.click()
@@ -472,6 +477,9 @@ def test_soundhub_dismiss_and_failed_restore(workspace_window, tmp_path, monkeyp
     window.restore_session(json.loads(before))
     window.tabs.setCurrentIndex(2)
     assert not window.soundhub_group.isHidden() and not window.dismiss_soundhub_btn.isHidden()
+    assert "recording.csv: 26 added · 0 updated" in window.soundhub_history_label.text()
+    assert "Entire local batch: 57 deployments · 788 recordings" in window.soundhub_history_label.text()
+    assert "26 newly converted · 13 already present" in window.soundhub_history_label.text()
 
     window.on_soundhub_stage_complete(False, False, "Disk full", {})
     window.restore_session(json.loads(session.read_text()))

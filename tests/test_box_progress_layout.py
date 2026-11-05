@@ -113,7 +113,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             for group, name, title in [
                 (window.upload_group, "Box", "Archive event files in cloud storage"),
                 (window.hash_group, "Box", "Compare local and archived file hashes"),
-                (window.soundhub_group, "Wildlife Sound Hub", "Compress and stage bird audio locally"),
+                (window.soundhub_group, "Wildlife Sound Hub", "Prepare and Stage Bird Audio Data for SoundHub Upload"),
                 (control.group, "Wildlife Insights", "Upload camera deployments and photos"),
             ]:
                 assert not group.isHidden()
@@ -220,7 +220,7 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
                      files={"event": {"status": "read"}})
         state_path.write_text(json.dumps(state))
         window._show_saved_box_result(False)
-        assert window.upload_progress_bar.text() == "1 of 2 files uploaded"
+        assert window.upload_progress_bar.text() == "1 of 2 files uploaded · 50%"
         assert "Ready to continue" in window.upload_status_label.text()
         assert "Legacy" not in window.upload_status_label.text()
         assert window.dismiss_box_btn.isHidden()
@@ -238,10 +238,15 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
             assert window.upload_progress_bar.value() == 2
             assert not window.box_upload_complete
 
-        window._soundhub_event_progress = EventProgress(3, {"new.wav", "last.wav"})
-        for index, name, done in ((1, "old.wav", 1), (2, "new.wav", 1), (3, "last.wav", 2)):
-            window.on_soundhub_progress(index, 3, name)
-            assert window.soundhub_progress_bar.text() == f"{done} of 3 recordings prepared"
+        window._soundhub_event_progress = EventProgress(3, {"p2/new.flac", "p2/last.flac"},
+                                                       {"p1": {"p1/old.flac"}, "p2": {"p2/new.flac", "p2/last.flac"}})
+        window._soundhub_recording_prepared("p1", "old.wav")
+        window._soundhub_recording_prepared("p2", "new.wav")
+        assert window.soundhub_progress_bar.text() == "2 of 3 recordings prepared · 66%"
+        assert window.soundhub_recorder_bars["p1"][1].text() == "1 of 1 prepared · 100%"
+        assert window.soundhub_recorder_bars["p2"][1].text() == "1 of 2 prepared · 50%"
+        window._soundhub_recording_prepared("p2", "new.wav")
+        assert window.soundhub_progress_bar.value() == 2
     finally:
         window.current_deployment_folder = None
         window.close()

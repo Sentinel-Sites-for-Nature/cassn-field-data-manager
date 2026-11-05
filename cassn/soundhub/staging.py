@@ -381,6 +381,7 @@ def stage_deployment(
     *,
     progress=None,
     is_cancelled=None,
+    recording_prepared=None,
 ) -> dict:
     """Convert a deployment event's BD WAVs into the SoundHub staging tree.
 
@@ -512,6 +513,9 @@ def stage_deployment(
                     "sha256": hashing.sha256(dst),
                 }
             )
+
+            if recording_prepared is not None:
+                recording_prepared(deployment_id, src.name)
 
     write_deployment_copy(deployment_folder, audio_rows)
     marker = work_root(staging_root) / "pending.json"

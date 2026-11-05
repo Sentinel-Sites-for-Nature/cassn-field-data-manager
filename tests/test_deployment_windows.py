@@ -452,7 +452,7 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     monkeypatch.setattr(wizard_module.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     title = window.soundhub_group.title()
     window.stage_for_soundhub()
-    assert window.soundhub_group.title() == title == "Compress and stage bird audio locally"
+    assert window.soundhub_group.title() == title == "Prepare and Stage Bird Audio Data for SoundHub Upload"
     assert window._staging_pending
     FieldDataWizard._set_box_controls_busy(window, False)
     assert not window.exit_btn.isEnabled()

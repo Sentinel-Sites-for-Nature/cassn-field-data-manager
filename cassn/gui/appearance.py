@@ -174,7 +174,7 @@ def platform_logo(platform, *, height=20):
 _PANEL_TITLES = {
     "box": "Archive event files in cloud storage",
     "box_check": "Compare local and archived file hashes",
-    "soundhub": "Compress and stage bird audio locally",
+    "soundhub": "Prepare and Stage Bird Audio Data for SoundHub Upload",
     "wildlife_insights": "Upload camera deployments and photos",
 }
 

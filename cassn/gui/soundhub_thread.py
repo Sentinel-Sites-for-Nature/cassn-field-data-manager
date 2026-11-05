@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import threading
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from cassn.soundhub.staging import (
     stage_deployment,
 )
 from cassn.soundhub.provenance import DEFAULT_SUBMITTER
+from cassn.soundhub.stage_display import manifest_rows, manifest_changes
 from cassn.soundhub.submission import (
     SoundHubSubmissionError,
     SoundHubSubmissionPlan,
@@ -41,6 +43,7 @@ class SoundHubStageThread(QThread):
     """
 
     progress = Signal(int, int, str)
+    recording_prepared = Signal(str, str)  # recorder deployment, source WAV name
     completed = Signal(bool, bool, str, dict)  # success, cancelled, message, result
 
     def __init__(self, deployment_folder, staging_root, lookups):
@@ -124,11 +127,17 @@ class SoundHubStageThread(QThread):
             # manifest cannot be completed from the source metadata.
             build_recording_rows(audio_rows)
 
+            try:
+                before = manifest_rows(self.staging_root)
+            except (OSError, ValueError, KeyError, csv.Error):
+                before = None
+            self.progress.emit(0, 0, "Preparing bird recordings…")
             result = stage_deployment(
                 self.deployment_folder,
                 audio_rows,
                 self.staging_root,
                 progress=self.progress.emit,
+                recording_prepared=self.recording_prepared.emit,
                 is_cancelled=self._cancel_event.is_set,
             )
 
@@ -141,6 +150,12 @@ class SoundHubStageThread(QThread):
                 )
                 return
 
+            result["manifest_changes"] = None
+            if before is not None:
+                try:
+                    result["manifest_changes"] = manifest_changes(before, manifest_rows(self.staging_root))
+                except (OSError, ValueError, KeyError, csv.Error):
+                    pass  # Staging already validated; an unavailable display count cannot undo it.
             csvs = result["csvs"]
 
             self.completed.emit(
