@@ -198,6 +198,23 @@ def event_bar(bar, done, total, unit):
     bar.setFormat(f"{done:,} of {total:,} {unit} · %p%" if total else f"0 {unit}")
 
 
+def recording_progress(report, copied, filename, size):
+    """Show each phase immediately, then refresh at most twice per second."""
+    unit, scale = ("GB", 1_000_000_000) if size >= 1_000_000_000 else ("MB", 1_000_000)
+    last_phase = None
+    last_update = 0.0
+
+    def update(phase, count):
+        nonlocal last_phase, last_update
+        now = time.monotonic()
+        if phase == last_phase and count != size and count != 0 and now - last_update < 0.5:
+            return
+        report(copied, f"{phase} {filename} · {count / scale:.2f} of {size / scale:.2f} {unit}")
+        last_phase, last_update = phase, now
+
+    return update
+
+
 class FieldDataWizard(QMainWindow):
     """Three-tab wizard for staging, renaming, and uploading a field deployment.
 
@@ -2663,6 +2680,9 @@ class FieldDataWizard(QMainWindow):
                         copy_result = copy_file_single_read_verified(
                             source_path,
                             dest_path,
+                            progress=(recording_progress(
+                                self._ingest_progress, files_copied, filename, evidence["size"]
+                            ) if file_type == "audio" else None),
                             accept_hash=lambda sha256_value, _sha1_value: (
                                 self._reserve_ingest_hash(sha256_value, file_type)
                             ),

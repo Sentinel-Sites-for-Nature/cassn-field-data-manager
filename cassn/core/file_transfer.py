@@ -45,6 +45,7 @@ def copy_file_single_read_verified(
     *,
     accept_hash=None,
     release_hash=None,
+    progress=None,
     max_attempts: int = 3,
     retry_delay: float = 0.5,
     chunk_size: int = 1024 * 1024,
@@ -73,6 +74,9 @@ def copy_file_single_read_verified(
         source_sha1 = hashlib.sha1()
         try:
             with source.open("rb") as src, partial.open("wb") as dst:
+                copied_bytes = 0
+                if progress is not None:
+                    progress("Copying", 0)
                 while True:
                     chunk = src.read(chunk_size)
                     if not chunk:
@@ -80,11 +84,19 @@ def copy_file_single_read_verified(
                     source_sha256.update(chunk)
                     source_sha1.update(chunk)
                     dst.write(chunk)
+                    if progress is not None:
+                        copied_bytes += len(chunk)
+                        progress("Copying", copied_bytes)
             shutil.copystat(source, partial)
 
             sha256_value = source_sha256.hexdigest()
             sha1_value = source_sha1.hexdigest()
-            staged_sha256, staged_sha1 = sha256_sha1(partial)
+            if progress is None:
+                staged_sha256, staged_sha1 = sha256_sha1(partial)
+            else:
+                staged_sha256, staged_sha1 = sha256_sha1(
+                    partial, progress=lambda count: progress("Checking", count)
+                )
             if staged_sha256 != sha256_value or staged_sha1 != sha1_value:
                 mismatch = True
                 continue
