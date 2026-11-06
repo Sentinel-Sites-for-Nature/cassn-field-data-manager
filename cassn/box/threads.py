@@ -39,6 +39,7 @@ from cassn.box.upload_state import STATE_DIRECTORY, require_uploads_complete
 from cassn.config import CHUNKED_UPLOAD_THRESHOLD
 from cassn.box.metadata_merge import SHARED_NAMES
 from cassn.box.publication import EventPublication, batch_remote_path
+from cassn.box.receipts import FINAL_FILES, publish_final_receipt
 from cassn.box.verification import (
     collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths, verify_box_hashes,
 )
@@ -209,6 +210,7 @@ class BoxUploadThread(QThread):
             publication = EventPublication(storage, deploy_id, self.deployment_folder)
             publication.prepare()  # Reject unsafe merges before sending media.
             publication.validate_batch_inventory(self.file_inventory)
+            publication.begin_verification_receipt()
             publication.publish_wi_inputs()
 
             def remote_path(path):
@@ -219,6 +221,7 @@ class BoxUploadThread(QThread):
                 path
                 for path in self.deployment_folder.rglob("*")
                 if path.is_file() and storage.should_upload_file(path)
+                and path.relative_to(self.deployment_folder).as_posix() not in (*FINAL_FILES, "qc/box_upload_manifest.json")
             ]
 
             # Full paths keep hashes unambiguous across flat and split layouts.
@@ -256,6 +259,7 @@ class BoxUploadThread(QThread):
             # collected and unintentionally left it local-only.
             if manifest_path not in uploadable_files:
                 uploadable_files.append(manifest_path)
+            publication.prepare_current_qc(uploadable_files)
             uploadable_files = [fp for fp in uploadable_files
                                 if fp.relative_to(self.deployment_folder).as_posix() not in SHARED_NAMES]
             total_files = len(uploadable_files)
@@ -470,6 +474,27 @@ class BoxUploadThread(QThread):
             metrics.set_stage(outcome)
             if network is not None:
                 network.close()
+
+
+class BoxReceiptThread(QThread):
+    finished = Signal(bool, str)
+
+    def __init__(self, folder, state, box_config):
+        super().__init__()
+        self.folder = folder
+        self.state = state
+        self.box_config = box_config
+
+    def run(self):
+        try:
+            client = get_box_client(self.box_config)
+            if not client:
+                raise ValueError("Connect to Box to save the verification receipt.")
+            publish_final_receipt(BoxStorage(client), self.folder, self.state)
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+        else:
+            self.finished.emit(True, "")
 
 
 class BoxVerifyThread(QThread):

@@ -40,7 +40,7 @@ class Harness(QObject):
         'on_upload_progress', 'on_upload_metrics', 'on_upload_finished', '_write_upload_provenance',
         '_on_provenance_upload_finished', '_start_post_upload_verification',
         '_on_auto_box_verify_finished', '_on_auto_fixity_progress',
-        '_on_auto_fixity_finished', '_finish_post_upload_verification', '_show_saved_box_result',
+        '_on_auto_fixity_finished', '_finish_post_upload_verification', '_on_receipt_finished', '_show_saved_box_result',
         '_show_box_recovery_reason', '_on_fixity_progress', '_on_fixity_finished', '_on_box_verify_finished',
         'run_fixity_check', 'run_box_verify', 'open_different_deployment',
         'start_new_deployment', 'closeEvent',
@@ -370,3 +370,35 @@ def test_current_upload_metrics_show_waits_and_rates(setup):
     text=context.upload_metrics_label.setText.call_args.args[0]
     assert 'Waiting for Box' in text and '2.50 MB/s' in text
     assert '3.00 files/s' in text and '2 rate-limit responses' in text
+
+
+@pytest.mark.parametrize('delivery_ok', [True, False])
+def test_final_receipt_controls_completion_and_holds_event_lock(setup, monkeypatch, delivery_ok):
+    import json
+    from cassn.box.publication import STATE_PATH
+    from cassn.box.receipts import RECEIPT
+    from cassn.core.verification_evidence import readiness
+
+    class ReceiptWorker(Worker):
+        def __init__(self, folder, state, config):
+            super().__init__()
+            self.finished = self.upload
+
+    monkeypatch.setattr(w, 'BoxReceiptThread', ReceiptWorker)
+    _, context, _ = setup
+    folder = context.current_deployment_folder
+    batch = '20261105T120000_' + 'a' * 32
+    (folder / STATE_PATH).write_text(json.dumps({
+        'attempt_id': batch, 'batch_attempt_id': batch, 'folder_id': 'synthetic-box-folder',
+        'status': 'published', 'publish_final_receipt': True,
+    }))
+    context._start_post_upload_verification()
+    context.box_verify_thread.result.emit(True, 'Listed', [])
+    context.fixity_thread.result.emit(True, 'Matched', [])
+    assert context._box_operation_active and context.receipt_thread.started
+    assert not context.box_upload_complete
+    assert readiness(folder, context.file_inventory, context.metadata, context.box_config) == (True, False)
+    assert json.loads((folder / RECEIPT).read_bytes())['batch_attempt_id'] == batch
+    context.receipt_thread.upload.emit(delivery_ok, '' if delivery_ok else 'offline')
+    assert not context._box_operation_active
+    assert context.box_upload_complete is delivery_ok

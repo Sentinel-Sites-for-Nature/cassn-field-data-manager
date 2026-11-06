@@ -162,7 +162,7 @@ def test_box_lock_releases_after_verification(tmp_path, monkeypatch):
 def test_verified_upload_reports_success_in_box_panel_without_popup(tmp_path, monkeypatch):
     dialog = MagicMock()
     monkeypatch.setattr(wizard_module, "QMessageBox", dialog)
-    monkeypatch.setattr(wizard_module, "readiness", lambda *args: (True, True))
+    monkeypatch.setattr(wizard_module, "readiness", lambda *args, **kwargs: (True, True))
     monkeypatch.setattr("cassn.box.publication.require_publication_complete", lambda folder: None)
     window = MagicMock()
     window.current_deployment_folder = tmp_path

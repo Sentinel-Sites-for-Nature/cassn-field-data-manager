@@ -5,6 +5,7 @@ the local attempt journal records partial publication and blocks cleanup.
 """
 from __future__ import annotations
 
+import csv
 import io
 import json
 import os
@@ -14,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from cassn.box.metadata_merge import (
-    CSV_NAMES, SHARED_NAMES, WI_INPUT_NAMES, merge_wi_input, MetadataConflict, merge_csv, merge_event, merge_qc,
+    CSV_NAMES, SHARED_NAMES, WI_INPUT_NAMES, WI_STAGED_NAMES, merge_wi_input, MetadataConflict, merge_csv, merge_event, merge_qc,
     read_csv, read_object, carry_wi_only_update,
 )
 from cassn.box.metadata_store import BoxFileStore
@@ -74,6 +75,8 @@ class EventPublication:
                       "batch_attempt_id": previous.get("batch_attempt_id", self.attempt_id) if provenance else self.attempt_id,
                       "phase": "provenance" if provenance else "initial",
                       "status": "preparing", "files": {}}
+        if provenance and previous.get("publish_final_receipt"):
+            self.state["publish_final_receipt"] = True
         self._save()
         # An earlier passing artifact cannot certify this attempt.
         atomic_json(self.local_folder / "qc/box_upload_verification.json",
@@ -201,14 +204,16 @@ class EventPublication:
                 if name == "image_file_metadata.csv" and name in local and not self.provenance:
                     from cassn.export.wildlife_insights import wi_rows_from_image_metadata
                     for kind, deployments in wi_rows_from_image_metadata(rows).items():
-                        target = WI_INPUT_NAMES[kind]
-                        self._snapshot(target)
-                        self.candidates[target] = merge_wi_input(self.remote[target], deployments)
+                        self._prepare_wi_inputs(kind, deployments)
                 for row in rows:
                     key = (row["deployment_id"], row["filename"])
                     if row["filename"] in names:
                         raise MetadataConflict(f"Ambiguous cross-metadata filename: {row['filename']}")
                     names[row["filename"]] = key
+        if not self.provenance:
+            for kind, name in WI_STAGED_NAMES.items():
+                if name not in self.candidates and (self.local_folder / name).is_file():
+                    self._prepare_wi_inputs(kind, [])
         for name, payload in self.candidates.items():
             ref = self.refs[name]
             if ref and not ref.can_upload:
@@ -326,9 +331,42 @@ class EventPublication:
             self.state["files"][name]["saved"] = asdict(current)
         self._save()
 
+    def _prepare_wi_inputs(self, kind, deployments):
+        # Both paths are consumed in the field. Preserve recorded rows from either.
+        names = (WI_INPUT_NAMES[kind], WI_STAGED_NAMES[kind])
+        staged = self.local_folder / WI_STAGED_NAMES[kind]
+        sources = [staged.read_bytes()] if staged.is_file() else []
+        for name in names:
+            self._snapshot(name)
+            if self.remote[name] is not None:
+                sources.append(self.remote[name])
+        merged = merge_wi_input(None, deployments)
+        for source in sources:
+            merged = merge_wi_input(source, list(csv.DictReader(io.StringIO(merged.decode("utf-8-sig")))))
+        for name in names:
+            self.candidates[name] = merged
+
+    def prepare_current_qc(self, paths):
+        """Publish current QC documents conditionally beside the historical snapshots."""
+        for path in paths:
+            name = path.relative_to(self.local_folder).as_posix()
+            if name in {"qc/box_upload_manifest.json", "qc/deployment_summary.txt"} or name.startswith("qc/lookup_snapshot/"):
+                self._snapshot(name)
+                self.candidates[name] = path.read_bytes()
+        self._save()
+
+    def begin_verification_receipt(self):
+        """Reserve the current receipt for this batch before any media moves."""
+        from cassn.box.receipts import RECEIPT
+        self.state["publish_final_receipt"] = True
+        self._snapshot(RECEIPT)
+        marker = {"verified": False, "status": "pending", "batch_attempt_id": self.attempt_id}
+        self.candidates[RECEIPT] = json.dumps(marker, indent=2).encode()
+        self._publish_files([RECEIPT])
+
     def publish_wi_inputs(self):
         """Expose manual inputs before media transfer; WI owns the later upload records."""
-        names = [name for name in WI_INPUT_NAMES.values() if name in self.candidates]
+        names = [name for name in (*WI_INPUT_NAMES.values(), *WI_STAGED_NAMES.values()) if name in self.candidates]
         if names:
             self._publish_files(names)
 

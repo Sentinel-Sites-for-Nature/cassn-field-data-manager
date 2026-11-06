@@ -16,6 +16,7 @@ from uuid import uuid4
 
 CSV_NAMES = ("image_file_metadata.csv", "audio_file_metadata.csv")
 WI_INPUT_NAMES = {kind: f"wildlife_insights/{kind}_deployments.csv" for kind in ("ML", "SA")}
+WI_STAGED_NAMES = {kind: f"WI_metadata/wildlife_insights_{kind}_deployments.csv" for kind in WI_INPUT_NAMES}
 SHARED_NAMES = (*CSV_NAMES, "deployment_event_record.json", "qc/qc_report.json")
 BOX_HISTORY = ("is_uploaded_to_box", "box_uploader", "box_upload_datetime")
 WI_HISTORY = ("is_submitted_to_wi", "wi_submitter", "wi_submission_datetime")
@@ -62,7 +63,7 @@ def merge_wi_input(previous, incoming):
     from cassn.export.wildlife_insights import WI_COLUMNS, rows_to_csv_bytes
 
     if previous is None:
-        return rows_to_csv_bytes(incoming)
+        previous = rows_to_csv_bytes([])
     reader = csv.DictReader(io.StringIO(previous.decode("utf-8-sig"), newline=""), strict=True)
     if reader.fieldnames != list(WI_COLUMNS):
         raise MetadataConflict("Unexpected Box WI deployment CSV header")

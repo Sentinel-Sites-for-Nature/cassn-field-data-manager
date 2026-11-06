@@ -100,7 +100,7 @@ def write_result(folder, kind, context, *, ok=False, summary="", issues=(), pend
     return passed and not pending
 
 
-def readiness(folder, inventory, metadata, box_config) -> tuple[bool, bool]:
+def readiness(folder, inventory, metadata, box_config, *, require_delivery=True) -> tuple[bool, bool]:
     try:
         context = verification_context(folder, inventory, metadata, box_config)
         hash_ok = read_result(folder, "hash", context) is not None
@@ -109,6 +109,7 @@ def readiness(folder, inventory, metadata, box_config) -> tuple[bool, bool]:
         combined = json.loads((Path(folder) / "qc" / "box_upload_verification.json").read_text())
         upload_ok = (isinstance(combined, dict) and combined.get("verified") is True
                      and combined.get("context") == context and combined.get("evidence_version") == 1)
-        return hash_ok, hash_ok and box_ok and upload_ok
+        from cassn.box.receipts import receipt_delivered
+        return hash_ok, hash_ok and box_ok and upload_ok and (not require_delivery or receipt_delivered(folder))
     except (OSError, ValueError, TypeError, AttributeError):
         return False, False

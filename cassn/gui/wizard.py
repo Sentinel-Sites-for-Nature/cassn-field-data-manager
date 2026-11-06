@@ -64,7 +64,7 @@ from cassn.core.verification_evidence import readiness, verification_context, wr
 from cassn.box.status import has_box_upload_history
 from cassn.box.threads import (
     BoxUploadThread,
-    BoxVerifyThread,
+    BoxVerifyThread, BoxReceiptThread,
     FixityCheckThread,
     ProvenanceUploadThread,
 )
@@ -269,6 +269,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_upload_thread = None
         self.box_verify_thread = None
         self.fixity_thread = None
+        self.receipt_thread = None
         self._post_upload_box_summary = ""
         self._post_upload_box_issues = []
         self.fixity_check_run = False  # set True once fixity check completes this session
@@ -3681,6 +3682,17 @@ class FieldDataWizard(QMainWindow):
 
         self.upload_group.disclosure.setChecked(True)
 
+        # Retry just the final receipt when the media checks already passed.
+        check_args = (self.current_deployment_folder, self.file_inventory, self.metadata, self.box_config)
+        if readiness(*check_args, require_delivery=False)[1] and not readiness(*check_args)[1]:
+            from cassn.box.receipts import RECEIPT
+            record = json.loads((self.current_deployment_folder / RECEIPT).read_bytes())
+            self._post_upload_box_summary = record["box_file_list"]["summary"]
+            self._post_upload_box_issues = []
+            FieldDataWizard._set_box_controls_busy(self, True)
+            self._finish_post_upload_verification(True, record["hash_verification"]["summary"], [])
+            return
+
         # Hold through callbacks between preparation, upload, and verification.
         self._box_operation_token = object()
         self._box_operation_active = True
@@ -4078,6 +4090,12 @@ class FieldDataWizard(QMainWindow):
         append_qc_report(self.current_deployment_folder, "box_verify", "", severity, summary)
 
         if not ok:
+            # An earlier hash result cannot represent a check skipped in this run.
+            try:
+                write_result(self.current_deployment_folder, "hash", self.box_verify_thread._verification_context,
+                             summary="The file list check failed before the hash check started.")
+            except (OSError, ValueError) as exc:
+                self.log(f"Could not record the skipped hash check: {exc}")
             self._finish_post_upload_verification(False, "Post-upload verification failed during Box file-list check.", [])
             return
 
@@ -4143,9 +4161,6 @@ class FieldDataWizard(QMainWindow):
         self._finish_post_upload_verification(ok, summary, issues or [])
 
     def _finish_post_upload_verification(self, hash_ok: bool, hash_summary: str, hash_issues: list):
-        box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
-        box_extra = [i for i in self._post_upload_box_issues if i["type"] == "extra_on_box"]
-        has_box_warning = bool(box_extra)
         all_ok = hash_ok and not self._post_upload_box_issues and not hash_issues
         if all_ok and self.current_deployment_folder:
             from cassn.box.publication import require_publication_complete
@@ -4161,7 +4176,7 @@ class FieldDataWizard(QMainWindow):
         try:
             if all_ok:
                 _, all_ok = readiness(self.current_deployment_folder, self.file_inventory,
-                                      self.metadata, self.box_config)
+                                      self.metadata, self.box_config, require_delivery=False)
                 if not all_ok:
                     hash_summary += " Current verification evidence is unavailable; rerun the checks."
             if not all_ok:
@@ -4174,6 +4189,50 @@ class FieldDataWizard(QMainWindow):
         except (OSError, ValueError, TypeError) as exc:
             all_ok = False
             hash_summary += f" Verification evidence could not be saved: {exc}"
+        state_path = self.current_deployment_folder / STATE_PATH
+        if state_path.is_file():
+            from cassn.box.publication import atomic_json
+            from cassn.box.receipts import RECEIPT
+            try:
+                state = json.loads(state_path.read_bytes())
+                if state.get("publish_final_receipt"):
+                    path = self.current_deployment_folder / RECEIPT
+                    record = json.loads(path.read_bytes())
+                    record["batch_attempt_id"] = state["batch_attempt_id"]
+                    if not all_ok:
+                        record["verified"] = False
+                        worker = self.sender()
+                        record["context"] = getattr(worker, "_verification_context", None)
+                    atomic_json(path, record)
+                    self._receipt_result = (all_ok, hash_ok, hash_summary, hash_issues)
+                    self.box_upload_complete = False
+                    self.upload_status_label.setText("Saving the verification receipt to Box…")
+                    self.receipt_thread = BoxReceiptThread(self.current_deployment_folder, state, self.box_config)
+                    self.receipt_thread.finished.connect(self._on_receipt_finished)
+                    FieldDataWizard._start_owned_box_worker(self, self.receipt_thread)
+                    return
+            except (OSError, ValueError, KeyError) as exc:
+                all_ok = False
+                hash_summary += f" Could not prepare the Box receipt: {exc}"
+        FieldDataWizard._display_post_upload_result(self, all_ok, hash_ok, hash_summary, hash_issues)
+
+    def _on_receipt_finished(self, saved, message):
+        if not self._box_callback_is_current("receipt_thread"):
+            return
+        all_ok, hash_ok, summary, issues = self._receipt_result
+        if not saved:
+            FieldDataWizard._set_box_controls_busy(self, False)
+            self._show_saved_box_result(False)
+            self.upload_status_label.setText("Box could not save the verification receipt. Select Upload to Box to retry.")
+            self.upload_metrics_label.setText(message)
+            set_platform_status(self.upload_status_label, "error")
+            self.log(f"Box verification receipt: {message}")
+            return
+        FieldDataWizard._display_post_upload_result(self, all_ok, hash_ok, summary, issues)
+
+    def _display_post_upload_result(self, all_ok, hash_ok, hash_summary, hash_issues):
+        box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
+        has_box_warning = any(i["type"] == "extra_on_box" for i in self._post_upload_box_issues)
         self.box_upload_complete = all_ok
 
         self.open_btn.setEnabled(True)
@@ -4418,12 +4477,35 @@ class FieldDataWizard(QMainWindow):
         if filename and (checked == 0 or checked % 500 == 0):
             self.log(f"  Hash verify: {checked}/{total} — {filename}")
 
+    def _finish_manual_receipt(self, context):
+        """Use both saved check results when a single manual check is repeated."""
+        from cassn.core.verification_evidence import FILES
+        folder = self.current_deployment_folder
+        try:
+            if not (folder / STATE_PATH).is_file() or not json.loads(
+                    (folder / STATE_PATH).read_bytes()).get("publish_final_receipt"):
+                return False
+            results = {}
+            for kind, filename in FILES.items():
+                path = folder / "qc" / filename
+                result = json.loads(path.read_bytes()) if path.is_file() else {}
+                results[kind] = result if result.get("context") == context else {}
+            box, hashes = results["box"], results["hash"]
+            self._post_upload_box_summary = box.get("summary", "File list check pending.")
+            self._post_upload_box_issues = box.get("issues", [])
+            self._finish_post_upload_verification(hashes.get("ok") is True,
+                                                  hashes.get("summary", "Hash check pending."),
+                                                  hashes.get("issues", []))
+            return True
+        except (OSError, ValueError) as exc:
+            self.log(f"Could not read check results for the Box receipt: {exc}")
+            return False
+
     def _on_fixity_finished(self, ok: bool, summary: str, issues: list):
         if not self._box_callback_is_current('fixity_thread'):
             return
         deployment_folder = self.current_deployment_folder
         ok, summary = FieldDataWizard._save_check_result(self, 'hash', ok and not issues, summary, issues or [])
-        FieldDataWizard._set_box_controls_busy(self, False)
         self.fixity_btn.setText("Verify Box ↔ Local Hashes")
         self.fixity_check_run = True
         self.log(operation_message(summary, ok, warning=ok and bool(issues)))
@@ -4438,6 +4520,10 @@ class FieldDataWizard(QMainWindow):
         # Aggregate fixity_check entry covering the whole run
         severity = "pass" if ok else "error"
         append_qc_report(deployment_folder, "file_hash_verification_run", "", severity, summary)
+
+        if FieldDataWizard._finish_manual_receipt(self, getattr(self.fixity_thread, "_verification_context", None)):
+            return
+        FieldDataWizard._set_box_controls_busy(self, False)
 
         if ok:
             QMessageBox.information(self, "File Hashes Verified", summary)
@@ -4515,7 +4601,6 @@ class FieldDataWizard(QMainWindow):
         if not self._box_callback_is_current('box_verify_thread'):
             return
         ok, summary = FieldDataWizard._save_check_result(self, 'box', ok, summary, issues or [])
-        FieldDataWizard._set_box_controls_busy(self, False)
         self.box_verify_btn.setText("Verify Box Upload")
         self.log(operation_message(summary, ok, warning=ok and bool(issues)))
         if self.box_upload_complete:
@@ -4524,6 +4609,10 @@ class FieldDataWizard(QMainWindow):
         # Aggregate result
         severity = "pass" if ok and not issues else ("warning" if ok else "error")
         append_qc_report(self.current_deployment_folder, "box_verify", "", severity, summary)
+
+        if FieldDataWizard._finish_manual_receipt(self, getattr(self.box_verify_thread, "_verification_context", None)):
+            return
+        FieldDataWizard._set_box_controls_busy(self, False)
 
         if ok and not issues:
             QMessageBox.information(self, "Box Verify Passed", summary)

@@ -865,6 +865,9 @@ def test_wi_manual_inputs_ready_before_media_and_accumulate_across_plots(tmp_pat
     expected = list(csv.DictReader(io.StringIO(api.objects[ml]["payload"].decode())))
     assert [r["deployment_id"] for r in expected] == ["p1_ML", "p3_ML"]
     assert api.objects[sa]["version"] == 1
+    staged_folder = api.by_name("WI_metadata")
+    mirrored = api.by_name("wildlife_insights_ML_deployments.csv", staged_folder)
+    assert api.objects[mirrored]["payload"] == api.objects[ml]["payload"]
     second.publish()
     start([camera(3, "ML")]).publish()
     assert api.objects[ml]["version"] == 2
@@ -898,3 +901,57 @@ def test_display_counts_only_current_files_in_readback_verified_box_records(tmp_
     candidate = publication.attempt_dir / "audio_file_metadata.csv.candidate"
     candidate.write_bytes(candidate.read_bytes() + b"\n")
     assert previously_uploaded(event_folder, inventory) is None
+
+
+def test_final_receipt_history_current_paths_and_retry(tmp_path):
+    from cassn.box.receipts import RECEIPT, publish_final_receipt, receipt_delivered
+    from cassn.core.verification_evidence import write_result
+
+    api = FakeBox()
+    storage = BoxStorage(api)
+    def data(path):
+        parent = "event"
+        for part in Path(path).parts:
+            parent = api.by_name(part, parent)
+        return api.objects[parent]["payload"]
+
+    initial = EventPublication(storage, "event", tmp_path)
+    initial.prepare()
+    initial.begin_verification_receipt()
+    batch = initial.attempt_id
+    assert json.loads(data(RECEIPT)) == {"verified": False, "status": "pending", "batch_attempt_id": batch}
+    summary = tmp_path / "qc/deployment_summary.txt"
+    summary.write_text("Two devices")
+    initial.prepare_current_qc([summary])
+    initial.publish()
+    assert data("qc/deployment_summary.txt") == summary.read_bytes()
+    context = {"profile": "uc", "digest": "example"}
+    write_result(tmp_path, "box", context, ok=True, summary="All listed")
+    write_result(tmp_path, "hash", context, ok=True, summary="Hashes match")
+    path = tmp_path / RECEIPT
+    record = json.loads(path.read_bytes())
+    path.write_text(json.dumps(dict(record, batch_attempt_id=batch)))
+    assert not receipt_delivered(tmp_path)
+    publish_final_receipt(storage, tmp_path, initial.state)
+    assert receipt_delivered(tmp_path)
+    archived = f"qc/box_batches/{batch}/{RECEIPT}"
+    assert data(archived) == data(RECEIPT) == path.read_bytes()
+    assert json.loads(data(RECEIPT))["verified"] is True
+    calls = len(api.calls)
+    publish_final_receipt(storage, tmp_path, initial.state)
+    assert len(api.calls) == calls
+
+    second = EventPublication(storage, "event", tmp_path / 'second')
+    second.prepare()
+    second.begin_verification_receipt()
+    assert json.loads(data(RECEIPT))["status"] == "pending"
+    assert json.loads(data(archived))["verified"] is True
+    with pytest.raises(MetadataConflict, match="Another batch"):
+        publish_final_receipt(storage, tmp_path, initial.state)
+
+    second.publish()
+    failed = {"verified": False, "batch_attempt_id": second.attempt_id, "context": context}
+    (second.local_folder / RECEIPT).write_text(json.dumps(failed))
+    publish_final_receipt(storage, second.local_folder, second.state)
+    assert json.loads(data(RECEIPT)) == failed
+    assert json.loads(data(archived))["verified"] is True
