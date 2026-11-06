@@ -175,10 +175,10 @@ def test_verified_upload_reports_success_in_box_panel_without_popup(tmp_path, mo
     assert window.box_upload_complete
     window._show_saved_box_result.assert_called_once_with(True)
     window.upload_status_label.setText.assert_called_with(
-        "✓ Upload complete. File list and hashes verified for 2 event files."
+        "✓ Upload complete and verified."
     )
     window.upload_metrics_label.setText.assert_called_with(
-        "Box file list: 2 of 2 files present\nFile hashes: 2 hashes match"
+        "• Files checked: 2\n• Box file list: Passed\n• File hashes: Passed"
     )
     assert not dialog.mock_calls
 

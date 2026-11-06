@@ -3420,18 +3420,30 @@ class FieldDataWizard(QMainWindow):
     # Box upload + post-upload verification
     # ------------------------------------------------------------------
 
+    def _show_box_verification_list(self, box_summary, hash_summary):
+        """Show passing results clearly; retain the full check text on hover."""
+        self.upload_metrics_label.setText(
+            f"• Files checked: {len(self.file_inventory):,}\n"
+            "• Box file list: Passed\n"
+            "• File hashes: Passed"
+        )
+        self.upload_metrics_label.setToolTip(
+            f"Box file list: {box_summary}\nFile hashes: {hash_summary}"
+        )
+
     def _show_saved_box_result(self, verified):
         self.box_upload_complete = verified
         self.upload_group.show()
         self.upload_metrics_label.clear()
+        self.upload_metrics_label.setToolTip("")
         if verified and self.current_deployment_folder:
             # readiness() already matched these results to the current inventory.
             try:
                 record = json.loads((self.current_deployment_folder / "qc/box_upload_verification.json").read_text())
                 if record.get("verified") is True:
-                    self.upload_metrics_label.setText(
-                        f"Box file list: {record['box_file_list']['summary']}\n"
-                        f"File hashes: {record['hash_verification']['summary']}")
+                    FieldDataWizard._show_box_verification_list(
+                        self, record['box_file_list']['summary'],
+                        record['hash_verification']['summary'])
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 pass
         self.cancel_upload_btn.hide()
@@ -3701,6 +3713,7 @@ class FieldDataWizard(QMainWindow):
         self.box_upload_complete = False
         self.hash_group.hide()
         self.upload_metrics_label.clear()
+        self.upload_metrics_label.setToolTip("")
         self.upload_group.show()
         self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
@@ -4258,12 +4271,9 @@ class FieldDataWizard(QMainWindow):
         )
         if all_ok:
             self._show_saved_box_result(True)
-            total = len(self.file_inventory)
-            noun = "file" if total == 1 else "files"
-            self.upload_status_label.setText(f"✓ Upload complete. File list and hashes verified for {total:,} event {noun}.")
-            self.upload_metrics_label.setText(
-                f"Box file list: {self._post_upload_box_summary}\nFile hashes: {hash_summary}"
-            )
+            self.upload_status_label.setText("✓ Upload complete and verified.")
+            FieldDataWizard._show_box_verification_list(
+                self, self._post_upload_box_summary, hash_summary)
             return
 
         if has_box_warning and hash_ok and not box_missing and not hash_issues:

@@ -83,7 +83,8 @@ def test_reopen_counts_partial_upload_without_publishing_or_verifying(monkeypatc
         }))
         window._box_present_paths = present | {"raw_data/p1_ML/next.jpg"}
         window._show_saved_box_result(True)
-        assert window.upload_metrics_label.text() == "Box file list: 3 names matched\nFile hashes: 3 hashes matched"
+        assert window.upload_metrics_label.text() == "• Files checked: 3\n• Box file list: Passed\n• File hashes: Passed"
+        assert window.upload_metrics_label.toolTip() == "Box file list: 3 names matched\nFile hashes: 3 hashes matched"
         window._box_present_paths = present
         window._show_saved_box_result(True)
         assert not window.box_upload_complete
