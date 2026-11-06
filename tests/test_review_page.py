@@ -45,7 +45,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             assert wi_bar.height() >= wi_bar.fontMetrics().height()
             assert window.review_splitter.orientation() == (Qt.Horizontal if width == 1280 else Qt.Vertical)
             for view in (window.summary_text, window.staged_event_tree):
-                assert view.viewport().height() >= 200
+                assert view.viewport().height() >= 150
             for group in [window.review_splitter.widget(i) for i in range(2)] + groups:
                 if isinstance(group, PlatformPanel):
                     header = group.header.geometry()

@@ -1210,7 +1210,7 @@ class FieldDataWizard(QMainWindow):
 
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setMinimumHeight(260)
+        self.summary_text.setFixedHeight(220)
         summary_layout.addWidget(self.summary_text)
 
         summary_group.setLayout(summary_layout)
@@ -1227,7 +1227,7 @@ class FieldDataWizard(QMainWindow):
         tree_layout.addWidget(self.open_event_folder_btn, alignment=Qt.AlignRight)
         self.staged_event_tree = QTreeWidget()
         self.staged_event_tree.setHeaderLabels(["Folder / File", "Contents"])
-        self.staged_event_tree.setMinimumHeight(self.summary_text.minimumHeight())
+        self.staged_event_tree.setFixedHeight(self.summary_text.height())
         header = self.staged_event_tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1237,13 +1237,17 @@ class FieldDataWizard(QMainWindow):
         tree_group.setLayout(tree_layout)
 
         self.review_splitter = review_splitter = QSplitter(Qt.Horizontal)
+        # The overview has its own scrolling. Do not give it the extra height
+        # requested by expanded platform panels farther down the page.
+        review_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         review_splitter.setChildrenCollapsible(False)
         review_splitter.addWidget(summary_group)
         review_splitter.addWidget(tree_group)
         review_splitter.setStretchFactor(0, 1)
         review_splitter.setStretchFactor(1, 1)
         review_splitter.setSizes([330, 260])
-        layout.addWidget(review_splitter, stretch=1)
+        layout.setAlignment(Qt.AlignTop)
+        layout.addWidget(review_splitter)
         layout.addWidget(scroll.progress_heading)
 
         # Box upload and staging panels remain available throughout review.

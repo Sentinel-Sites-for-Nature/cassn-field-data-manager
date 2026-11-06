@@ -354,3 +354,37 @@ def test_preparation_message_counts_wait_without_changing_progress(monkeypatch):
     finally:
         label.close()
         app.processEvents()
+
+
+@pytest.mark.parametrize("zoom", [100, 130, 200])
+@pytest.mark.parametrize("width", [930, 1440])
+def test_review_overview_does_not_grow_when_platforms_expand(monkeypatch, zoom, width):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", "/synthetic/helper"))
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: False)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda _: [])
+    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
+    try:
+        window.tabs.setCurrentIndex(2)
+        window.workspace.set_zoom(zoom)
+        window.resize(width, 900)
+        window.show()
+        panels = [window.upload_group, window.soundhub_group, window.wi_control.group]
+        for panel in panels:
+            panel.show()
+        for _ in range(3):
+            app.processEvents()
+        overview_height = max(window.review_splitter.height(), window.review_splitter.minimumSizeHint().height())
+        for expanded in (True, False, True):
+            for panel in panels:
+                panel.disclosure.setChecked(expanded)
+            for _ in range(3):
+                app.processEvents()
+            assert window.review_splitter.height() <= overview_height + 2
+            page = window.tabs.widget(2)
+            gap = page.progress_heading.y() - window.review_splitter.geometry().bottom() - 1
+            assert gap <= page.widget().layout().spacing() + 2
+            assert page.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        app.processEvents()
