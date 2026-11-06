@@ -176,6 +176,7 @@ class BoxUploadThread(QThread):
             require_no_ingest_holds(self.deployment_folder)
             metrics.output_path = self.deployment_folder / 'qc' / STATE_DIRECTORY / 'metrics.json'
             metrics.set_stage('preparing')
+            self.progress.emit(0, 0, "Checking the saved Box connection…")
             self.client = get_box_client(self.box_config)
             if not self.client:
                 self.finished.emit(False, "Could not authenticate with Box")
@@ -200,6 +201,7 @@ class BoxUploadThread(QThread):
             year = self.metadata["deployment_event_end_date"][:4]
             deploy_name = self.deployment_folder.name
 
+            self.progress.emit(0, 0, "Finding this event's folders on Box…")
             year_id = storage.find_or_create_folder(target_folder_id, year)
             reserve_id = storage.find_or_create_folder(year_id, site_name)
             deploy_id = storage.find_or_create_folder(reserve_id, deploy_name)
@@ -208,15 +210,18 @@ class BoxUploadThread(QThread):
             append_qc_report(self.deployment_folder, "box_publication", "", "info",
                              "Preparing a batch upload; completion requires metadata publication and verification.")
             publication = EventPublication(storage, deploy_id, self.deployment_folder)
+            self.progress.emit(0, 0, "Comparing local metadata with the existing Box event…")
             publication.prepare()  # Reject unsafe merges before sending media.
             publication.validate_batch_inventory(self.file_inventory)
             publication.begin_verification_receipt()
+            self.progress.emit(0, 0, "Preparing Wildlife Insights metadata on Box…")
             publication.publish_wi_inputs()
 
             def remote_path(path):
                 relative = path.relative_to(self.deployment_folder)
                 return batch_remote_path(relative, publication.attempt_id)
 
+            self.progress.emit(0, 0, "Listing local files for this Box upload…")
             uploadable_files = [
                 path
                 for path in self.deployment_folder.rglob("*")
@@ -279,7 +284,8 @@ class BoxUploadThread(QThread):
                 }
             )
             parent_id_for_path: dict[tuple, str] = {(): deploy_id}
-            for path_parts in unique_parent_paths:
+            for folder_number, path_parts in enumerate(unique_parent_paths, 1):
+                self.progress.emit(0, 0, f"Preparing Box folders: {folder_number:,} of {len(unique_parent_paths):,}…")
                 if not path_parts:
                     continue
                 # Resolve each segment, building up the parent_id chain.
@@ -294,7 +300,8 @@ class BoxUploadThread(QThread):
 
             # Pre-populate the per-folder file-existence cache for every unique
             # parent. folder_file_map() is idempotent, so duplicate ids are free.
-            for folder_id in parent_id_for_path.values():
+            for folder_number, folder_id in enumerate(parent_id_for_path.values(), 1):
+                self.progress.emit(0, 0, f"Checking files already on Box: folder {folder_number:,} of {len(parent_id_for_path):,}…")
                 storage.folder_file_map(folder_id)
 
             # PHASE 2 — Parallel upload via ThreadPoolExecutor. Each upload is

@@ -1,7 +1,8 @@
 """Presentation shell for the field workspace; workflow decisions stay in the wizard."""
 
 from math import ceil
-from PySide6.QtCore import QEvent, QPointF, Qt, Signal
+import time
+from PySide6.QtCore import QEvent, QPointF, Qt, Signal, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPalette, QPixmap, QTextLayout, QTextOption, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
@@ -58,6 +59,32 @@ class UploadMessage(QLabel):
         painter.setPen(self.palette().color(self.foregroundRole()))
         layout, _ = self._wrapped(self.width())
         layout.draw(painter, QPointF(0, 0))
+
+
+class PreparationMessage(UploadMessage):
+    """Show elapsed waiting time without inventing a completion percentage."""
+
+    def __init__(self):
+        super().__init__()
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setInterval(1000)
+        self._pending_timer.timeout.connect(self._refresh_pending)
+
+    def setPendingText(self, text):
+        if not self._pending_timer.isActive():
+            self._pending_started = time.monotonic()
+        self._pending_text = text
+        self._refresh_pending()
+        self._pending_timer.start()
+
+    def _refresh_pending(self):
+        seconds = max(0, int(time.monotonic() - self._pending_started))
+        minutes, seconds = divmod(seconds, 60)
+        super().setText(f"{self._pending_text}\nPreparing · {minutes}:{seconds:02d} elapsed")
+
+    def setText(self, text):
+        self._pending_timer.stop()
+        super().setText(text)
 
 
 class UploadProgressBar(QProgressBar):

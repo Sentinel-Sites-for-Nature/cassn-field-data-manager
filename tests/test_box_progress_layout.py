@@ -294,3 +294,31 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         window.current_deployment_folder = None
         window.close()
         app.processEvents()
+
+
+def test_preparation_message_counts_wait_without_changing_progress(monkeypatch):
+    from cassn.gui import workspace
+    app = QApplication.instance() or QApplication([])
+    clock = [100.0]
+    monkeypatch.setattr(workspace.time, 'monotonic', lambda: clock[0])
+    label = workspace.PreparationMessage()
+    try:
+        label.setPendingText('Checking existing files…')
+        assert '0:00 elapsed' in label.text()
+        clock[0] += 65
+        label._refresh_pending()
+        assert '1:05 elapsed' in label.text()
+        label.setPendingText('Checking metadata…')
+        assert '1:05 elapsed' in label.text()
+        assert label._pending_timer.isActive()
+        label.setText('Upload failed. Retry after checking the connection.')
+        assert not label._pending_timer.isActive()
+        assert 'elapsed' not in label.text()
+        label.setPendingText('Connecting…')
+        assert '0:00 elapsed' in label.text()
+        label.clear()
+        assert not label._pending_timer.isActive()
+        assert not label.text()
+    finally:
+        label.close()
+        app.processEvents()

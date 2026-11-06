@@ -58,6 +58,7 @@ class SoundHubStageThread(QThread):
 
     def _check_existing_batch(self):
         """Keep slow filesystem and Box checks off the GUI thread, before writes."""
+        self.progress.emit(0, 0, "Checking saved SoundHub staging work…")
         recover_staging(self.staging_root)
         root = project_root(self.staging_root)
         fragments = fragments_root(self.staging_root)
@@ -70,11 +71,11 @@ class SoundHubStageThread(QThread):
         if not (has_fragments or has_manifests):
             return
 
-        self.progress.emit(0, 0, "Checking existing SoundHub batch…")
+        self.progress.emit(0, 0, "Checking the shared SoundHub batch, including earlier events…")
         validate_staging_manifests(self.staging_root)
         if self._cancel_event.is_set():
             return
-        self.progress.emit(0, 0, "Checking existing batch submission records in Box…")
+        self.progress.emit(0, 0, "Checking earlier SoundHub submission records in Box before conversion…")
         lifecycle = plan_completed_batch_cleanup(self.staging_root)
         if self._cancel_event.is_set():
             return

@@ -80,7 +80,7 @@ from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMess
 from cassn.gui.appearance import set_platform_status, style_cancel_button, PlatformPanel, platform_logo
 from cassn.gui.workspace import (
     CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
-    UploadMessage, UploadProgressBar, workspace_label,
+    UploadMessage, PreparationMessage, UploadProgressBar, workspace_label,
 )
 from cassn.gui.box_session_count import BoxSessionCount
 from cassn.gui.event_progress import EventProgress
@@ -1260,7 +1260,7 @@ class FieldDataWizard(QMainWindow):
         self.box_progress_rows.add_single_bar("Event files", self.upload_progress_bar)
         self.upload_group.details.addWidget(self.box_progress_rows)
 
-        self.upload_status_label = UploadMessage()
+        self.upload_status_label = PreparationMessage()
         upload_layout.addWidget(self.upload_status_label)
         self.box_history_label = workspace_label("", "contextTitle", wrap=True)
         self.box_history_label.hide()
@@ -1313,7 +1313,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_recorders.hide()
         self.soundhub_recorder_bars = {}
 
-        self.soundhub_status_label = UploadMessage()
+        self.soundhub_status_label = PreparationMessage()
         soundhub_layout.addWidget(self.soundhub_status_label)
         self.soundhub_history_label = workspace_label("", "contextTitle", wrap=True)
         self.soundhub_history_label.hide()
@@ -3747,7 +3747,7 @@ class FieldDataWizard(QMainWindow):
             self._start_box_upload_thread()
             return
 
-        self.upload_status_label.setText("Preparing local files for Box upload…")
+        self.upload_status_label.setPendingText("Preparing local files for Box upload…")
         self.cancel_upload_btn.setText("Cancel Preparation")
         self.wi_split_thread = WISplitThread(
             self.current_deployment_folder,
@@ -3762,7 +3762,7 @@ class FieldDataWizard(QMainWindow):
         if not self._box_callback_is_current('wi_split_thread'):
             return
         if total <= 0:
-            self.upload_status_label.setText(
+            self.upload_status_label.setPendingText(
                 path or "Preparing local files for Box upload…"
             )
             return
@@ -3843,7 +3843,7 @@ class FieldDataWizard(QMainWindow):
             self.upload_progress_bar.setRange(0, 100)
             self.upload_progress_bar.setFormat("This transfer · %p%")
             self.upload_progress_bar.setValue(0)
-        self.upload_status_label.setText("Starting upload to Box…")
+        self.upload_status_label.setPendingText("Connecting to Box and checking the existing event…")
         set_platform_status(self.upload_status_label, "")
         self.cancel_upload_btn.setEnabled(True)
         self.cancel_upload_btn.setText("Cancel Upload")
@@ -3919,6 +3919,9 @@ class FieldDataWizard(QMainWindow):
     def on_upload_progress(self, current, total, filename):
         if not self._box_callback_is_current('upload_thread'):
             return
+        if total <= 0:
+            self.upload_status_label.setPendingText(filename or "Preparing Box upload…")
+            return
         action, _, path = filename.partition(": ")
         progress = self._box_event_progress
         if progress and action in {"uploaded", "skipped", "versioned"}:
@@ -3934,6 +3937,9 @@ class FieldDataWizard(QMainWindow):
         if not self._box_callback_is_current('upload_thread'):
             return
         stage = values.get('stage', 'preparing')
+        if stage == 'preparing':
+            self.upload_metrics_label.clear()
+            return
         names = {'preparing': 'Preparing folders', 'transferring': 'Transferring files',
                  'verifying_media': 'Checking uploaded media',
                  'publishing_metadata': 'Publishing metadata',
@@ -4881,7 +4887,7 @@ class FieldDataWizard(QMainWindow):
         self._show_recorder_progress(self._soundhub_event_progress)
         self._record_soundhub_result("staging", "interrupted", "Staging started and has no completion result. Continue staging.")
         set_platform_status(self.soundhub_status_label, "")
-        self.soundhub_status_label.setText("Checking existing SoundHub batch…")
+        self.soundhub_status_label.setPendingText("Checking previously staged bird recordings before conversion…")
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
@@ -5058,6 +5064,9 @@ class FieldDataWizard(QMainWindow):
             self._show_recorder_progress(progress)
 
     def on_soundhub_progress(self, current, total, name):
+        if total <= 0:
+            self.soundhub_status_label.setPendingText(name)
+            return
         if total and not self._soundhub_event_progress:
             self.soundhub_status_label.setText(f"{name} ({current:,}/{total:,})")
             return

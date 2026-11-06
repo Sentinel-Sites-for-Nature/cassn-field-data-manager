@@ -249,7 +249,7 @@ class WildlifeInsightsControl(QObject):
         name, total = scope["deployment"], scope["images"]
         confirmed = row.get("confirmed", 0)
         count = confirmed
-        labels = {"queued": "Queued", "waiting_retry": "Waiting to retry", "cleaning": "Finishing checks",
+        labels = {"queued": "Queued · waiting for uploader preparation", "waiting_retry": "Waiting to retry", "cleaning": "Finishing checks",
                   "transferred_or_waiting": "Waiting for verification", "unknown": "Status unknown",
                   "verified": f"WI upload verified · {total:,} photos", "staged": f"Ready to upload · {total:,} photos",
                   "uploading": f"Uploading {confirmed:,} of {total:,} photos"}
@@ -273,7 +273,7 @@ class WildlifeInsightsControl(QObject):
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
-        if total and (stage in {"staged", "queued", "uploading", "verified"} or (stage == "verifying" and type(row.get("verified_count")) is int)):
+        if total and (stage in {"staged", "uploading", "verified"} or (stage == "verifying" and type(row.get("verified_count")) is int)):
             label += f" · {100 * count // total}%"
         bar.setFormat(label)
         bar.setAccessibleName(label)
