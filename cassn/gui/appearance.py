@@ -287,7 +287,7 @@ class _PanelActions(QLayout):
 
 
 class PlatformPanel(QGroupBox):
-    """A fixed-purpose header, an always-visible summary, and optional progress details."""
+    """A platform header that expands to show its summary, progress, and actions."""
 
     def __init__(self, purpose):
         super().__init__()
@@ -317,9 +317,13 @@ class PlatformPanel(QGroupBox):
         self.disclosure.setCheckable(True)
         header.addWidget(self.disclosure, 0, 2)
         layout.addWidget(self.header)
-        self.body = QVBoxLayout()
+        self._body_area = QWidget()
+        body_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        body_policy.setHeightForWidth(True)
+        self._body_area.setSizePolicy(body_policy)
+        self.body = QVBoxLayout(self._body_area)
         self.body.setContentsMargins(14, 10, 14, 12)
-        layout.addLayout(self.body)
+        layout.addWidget(self._body_area)
         self._detail_area = QWidget()
         self.details = QVBoxLayout(self._detail_area)
         self.details.setContentsMargins(14, 0, 14, 12)
@@ -365,7 +369,10 @@ class PlatformPanel(QGroupBox):
         return self._heading.text()
 
     def _set_expanded(self, expanded):
+        self._body_area.setVisible(expanded)
         self._detail_area.setVisible(expanded)
+        if self.footer is not None:
+            self.footer.setVisible(expanded)
         self.disclosure.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         verb = "Hide" if expanded else "Show"
         label = f"{verb} {_PLATFORMS[self.platform][0]} progress details"

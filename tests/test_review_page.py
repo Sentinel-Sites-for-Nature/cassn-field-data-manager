@@ -49,7 +49,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
             for group in [window.review_splitter.widget(i) for i in range(2)] + groups:
                 if isinstance(group, PlatformPanel):
                     header = group.header.geometry()
-                    assert 0 <= header.top() < header.bottom() < group.body.geometry().top()
+                    assert 0 <= header.top() < header.bottom() < group._body_area.geometry().top()
                     assert header.width() >= group.width() - 4
                     assert group._heading.geometry().height() >= group._heading.fontMetrics().height()
                     continue

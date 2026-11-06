@@ -401,7 +401,7 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     window.stage_for_soundhub()
     worker.start.assert_called_once()
     assert window.soundhub_group.disclosure.isChecked()
-    assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
+    assert window.soundhub_status_label.text().startswith("Checking previously staged bird recordings before conversion…")
     validate.assert_not_called()
     check_box.assert_not_called()
     window.soundhub_stage_thread = None

@@ -168,6 +168,28 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         assert sizes[1][0] < sizes[0][0]
         assert sizes[1][1] > sizes[0][1]
 
+        active_panels = (window.upload_group, window.soundhub_group, control.group)
+        for panel in active_panels:
+            panel.disclosure.setChecked(False)
+        window.on_upload_progress(4, 4, path)
+        rows[0]["confirmed"] = 2200
+        control.render()
+        window._show_recorder_progress(EventProgress(6, set(), recorders))
+        for _ in range(3):
+            app.processEvents()
+        for panel in active_panels:
+            assert not panel._body_area.isVisible()
+            assert not panel._detail_area.isVisible()
+            assert not panel.footer.isVisible()
+            assert panel.height() <= panel.header.height() + 4
+            panel.disclosure.setChecked(True)
+        for _ in range(3):
+            app.processEvents()
+        assert window.upload_progress_bar.value() == 4
+        assert control.bar_for_item(control.tree.topLevelItem(0)).value() == 2200
+        assert control.jobs["synthetic"]["rows"] is rows
+        assert all(bar.value() == bar.maximum() for _, bar in window.soundhub_recorder_bars.values())
+
         rows[0].update(stage="held", confirmed=0, hold_reason="Missing camera")
         control.render()
         assert "Missing camera" in control.tree.topLevelItem(0).text(1)
@@ -194,11 +216,21 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             opener = next(button for button in footer_buttons if button.text() == open_label)
             assert main.isVisible() and not main.isEnabled()
             assert opener.isVisible()
-            panel.disclosure.setChecked(False)
-            app.processEvents()
             positions = (opener.geometry().topLeft(), main.geometry().topLeft())
+            panel.disclosure.setChecked(False)
+            for _ in range(3):
+                app.processEvents()
+            assert panel.header.isVisible()
+            assert not panel._body_area.isVisible()
+            assert not panel._detail_area.isVisible()
+            assert not panel.footer.isVisible()
+            assert panel.height() <= panel.header.height() + 4
             panel.disclosure.setChecked(True)
-            app.processEvents()
+            for _ in range(3):
+                app.processEvents()
+            assert panel._body_area.isVisible()
+            assert panel._detail_area.isVisible()
+            assert panel.footer.isVisible()
             assert positions == (opener.geometry().topLeft(), main.geometry().topLeft())
         for label in (window.upload_status_label, window.soundhub_status_label, control.verified_summary):
             assert label.property("platformStatus") == "complete"
