@@ -932,7 +932,9 @@ def test_final_receipt_history_current_paths_and_retry(tmp_path):
     record = json.loads(path.read_bytes())
     path.write_text(json.dumps(dict(record, batch_attempt_id=batch)))
     assert not receipt_delivered(tmp_path)
+    summary.write_text("Two devices; final verification complete")
     publish_final_receipt(storage, tmp_path, initial.state)
+    assert data("qc/deployment_summary.txt") == summary.read_bytes()
     assert receipt_delivered(tmp_path)
     archived = f"qc/box_batches/{batch}/{RECEIPT}"
     assert data(archived) == data(RECEIPT) == path.read_bytes()

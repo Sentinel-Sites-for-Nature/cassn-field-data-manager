@@ -4196,6 +4196,8 @@ class FieldDataWizard(QMainWindow):
             try:
                 state = json.loads(state_path.read_bytes())
                 if state.get("publish_final_receipt"):
+                    generate_session_summary(self.current_deployment_folder, self.metadata,
+                                             self.file_inventory, self.devices)
                     path = self.current_deployment_folder / RECEIPT
                     record = json.loads(path.read_bytes())
                     record["batch_attempt_id"] = state["batch_attempt_id"]

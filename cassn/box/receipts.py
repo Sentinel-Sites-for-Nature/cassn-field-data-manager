@@ -83,7 +83,7 @@ def publish_final_receipt(storage, folder, state):
         if (state.get("status") != "published" or not record.get("context")
                 or not all(read_result(folder, kind, record["context"]) for kind in ("box", "hash"))):
             raise MetadataConflict("Both checks must pass for the same batch before publishing a verified receipt")
-    for name in (*CHECK_FILES, "qc/qc_report.json"):
+    for name in (*CHECK_FILES, "qc/qc_report.json", "qc/deployment_summary.txt"):
         path = folder / name
         if not path.is_file():
             continue
