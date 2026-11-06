@@ -1928,7 +1928,13 @@ class FieldDataWizard(QMainWindow):
                 identity = None
             if error:
                 panel["identity_error"] = error
-                self.log(f"Error: [{label}] Could not identify the card: {error}")
+                if "timed out" in error.lower():
+                    self.log(
+                        f"Warning: [{label}] Safe-eject check timed out. This check does not stop copying.\n"
+                        f"{error}"
+                    )
+                else:
+                    self.log(f"Error: [{label}] Could not identify the card: {error}")
             else:
                 self._card_identified(label, panel, identity, "")
             self._refresh_card_eject(label, panel)

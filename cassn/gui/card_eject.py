@@ -20,7 +20,7 @@ def disk_info(*args):
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"macOS did not finish checking {args[-1]} within {DISK_CHECK_TIMEOUT} seconds. "
+            f"Safe-eject check timed out: macOS did not identify {args[-1]} within {DISK_CHECK_TIMEOUT} seconds. "
             "No eject command was sent. Try again after other card jobs finish."
         ) from exc
     try:

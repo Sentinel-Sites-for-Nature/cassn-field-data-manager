@@ -188,8 +188,12 @@ def test_discovery_timeout_recovers_after_copy(window, tmp_path, monkeypatch):
     volume, panel = make_card(window, tmp_path, monkeypatch)
     window._on_card_completed("card", {"ok": True, "source_dir": str(volume)})
     assert panel["eject"].text() == "Retry card check"
-    assert any("timed out" in window.log_text.topLevelItem(i).text(0)
-               for i in range(window.log_text.topLevelItemCount()))
+    rows = [window.log_text.topLevelItem(i) for i in range(window.log_text.topLevelItemCount())]
+    warnings = [row for row in rows if "Safe-eject check timed out" in row.text(0)]
+    assert warnings
+    assert all(row.text(1) == "Warning" for row in warnings)
+    assert all("does not stop copying" in row.text(0) for row in warnings)
+    assert "timed out" in warnings[0].child(0).text(0)
     monkeypatch.setattr(w, "identify_card", identify)
     panel["eject"].click()
     assert panel["eject"].text() == "Eject CAMERA"
