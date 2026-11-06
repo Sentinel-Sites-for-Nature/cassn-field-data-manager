@@ -173,7 +173,7 @@ class HostedSetupDialog(QDialog):
         self.reopen_browser.clicked.connect(lambda: self.open_browser(self._browser_url) if self._browser_url else None)
         layout.addWidget(self.reopen_browser)
         link_color = "#8ed0bd" if QApplication.palette().color(QPalette.Window).lightness() < 128 else "#216e62"
-        help_label = QLabel('Contact John at '
+        help_label = QLabel('Having trouble connecting to Box or loading your project settings? Contact John at '
                             f'<a style="color: {link_color}" href="mailto:jtimperato@ucdavis.edu">jtimperato@ucdavis.edu</a>.')
         help_label.setWordWrap(True)
         help_label.setOpenExternalLinks(True)
