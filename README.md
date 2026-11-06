@@ -419,7 +419,8 @@ ORG_SITE_YYYYMMDD/
 ### Wildlife Insights Deployment CSV
 
 Use **Upload to Wildlife Insights** to start an upload, add cameras, or retry an eligible hold.
-The button stays visible and turns gray when all selected photos are verified.
+The button stays visible and gray while a request is queued, uploading, or verifying.
+It stays gray after verification until another camera is ready. A retryable hold enables it after active requests finish.
 Review the destination project and photo count before confirming.
 If delivery was interrupted, the panel opens the saved selection for confirmation.
 During transfer and verification, the app checks progress once per second while the helper is available.

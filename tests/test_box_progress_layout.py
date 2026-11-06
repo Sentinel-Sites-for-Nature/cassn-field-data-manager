@@ -48,7 +48,7 @@ def test_platform_buttons_use_guarded_actions_and_box_connection_state(monkeypat
         app.processEvents()
 
 
-@pytest.mark.parametrize("zoom", [100, 130, 200])
+@pytest.mark.parametrize("zoom", [80, 100, 130, 160, 200])
 def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeypatch, tmp_path, zoom):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda self: setattr(self, "wi_upload_helper", "/synthetic/helper"))
@@ -80,6 +80,9 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         control.jobs = {"synthetic": {"scopes": scopes, "rows": rows}}
         control.render()
         control.timer.stop()
+        from cassn.gui.event_progress import EventProgress
+        recorders = {f"UC_Example_plot{n}_BD_20261023": {f"recorder-{n}/sample.flac"} for n in range(1, 7)}
+        window._show_recorder_progress(EventProgress(6, {"recorder-2/sample.flac"}, recorders))
         panels = [window.upload_group, window.hash_group, window.soundhub_group, control.group]
         for panel in panels:
             assert not panel.disclosure.isChecked()
@@ -140,7 +143,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                 assert [label.accessibleName() for label in logos] == [f"{name} logo"]
                 assert not logos[0].pixmap().isNull()
                 if name == "Wildlife Sound Hub":
-                    assert logos[0].pixmap().deviceIndependentSize().width() >= 90
+                    assert logos[0].pixmap().deviceIndependentSize().width() >= 90 * min(1, zoom / 100)
             for index, value, text in [(0, 2100, "Uploading 2,100 of 8,150 photos · 25%"),
                                        (1, 3130, "Verifying 3,130 of 4,044 photos · 77%")]:
                 bar = control.bar_for_item(control.tree.topLevelItem(index))
@@ -150,6 +153,12 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                 assert bounds.width() <= bar.width() and bounds.height() <= bar.height()
                 assert bar.parentWidget().rect().contains(bar.geometry())
                 assert control.tree.viewport().rect().contains(bar.mapTo(control.tree.viewport(), bar.rect().bottomRight()))
+            all_bars = [window.upload_progress_bar, window.hash_progress_bar]
+            all_bars.extend(bar for _, bar in window.soundhub_recorder_bars.values())
+            all_bars.extend(control.bar_for_item(control.tree.topLevelItem(i)) for i in range(len(rows)))
+            bounds = {(bar.mapTo(window, bar.rect().topLeft()).x(), bar.width()) for bar in all_bars}
+            assert len(bounds) == 1, (width, zoom, bounds)
+            assert window.soundhub_recorders.verticalScrollBar().maximum() == 0
             sizes.append((window.upload_progress_bar.width(), status.height()))
             if width == 930:
                 page.ensureWidgetVisible(window.cancel_upload_btn)
@@ -280,7 +289,7 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         assert window.soundhub_recorder_bars["p2"][1].text() == "1 of 2 recordings · 50%"
         window._soundhub_recording_prepared("p2", "new.wav")
         assert window.soundhub_recorder_bars["p2"][1].value() == 1
-        assert window.soundhub_recorder_layout.itemAtPosition(2, 1).widget() is window.soundhub_recorder_bars["p2"][1]
+        assert window.soundhub_recorders.bar_for_item(window.soundhub_recorders.topLevelItem(1)) is window.soundhub_recorder_bars["p2"][1]
     finally:
         window.current_deployment_folder = None
         window.close()

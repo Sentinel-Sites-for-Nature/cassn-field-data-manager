@@ -30,12 +30,13 @@ import json
 import re
 from collections import Counter
 
-from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QSize, QTimer, Qt
+from PySide6.QtCore import QObject, QProcess, QTimer, Qt
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QMenu, QPushButton,
-    QSizePolicy, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
+from cassn.gui.progress_table import ProgressTable
 from cassn.gui.workspace import UploadProgressBar
 from cassn.gui.platform_links import WI_PROJECT_NAMES, open_platform_url, wi_project_uploads_url
 
@@ -87,6 +88,7 @@ class WildlifeInsightsControl(QObject):
         self.read_error = False
         self._unproven_verified = False
         self.has_selection = False
+        self.transfer_active = False
         self.group = PlatformPanel("wildlife_insights")
         box = self.group.body
         self.verified_summary = workspace_label("", "contextTitle", wrap=True)
@@ -96,16 +98,7 @@ class WildlifeInsightsControl(QObject):
         self.new_cameras = workspace_label("", "muted", wrap=True)
         self.new_cameras.hide()
         box.addWidget(self.new_cameras)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Deployment and destination", "Progress"])
-        self._fitting_columns = False
-        self.tree.setWordWrap(True)
-        self.tree.setRootIsDecorated(False)
-        self.tree.header().setStretchLastSection(True)
-        self._tree_viewport = self.tree.viewport()
-        self._tree_viewport.installEventFilter(self)
-        self.tree.header().sectionResized.connect(self._fit_progress_column)
-        self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree = ProgressTable("Deployment and destination")
         self.group.details.addWidget(self.tree)
         self.notice = QLabel()
         self.notice.setTextFormat(Qt.PlainText)
@@ -174,9 +167,11 @@ class WildlifeInsightsControl(QObject):
         self._refresh_action()
 
     def _refresh_action(self):
-        self.action.setEnabled(bool(self.folder and not self.read_error and (not self.process or self.process.property("operation") == "status")
+        self.action.setEnabled(bool(self.folder and not self.read_error and not self.transfer_active and (not self.process or self.process.property("operation") == "status")
                                     and not self.window.card_ingest_threads))
         self.panel_button.setEnabled(self.has_selection and self.action.isEnabled() and not self.selection_complete())
+        self.panel_button.setToolTip("An existing camera request is in progress."
+                                     if self.transfer_active else self.action.toolTip())
 
     def render(self):
         self.tree.clear()
@@ -187,6 +182,7 @@ class WildlifeInsightsControl(QObject):
         new, eligibility_error = self._new_selections()
         projects = _exported_projects(self.folder, display_only=True) if self.folder else {}
         self._unproven_verified = False
+        self.transfer_active = False
         for key, job in self.jobs.items():
             rows = {r["deployment"]: r for r in job.get("rows", [])}
             for scope in job["scopes"]:
@@ -195,6 +191,8 @@ class WildlifeInsightsControl(QObject):
                 if superseded(scope, row, sources):
                     continue
                 stage = row.get("stage", "unknown")
+                if stage not in {"held", "verified"} and (stage != "unknown" or key not in self.delivery_keys):
+                    self.transfer_active = True
                 if key in self.unavailable and stage not in {"verified", "held"}:
                     stage = "unknown"
                 if stage == "verified":
@@ -235,7 +233,7 @@ class WildlifeInsightsControl(QObject):
             unit = "photo" if total == 1 else "photos"
             self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {total:,} {unit}")
         self.tree.setVisible(bool(self.tree.topLevelItemCount()))
-        self._fit_progress_column()
+        self.tree.fit_rows()
         set_platform_status(self.verified_summary, "complete" if self.selection_complete() else "")
         self._refresh_action()
         if any(not complete(j, sources) for j in self.jobs.values()):
@@ -255,8 +253,6 @@ class WildlifeInsightsControl(QObject):
                   "transferred_or_waiting": "Waiting for verification", "unknown": "Status unknown",
                   "verified": f"WI upload verified · {total:,} photos", "staged": f"Ready to upload · {total:,} photos",
                   "uploading": f"Uploading {confirmed:,} of {total:,} photos"}
-        item = QTreeWidgetItem(self.tree, [name])
-        item.setToolTip(0, name)
         if stage == "verifying":
             value = row.get("verified_count")
             count = min(total, max(0, value)) if type(value) is int else 0
@@ -268,35 +264,12 @@ class WildlifeInsightsControl(QObject):
             missing = re.fullmatch(r"Added deployment held: expected one exact camera ([A-Za-z0-9_-]+); found 0", reason)
             label = (f"{status} · Camera {missing[1]} was missing in WI at the last attempt."
                      if missing else f"{status} · {reason}")
-            item.setText(1, label)
-            item.setToolTip(1, reason)
         else:
             label = labels[stage]
             if stage == "unknown":
                 count = 0
 
-        identity = QWidget()
-        lines = QVBoxLayout(identity)
-        lines.setContentsMargins(0, 0, 0, 0)
-        lines.setSpacing(2)
-        name_label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
-        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lines.addWidget(name_label)
         project, source = self._project_label(scope, row, stage, exported_project)
-        project_label = workspace_label(project, "muted", wrap=True)
-        project_label.setToolTip(source)
-        project_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lines.addWidget(project_label)
-        # At narrow widths the entire identity moves above its own progress bar.
-        for column in (0, 1):
-            cell = QWidget()
-            cell.setAutoFillBackground(True)
-            cell.setBackgroundRole(self.tree.viewport().backgroundRole())
-            box = QVBoxLayout(cell)
-            box.setContentsMargins(0, 0, 0, 0)
-            box.setSpacing(2)
-            self.tree.setItemWidget(item, column, cell)
-        self.tree.itemWidget(item, 0).layout().addWidget(identity)
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
@@ -304,8 +277,10 @@ class WildlifeInsightsControl(QObject):
             label += f" · {100 * count // total}%"
         bar.setFormat(label)
         bar.setAccessibleName(label)
-        bar.setProperty("wrapProgressText", True)
-        self.tree.itemWidget(item, 1).layout().addWidget(bar)
+        item = self.tree.add_bar(name, bar, detail=project, detail_tip=source)
+        if stage == "held":
+            item.setText(1, label)
+            item.setToolTip(1, reason)
 
     @staticmethod
     def _project_label(scope, row, stage, exported_project):
@@ -321,14 +296,8 @@ class WildlifeInsightsControl(QObject):
                 return f"Destination project: {WI_PROJECT_NAMES.get(value, value)}", source
         return "Destination project: unavailable", "No destination found in the saved records."
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize and obj is self._tree_viewport and not self.closed:
-            self._fit_progress_column()
-        return super().eventFilter(obj, event)
-
     def bar_for_item(self, item):
-        cell = self.tree.itemWidget(item, 1)
-        return cell.findChild(UploadProgressBar) if cell else None
+        return self.tree.bar_for_item(item)
 
     def refresh_new_cameras(self):
         self.render()
@@ -348,53 +317,6 @@ class WildlifeInsightsControl(QObject):
             return {}, str(exc)
         requested = {s["deployment"] for job in self.jobs.values() for s in job["scopes"]}
         return {name: photos for name, photos in available.items() if name not in requested}, ""
-
-    def _fit_progress_column(self):
-        """Stack names above bars when both columns cannot fit at the current zoom."""
-        if self._fitting_columns:
-            return
-        self._fitting_columns = True
-        try:
-            width = self.tree.viewport().width()
-            items = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
-            items = [item for item in items if not item.isHidden()]
-            needed = width // 2
-            for item in items:
-                bar = self.bar_for_item(item)
-                if bar:
-                    needed = max(needed, bar.fontMetrics().horizontalAdvance(bar.format()) + 24)
-            compact = width - needed < self.tree.fontMetrics().horizontalAdvance("Camera deployment")
-            self.tree.setColumnHidden(0, compact)
-            self.tree.headerItem().setText(1, "Camera progress" if compact else "Progress")
-            if not compact:
-                self.tree.setColumnWidth(0, min(420, width - needed))
-            progress_width = max(1, (width if compact else width - self.tree.columnWidth(0)) - 14)
-            name_width = progress_width if compact else max(1, self.tree.columnWidth(0) - 14)
-            for item in items:
-                left = self.tree.itemWidget(item, 0)
-                right = self.tree.itemWidget(item, 1)
-                if not left or not right:
-                    continue
-                left_box, right_box = left.layout(), right.layout()
-                if compact and left_box.count():
-                    right_box.insertWidget(0, left_box.itemAt(0).widget())
-                elif not compact and not left_box.count():
-                    left_box.addWidget(right_box.itemAt(0).widget())
-                identity = (right_box if compact else left_box).itemAt(0).widget()
-                bar = self.bar_for_item(item)
-                bar_height = bar.fontMetrics().boundingRect(
-                    QRect(0, 0, progress_width, 8192), Qt.TextWordWrap, bar.format()).height() + 6
-                if bar.minimumHeight() != bar_height:
-                    bar.setStyleSheet(f"min-height: {bar_height}px; max-height: {bar_height}px;")
-                identity_height = identity.layout().heightForWidth(name_width)
-                identity.setFixedHeight(identity_height)
-                height = identity_height + 2 + bar_height if compact else max(identity_height, bar_height)
-                item.setSizeHint(1, QSize(0, height + 19))
-            self.tree.doItemsLayout()
-            visible_height = sum(self.tree.visualItemRect(item).height() for item in items)
-            self.tree.setFixedHeight(self.tree.header().sizeHint().height() + 4 + visible_height)
-        finally:
-            self._fitting_columns = False
 
     def message(self, text, *, error=True):
         self.panel_error = error
@@ -736,8 +658,8 @@ class WildlifeInsightsControl(QObject):
                 if self.jobs[key].get("rows"):
                     raise ValueError("The service lost track of an acknowledged request. Review its records.")
                 self.unavailable.add(key)
-                self.render()
                 self.delivery_keys.add(key)
+                self.render()
                 self.message("Choose Upload to Wildlife Insights to resume the saved selection.")
             else:
                 self.accept_status(key, result)

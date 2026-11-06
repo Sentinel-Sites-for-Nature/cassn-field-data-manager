@@ -329,6 +329,7 @@ def test_held_camera_retry_requires_confirmation_and_preserves_history(work, tmp
     old_job = ctrl.jobs[original]
     previous = {r["deployment"]: r["retry_of"] for r in old_job["rows"]}
     (tmp_path / "retry-preview").write_text(json.dumps(previous))
+    assert ctrl.panel_button.isEnabled()
     assert "Camera 08021607 was missing in WI" in ctrl.tree.topLevelItem(0).text(1)
     assert ctrl.retryable()
     ctrl.unavailable.add(original)
@@ -457,6 +458,8 @@ def test_reopen_shows_verified_pending_held_and_new_rows_without_writing(work, t
     ctrl.refresh_new_cameras()
     assert not ctrl.group.disclosure.isChecked()
     assert ctrl.verified_summary.text() == "2 cameras verified · 4 photos"
+    assert not ctrl.panel_button.isEnabled()
+    assert not ctrl.action.isEnabled()
     assert "1 camera held for review" in ctrl.active_summary.text()
     assert "1 camera with unknown status" in ctrl.active_summary.text()
     assert ctrl.new_cameras.text() == "2 new cameras in staging · 4 photos"
@@ -556,3 +559,29 @@ def test_verified_without_a_receipt_is_not_complete(work):
     assert ctrl.verified_summary.isHidden()
     assert ctrl.active_summary.text() == "2 cameras with unknown status"
     assert not ctrl.selection_complete()
+
+@pytest.mark.parametrize("stage", ["queued", "uploading", "verifying"])
+def test_wi_upload_button_disables_while_helper_has_active_cameras(work, tmp_path, stage):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / "stage").write_text(stage)
+    start(ctrl, QDialogButtonBox.Ok)
+    assert not ctrl.panel_button.isEnabled()
+    assert not ctrl.action.isEnabled()
+    ctrl.panel_button.click()
+    ctrl.action.trigger()
+    assert (tmp_path / "calls").read_text().splitlines().count("submit") == 1
+
+    # Polling continues with the button disabled. A new eligible camera enables it again.
+    (tmp_path / "stage").write_text("verified")
+    ctrl.poll()
+    wait_for(lambda: ctrl.process is None)
+    assert not ctrl.panel_button.isEnabled()
+    window._navigate_workspace(0)
+    window.select_all_devices()
+    window.validate_and_next()
+    window._device_item("p2_ML").setText(2, "Complete")
+    window.file_inventory.append(dict(device_label="p2_ML", file_type="image", deployment_id="new-camera"))
+    ctrl.refresh_new_cameras()
+    assert ctrl.panel_button.isEnabled()

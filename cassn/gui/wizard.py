@@ -71,6 +71,7 @@ from cassn.box.threads import (
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
 from cassn.gui.review_page import ReviewPage
 from cassn.gui.platform_links import box_web_url, open_platform_url
+from cassn.gui.progress_table import ProgressTable
 from cassn.gui.activity_log import ActivityLog, operation_message
 from cassn.gui.soundhub_stage_dialog import SoundHubStageDialog
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
@@ -1254,7 +1255,9 @@ class FieldDataWizard(QMainWindow):
         self.upload_progress_bar.setFormat("%p%")
         self.upload_progress_bar.setMinimum(0)
         self.upload_progress_bar.setMaximum(100)
-        self.upload_group.details.addWidget(self.upload_progress_bar)
+        self.box_progress_rows = ProgressTable("Scope")
+        self.box_progress_rows.add_single_bar("Event files", self.upload_progress_bar)
+        self.upload_group.details.addWidget(self.box_progress_rows)
 
         self.upload_status_label = UploadMessage()
         upload_layout.addWidget(self.upload_status_label)
@@ -1290,7 +1293,9 @@ class FieldDataWizard(QMainWindow):
         self.hash_progress_bar.setObjectName("eventProgress")
         self.hash_progress_bar.setMinimum(0)
         self.hash_progress_bar.setMaximum(100)
-        self.hash_group.details.addWidget(self.hash_progress_bar)
+        hash_rows = ProgressTable("Scope")
+        hash_rows.add_single_bar("File hashes", self.hash_progress_bar)
+        self.hash_group.details.addWidget(hash_rows)
 
         self.hash_status_label = UploadMessage()
         hash_layout.addWidget(self.hash_status_label)
@@ -1302,15 +1307,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group = PlatformPanel("soundhub")
         soundhub_layout = self.soundhub_group.body
 
-        self.soundhub_recorders = QWidget()
-        self.soundhub_recorder_layout = QGridLayout(self.soundhub_recorders)
-        self.soundhub_recorder_layout.setContentsMargins(0, 0, 0, 0)
-        self.soundhub_recorder_layout.setHorizontalSpacing(12)
-        self.soundhub_recorder_layout.setVerticalSpacing(8)
-        self.soundhub_recorder_layout.setColumnStretch(0, 1)
-        self.soundhub_recorder_layout.setColumnStretch(1, 1)
-        for col, title in enumerate(("Deployment", "Progress")):
-            self.soundhub_recorder_layout.addWidget(workspace_label(title, "muted"), 0, col)
+        self.soundhub_recorders = ProgressTable("Deployment")
         self.soundhub_group.details.addWidget(self.soundhub_recorders)
         self.soundhub_recorders.hide()
         self.soundhub_recorder_bars = {}
@@ -4931,24 +4928,19 @@ class FieldDataWizard(QMainWindow):
     def _show_recorder_progress(self, progress):
         recorders = progress.recorders if progress else {}
         for name in list(self.soundhub_recorder_bars.keys() - recorders.keys()):
-            for widget in self.soundhub_recorder_bars.pop(name):
-                self.soundhub_recorder_layout.removeWidget(widget)
-                widget.deleteLater()
+            item, _ = self.soundhub_recorder_bars.pop(name)
+            self.soundhub_recorders.takeTopLevelItem(self.soundhub_recorders.indexOfTopLevelItem(item))
         self.soundhub_recorders.setVisible(bool(recorders))
-        for row, (name, files) in enumerate(sorted(recorders.items()), start=1):
+        for index, (name, files) in enumerate(sorted(recorders.items())):
             if name not in self.soundhub_recorder_bars:
-                label = workspace_label(name.replace("_", "_\u200b"), "contextTitle", wrap=True)
                 bar = UploadProgressBar()
                 bar.setObjectName("eventProgress")
                 bar.setAccessibleName(f"{name} recording preparation")
-                label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-                self.soundhub_recorder_bars[name] = (label, bar)
-            label, bar = self.soundhub_recorder_bars[name]
-            for col, widget in enumerate((label, bar)):
-                index = self.soundhub_recorder_layout.indexOf(widget)
-                if index < 0 or self.soundhub_recorder_layout.getItemPosition(index)[0] != row:
-                    self.soundhub_recorder_layout.addWidget(widget, row, col)
+                item = self.soundhub_recorders.add_bar(name, bar, index=index)
+                self.soundhub_recorder_bars[name] = (item, bar)
+            _, bar = self.soundhub_recorder_bars[name]
             event_bar(bar, len(files - progress.remaining), len(files), "recording" if len(files) == 1 else "recordings")
+        self.soundhub_recorders.fit_rows()
 
     def _soundhub_recording_prepared(self, deployment, filename):
         progress = self._soundhub_event_progress
