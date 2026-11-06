@@ -133,7 +133,9 @@ def start(control, decision):
         assert len(logos) == 1 and not logos[0].pixmap().isNull()
         assert logos[0].pixmap().hasAlphaChannel()
         assert not any(label.text() == "Wildlife Insights" for label in dlg.findChildren(QLabel))
-        assert any(label.text() == control.folder.name for label in dlg.findChildren(QLabel))
+        labels = [label.text() for label in dlg.findChildren(QLabel)]
+        assert control.folder.name in labels
+        assert not any("Confirming allows" in text or "Selected deployments:" in text for text in labels)
         inspected.extend((tree.topLevelItem(i).text(0), tree.topLevelItem(i).text(1))
                          for i in range(tree.topLevelItemCount()))
         dlg.findChild(QDialogButtonBox).button(decision).click()
@@ -153,12 +155,14 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     first.upload_group.show()
     assert control.panel_button.text() == "Upload to Wildlife Insights"
     names = start(control, QDialogButtonBox.Cancel)
+    assert not control.group.disclosure.isChecked()
     assert dict(names) == {"full-deployment-p1_ML": "UCNRS Mammal",
                            "full-deployment-p1_SA": "UCNRS Small Animal"}
     folder = first.current_deployment_folder
     assert not read_requests(folder)
     (tmp_path / "lose-reply").touch()
     start(control, QDialogButtonBox.Ok)
+    assert control.group.disclosure.isChecked()
     assert len(read_requests(folder)) == 1
     assert "unknown" in control.notice.text()
     assert not BoxStorage.should_upload_file(folder / STATE_FILE)
@@ -404,7 +408,7 @@ def test_completed_wi_action_disables_and_restores(work, tmp_path):
     assert not ctrl.panel_button.isHidden()
     ctrl.render()
     assert not ctrl.group.isHidden() and ctrl.selection_complete()
-    assert not ctrl.group.disclosure.isChecked()
+    assert ctrl.group.disclosure.isChecked()
     assert (folder / STATE_FILE).read_bytes() == before
     assert (tmp_path / "calls").read_text() == calls
 

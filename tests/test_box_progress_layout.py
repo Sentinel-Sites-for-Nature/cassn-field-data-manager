@@ -99,7 +99,11 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             for _ in range(3):
                 app.processEvents()
 
-            assert not window.upload_group.footer.isAncestorOf(window.cancel_upload_btn)
+            assert window.upload_group.footer.isAncestorOf(window.cancel_upload_btn)
+            if width == 1440 and zoom == 100:
+                assert window.cancel_upload_btn.y() == window.box_panel_button.y()
+                assert window.cancel_upload_btn.geometry().right() < window.box_panel_button.x()
+
             for panel in (window.upload_group, window.soundhub_group):
                 assert panel._detail_area.geometry().bottom() < panel.footer.y()
                 rects = []
@@ -112,7 +116,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             assert page.widget().width() == page.viewport().width()
             assert page.horizontalScrollBar().maximum() == 0
             assert window.upload_progress_bar.text() == f"{count} of 4 files checked this transfer · {25 * count}%"
-            assert window.box_history_label.text() == window.upload_progress_bar.text()
+            assert window.box_history_label.isHidden()
             assert status.text() == path
             assert f"{count}.00 files/s" in window.upload_metrics_label.text()
             for label in (status, window.upload_metrics_label, window.hash_status_label):
@@ -176,7 +180,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             (window.soundhub_group, window.soundhub_panel_button, "Open Staging Folder"),
             (control.group, control.panel_button, "Open Wildlife Insights"),
         ):
-            footer_buttons = panel.footer.findChildren(QPushButton)
+            footer_buttons = [b for b in panel.footer.findChildren(QPushButton) if b.isVisible()]
             assert len(footer_buttons) == 2
             opener = next(button for button in footer_buttons if button.text() == open_label)
             assert main.isVisible() and not main.isEnabled()
@@ -253,6 +257,7 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         window._show_saved_box_result(False)
         assert state["error"] in window.upload_status_label.text()
 
+        window.upload_group.disclosure.setChecked(True)
         window._box_event_progress = EventProgress.box(tmp_path, window.file_inventory)
         for action in ("skipped: raw_data/p1_ML/old.jpg", "uploaded: qc/notes.json", "failed: raw_data/p1_ML/new.jpg"):
             window.on_upload_progress(1, 4, action)
@@ -260,10 +265,13 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         for _ in range(2):
             window.on_upload_progress(3, 4, "uploaded: raw_data/p1_ML/new.jpg")
             assert window.upload_progress_bar.text() == "2 of 2 event files · 100%"
-            assert window.box_history_label.text() == window.upload_progress_bar.text()
+            assert window.box_history_label.isHidden()
             assert window.upload_status_label.text() == "Uploaded: raw_data/p1_ML/new.jpg"
             assert not window.box_upload_complete
 
+        window.upload_group.disclosure.setChecked(False)
+        assert not window.box_history_label.isHidden()
+        assert window.box_history_label.text() == window.upload_progress_bar.text()
         window._soundhub_event_progress = EventProgress(3, {"p2/new.flac", "p2/last.flac"},
                                                        {"p1": {"p1/old.flac"}, "p2": {"p2/new.flac", "p2/last.flac"}})
         window._soundhub_recording_prepared("p1", "old.wav")

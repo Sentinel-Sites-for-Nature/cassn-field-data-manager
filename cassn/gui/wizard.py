@@ -1149,11 +1149,8 @@ class FieldDataWizard(QMainWindow):
         self.collection_splitter.setStretchFactor(1, 1)
         layout.addWidget(self.collection_splitter, 1)
 
-        # Keep a diagnostic log available without permanently consuming the
-        # collection workspace. Normal device/QC feedback lives in card panels
-        # and Review & Finalize.
         self.activity_log_toggle = QToolButton()
-        self.activity_log_toggle.setText("Show Activity Details")
+        self.activity_log_toggle.setText("Activity log")
         self.activity_log_toggle.setCheckable(True)
         self.activity_log_toggle.setArrowType(Qt.RightArrow)
         self.activity_log_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -1165,16 +1162,13 @@ class FieldDataWizard(QMainWindow):
         log_layout = QVBoxLayout(self.activity_log_group)
         log_layout.setContentsMargins(0, 0, 0, 0)
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Device"))
-        filter_row.addWidget(self.log_text.device_filter)
+        filter_row.addWidget(QLabel("Show"))
+        filter_row.addWidget(self.log_text.scope_filter)
         filter_row.addStretch()
-        timezone_button = QPushButton("Recheck camera timezones")
-        timezone_button.clicked.connect(self.run_camera_timezone_check)
-        log_layout.addWidget(timezone_button, alignment=Qt.AlignLeft)
         log_layout.addLayout(filter_row)
         log_layout.addWidget(self.log_text)
-        self.activity_log_group.hide()
         layout.addWidget(self.activity_log_group)
+        self.activity_log_toggle.setChecked(True)
 
         # Navigation
         nav_layout = QHBoxLayout()
@@ -1192,9 +1186,6 @@ class FieldDataWizard(QMainWindow):
         self.activity_log_group.setVisible(expanded)
         self.activity_log_toggle.setArrowType(
             Qt.DownArrow if expanded else Qt.RightArrow
-        )
-        self.activity_log_toggle.setText(
-            "Hide Activity Details" if expanded else "Show Activity Details"
         )
 
     def create_review_tab(self):
@@ -1269,6 +1260,7 @@ class FieldDataWizard(QMainWindow):
         upload_layout.addWidget(self.upload_status_label)
         self.box_history_label = workspace_label("", "contextTitle", wrap=True)
         self.box_history_label.hide()
+        self.upload_group.disclosure.toggled.connect(self._sync_box_count_visibility)
         upload_layout.addWidget(self.box_history_label)
         self.upload_metrics_label = UploadMessage()
         self.upload_group.details.addWidget(self.upload_metrics_label)
@@ -1285,8 +1277,8 @@ class FieldDataWizard(QMainWindow):
         self.box_count_retry = QPushButton("Refresh Box count")
         self.box_count_retry.clicked.connect(self._restore_box_result)
         self.box_count_retry.hide()
-        self.upload_group.details.addWidget(self.box_count_retry, alignment=Qt.AlignLeft)
-        upload_layout.addWidget(self.cancel_upload_btn, alignment=Qt.AlignRight)
+        self.upload_group.add_footer_button(self.box_count_retry)
+        self.upload_group.add_cancel_button(self.cancel_upload_btn)
 
         layout.addWidget(self.upload_group)
 
@@ -1336,7 +1328,7 @@ class FieldDataWizard(QMainWindow):
             "resumes from where it stopped."
         )
         self.cancel_soundhub_btn.hide()
-        soundhub_layout.addWidget(self.cancel_soundhub_btn, alignment=Qt.AlignRight)
+        self.soundhub_group.add_cancel_button(self.cancel_soundhub_btn)
         self.soundhub_group.setVisible(self.box_config.profile != "csu")
         layout.addWidget(self.soundhub_group)
 
@@ -1408,6 +1400,10 @@ class FieldDataWizard(QMainWindow):
         self.file_menu = self.menuBar().addMenu("File")
         self.menuBar().insertMenu(self.menuBar().actions()[0], self.file_menu)
         self.file_menu.addActions([self.switch_deployment_btn, self.new_btn, self.open_btn])
+        self.file_menu.addAction(self._menu_action(
+            "Recheck camera timezones", self.run_camera_timezone_check,
+            "Check camera timezones for the open deployment.",
+        ))
         checks_menu = self.file_menu.addMenu("Verify Box files")
         checks_menu.addActions([self.box_verify_btn, self.fixity_btn])
         self.file_menu.addSeparator()
@@ -2164,15 +2160,7 @@ class FieldDataWizard(QMainWindow):
             panel["findings"].setText(
                 f"Warnings: {panel['warnings']} · Errors: {panel['errors']}"
             )
-            routine_progress = (
-                stripped.startswith("...") and stripped.endswith("files processed")
-            ) or (
-                stripped.startswith("[") and " MB)" in stripped
-            )
-            if not routine_progress:
-                self.log(f"[{device_label}] {message}")
-        elif is_error or is_warning:
-            self.log(f"[{device_label}] {message}")
+        self.log(f"[{device_label}] {message}")
 
     def _show_device_activity(self, device_label):
         self.log_text.select_device(device_label)
@@ -3524,7 +3512,7 @@ class FieldDataWizard(QMainWindow):
         current = sum(inventory_storage_relpath(entry) in paths for entry in self.file_inventory)
         event_bar(self.upload_progress_bar, current, total, "event files on Box")
         self.upload_progress_bar.show()
-        self.box_history_label.setText(self.upload_progress_bar.text())
+        FieldDataWizard._show_box_count_summary(self)
         complete = verified and current == total
         if not complete:
             self.upload_metrics_label.clear()
@@ -3692,6 +3680,8 @@ class FieldDataWizard(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Ingest Review Required", str(exc))
             return
+
+        self.upload_group.disclosure.setChecked(True)
 
         # Hold through callbacks between preparation, upload, and verification.
         self._box_operation_token = object()
@@ -3887,9 +3877,15 @@ class FieldDataWizard(QMainWindow):
             event_bar(self.upload_progress_bar, current, total, "files checked this transfer")
         else:
             return
-        # The collapsed summary and the expanded bar describe the same work.
+        FieldDataWizard._show_box_count_summary(self)
+
+    def _show_box_count_summary(self):
         self.box_history_label.setText(self.upload_progress_bar.text())
-        self.box_history_label.show()
+        self.box_history_label.setVisible(not self.upload_group.disclosure.isChecked())
+
+    def _sync_box_count_visibility(self, expanded):
+        if not self.upload_progress_bar.isHidden() and self.box_history_label.text() == self.upload_progress_bar.text():
+            self.box_history_label.setVisible(not expanded)
 
     def on_upload_progress(self, current, total, filename):
         if not self._box_callback_is_current('upload_thread'):
@@ -4784,6 +4780,7 @@ class FieldDataWizard(QMainWindow):
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
+        self.soundhub_group.disclosure.setChecked(True)
         self._set_soundhub_actions_enabled(False)
 
         self.soundhub_stage_thread = SoundHubStageThread(
@@ -4860,6 +4857,7 @@ class FieldDataWizard(QMainWindow):
         self.cancel_soundhub_btn.setText("Cancel")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
+        self.soundhub_group.disclosure.setChecked(True)
         self._set_soundhub_actions_enabled(False)
 
         self.soundhub_upload_thread = SoundHubUploadThread(plan)

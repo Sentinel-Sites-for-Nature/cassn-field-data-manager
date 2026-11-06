@@ -68,6 +68,7 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.soundhub_stage_btn.trigger()
     stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups)
     worker.start.assert_called_once()
+    assert window.soundhub_group.disclosure.isChecked()
     assert not window.soundhub_stage_btn.isEnabled()
     window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
     assert not window.soundhub_stage_btn.isEnabled()
@@ -396,6 +397,7 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     window.stage_for_soundhub()
     worker.start.assert_called_once()
+    assert window.soundhub_group.disclosure.isChecked()
     assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
     validate.assert_not_called()
     check_box.assert_not_called()
@@ -496,13 +498,29 @@ def test_device_filter_keeps_card_history_after_panel_removal(workspace_window, 
     window._show_device_activity("p1_BD")
     window._remove_card_panel("p1_BD")
     log = window.log_text
-    assert log.device_filter.currentText() == "p1_BD"
+    assert log.scope_filter.currentText() == "p1_BD"
     rows = [log.topLevelItem(i) for i in range(log.topLevelItemCount())]
     visible = [r for r in rows if not r.isHidden()]
     assert [r.text(0) for r in visible] == ["p1_BD · Low battery"]
     assert visible[0].background(0) == visible[0].background(2)
-    log.device_filter.setCurrentIndex(0)
+    log.scope_filter.setCurrentIndex(0)
     assert all(not row.isHidden() for row in rows)
+
+
+def test_plot_filter_includes_progress_from_each_device_in_that_plot(workspace_window):
+    _, window = workspace_window
+    log = window.log_text
+    log.clear()
+    for label in ("p1_BD", "p1_ML", "p10_BD"):
+        window._on_card_log(label, "[12] sample.wav  (1.0 MB)")
+    assert log.topLevelItemCount() == 3
+    log.scope_filter.setCurrentIndex(log.scope_filter.findText("Plot 1"))
+    assert [log.topLevelItem(i).isHidden() for i in range(3)] == [False, False, True]
+    assert log.topLevelItem(0).text(0) == "p1_BD · [12] sample.wav  (1.0 MB)"
+    window._on_card_log("p10_BD", "...10 files processed")
+    assert log.topLevelItem(3).isHidden()
+    log.scope_filter.setCurrentIndex(0)
+    assert all(not log.topLevelItem(i).isHidden() for i in range(4))
 
 
 def test_single_placement_label_toggles_only_that_device(workspace_window):

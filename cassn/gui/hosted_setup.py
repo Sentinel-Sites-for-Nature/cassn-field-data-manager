@@ -202,7 +202,7 @@ class HostedSetupDialog(QDialog):
             return
         self.connection_check.setVisible(connected)
         self.connection_lead.setVisible(False)
-        state = "connection checked" if connected else "connection unavailable"
+        state = "connected" if connected else "connection unavailable"
         self.connection_tail.setText(state)
         self.connection_status.setAccessibleName(f"Box {state}")
         self.status.setText("Loading your project settings…")

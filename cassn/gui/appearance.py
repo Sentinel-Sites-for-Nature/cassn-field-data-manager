@@ -213,6 +213,7 @@ class _PanelActions(QLayout):
         super().__init__(frame)
         self.items = []
         self.primary = None
+        self.cancel = None
         self.setSpacing(12)
 
     def addItem(self, item):
@@ -249,27 +250,40 @@ class _PanelActions(QLayout):
         if not visible:
             return 0
         left, right = rect.x() + 14, rect.x() + rect.width() - 14
-        x, y = left, rect.y() + 10
-        limit, row_height = right, 0
-        main = next((item for item in visible if item.widget() is self.primary), None)
-        if main:
-            size = main.sizeHint()
-            limit = right - size.width() - self.spacing()
-            row_height = size.height()
-            if draw:
-                main.setGeometry(QRect(right - size.width(), y, size.width(), size.height()))
-        for item in visible:
-            if item is main:
-                continue
+        y = rect.y() + 10
+        gap = self.spacing()
+        right_items = [item for button in (self.cancel, self.primary)
+                       for item in visible if item.widget() is button]
+        left_items = [item for item in visible if item not in right_items]
+        x, height = left, 0
+        for item in left_items:
             size = item.sizeHint()
-            if row_height and x + size.width() > limit:
-                y += row_height + self.spacing()
-                x, limit, row_height = left, right, 0
+            if height and x + size.width() > right:
+                y += height + gap
+                x, height = left, 0
             if draw:
                 item.setGeometry(QRect(x, y, size.width(), size.height()))
-            row_height = max(row_height, size.height())
-            x += size.width() + self.spacing()
-        return y - rect.y() + row_height + 10
+            x += size.width() + gap
+            height = max(height, size.height())
+
+        pair_width = sum(item.sizeHint().width() for item in right_items) + gap * max(0, len(right_items) - 1)
+        if right_items and height and x > right - pair_width:
+            y += height + gap
+            height = 0
+        x = right - pair_width
+        stacked = pair_width > right - left
+        for item in right_items:
+            size = item.sizeHint()
+            if stacked:
+                x = right - size.width()
+                if height:
+                    y += height + gap
+                    height = 0
+            if draw:
+                item.setGeometry(QRect(x, y, size.width(), size.height()))
+            x += size.width() + gap
+            height = max(height, size.height())
+        return y - rect.y() + height + 10
 
 
 class PlatformPanel(QGroupBox):
@@ -339,6 +353,10 @@ class PlatformPanel(QGroupBox):
             self.actions.primary = button
         self.add_footer_button(button)
         return button
+
+    def add_cancel_button(self, button):
+        self.actions.cancel = button
+        self.add_footer_button(button)
 
     def add_footer_button(self, button):
         self.actions.addWidget(button)

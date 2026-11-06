@@ -621,12 +621,6 @@ class WildlifeInsightsControl(QObject):
                 item.setToolTip(1, f"WI project ID: {project_id}")
             item.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(tree)
-        layout.addWidget(workspace_label(
-            "Confirm to resume delivery of this exact selection." if delivery_key else
-            "Confirming allows Wildlife Insights to register a missing camera for each selected deployment.",
-            "muted", wrap=True))
-        summary = workspace_label("", "contextTitle")
-        layout.addWidget(summary)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         style_cancel_button(buttons.button(QDialogButtonBox.Cancel))
         begin = buttons.button(QDialogButtonBox.Ok)
@@ -639,10 +633,7 @@ class WildlifeInsightsControl(QObject):
         begin.setProperty("role", "primary")
 
         def update_selection():
-            picked = selected()
-            total = sum(scope["images"] for scope in picked)
-            summary.setText(f"Selected deployments: {len(picked)}    ·    Photos: {total:,}")
-            begin.setEnabled(bool(picked))
+            begin.setEnabled(bool(selected()))
 
         update_selection()
         tree.itemChanged.connect(update_selection)
@@ -682,6 +673,7 @@ class WildlifeInsightsControl(QObject):
             self.render()
 
     def submit(self, key):
+        self.group.disclosure.setChecked(True)
         self.call("submit", {"request_id": key, "scopes": self.jobs[key]["scopes"]},
                   lambda result: self.accept_status(key, result))
 

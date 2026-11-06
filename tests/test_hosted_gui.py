@@ -132,6 +132,7 @@ def test_loading_settings_replaces_connection_check(app, monkeypatch, tmp_path):
         settle(app, lambda: dialog.status.text() == "Loading your project settings…")
         assert dialog.connection_status.isVisible()
         assert dialog.connection_check.isVisible()
+        assert dialog.connection_status.accessibleName() == "Box connected"
         assert not dialog.connect_button.isVisible()
     finally:
         ready.set()

@@ -739,13 +739,13 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
 
     window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
     try:
-        assert window.activity_log_group.isHidden()
-        assert window.activity_log_toggle.text() == "Show Activity Details"
-        window.activity_log_toggle.setChecked(True)
         assert not window.activity_log_group.isHidden()
-        assert window.activity_log_toggle.text() == "Hide Activity Details"
+        assert window.log_text.scope_filter.currentText() == "All activity"
+        assert window.activity_log_toggle.text() == "Activity log"
         window.activity_log_toggle.setChecked(False)
         assert window.activity_log_group.isHidden()
+        window.activity_log_toggle.setChecked(True)
+        assert not window.activity_log_group.isHidden()
 
         assert window.upload_group.title() == "Upload event files to Box"
         window.upload_progress_bar.hide()

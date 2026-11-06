@@ -205,6 +205,7 @@ def test_box_preparation_acquires_guard_before_worker_starts(tmp_path, monkeypat
     monkeypatch.setattr(wizard_module, "WISplitThread", lambda *_args: preparation)
     FieldDataWizard.upload_to_box(context)
     preparation.start.assert_called_once()
+    context.upload_group.disclosure.setChecked.assert_called_once_with(True)
     assert context._box_operation_active is True
 
 

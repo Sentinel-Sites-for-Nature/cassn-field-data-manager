@@ -30,6 +30,9 @@ def activity_entry(message):
         if quality_check:
             level = "Warning"
         if label:
+            # A second bracket (or a number) is part of the message, e.g. a file count.
+            if device or label[1:-1].isdigit():
+                break
             device = label[1:-1]
         if marker:
             level = _LEVELS[marker.lower()]
@@ -62,10 +65,10 @@ def operation_message(message, success, warning=False):
 class ActivityLog(SeverityTree):
     def __init__(self):
         super().__init__()
-        self.device_filter = QComboBox()
-        self.device_filter.setAccessibleName("Filter activity by device")
-        self.device_filter.addItem("All devices", "")
-        self.device_filter.currentIndexChanged.connect(self._filter_rows)
+        self.scope_filter = QComboBox()
+        self.scope_filter.setAccessibleName("Filter activity by plot or device")
+        self.scope_filter.addItem("All activity", "")
+        self.scope_filter.currentIndexChanged.connect(self._filter_rows)
         self.setAccessibleName("Activity details")
         self.setColumnCount(3)
         self.setHeaderLabels(["Activity", "Status", "Time"])
@@ -86,24 +89,32 @@ class ActivityLog(SeverityTree):
 
     def clear(self):
         super().clear()
-        self.device_filter.clear()
-        self.device_filter.addItem("All devices", "")
+        self.scope_filter.clear()
+        self.scope_filter.addItem("All activity", "")
 
     def _filter_rows(self):
-        device = self.device_filter.currentData()
         for row in range(self.topLevelItemCount()):
             item = self.topLevelItem(row)
-            item.setHidden(bool(device and item.data(0, Qt.UserRole + 1) != device))
+            item.setHidden(not self._matches_filter(item.data(0, Qt.UserRole + 1)))
+
+    def _matches_filter(self, device):
+        scope = self.scope_filter.currentData()
+        return not scope or scope == device or (
+            scope.startswith("plot:") and device.partition("_")[0] == scope[5:]
+        )
 
     def _device_index(self, device):
-        index = self.device_filter.findData(device)
+        plot = device.partition("_")[0]
+        if re.fullmatch(r"p\d+", plot) and self.scope_filter.findData(f"plot:{plot}") < 0:
+            self.scope_filter.addItem(f"Plot {plot[1:]}", f"plot:{plot}")
+        index = self.scope_filter.findData(device)
         if index < 0:
-            self.device_filter.addItem(device, device)
-            return self.device_filter.count() - 1
+            self.scope_filter.addItem(device, device)
+            return self.scope_filter.count() - 1
         return index
 
     def select_device(self, device):
-        self.device_filter.setCurrentIndex(self._device_index(device))
+        self.scope_filter.setCurrentIndex(self._device_index(device))
 
     def add_message(self, message):
         level, device, body = activity_entry(message)
@@ -120,8 +131,7 @@ class ActivityLog(SeverityTree):
             self._device_index(device)
         item.setData(0, Qt.UserRole + 1, device)
         self.addTopLevelItem(item)
-        selected = self.device_filter.currentData()
-        item.setHidden(bool(selected and selected != device))
+        item.setHidden(not self._matches_filter(device))
         if has_detail:
             detail = QTreeWidgetItem(item, [body])
             detail.setFirstColumnSpanned(True)
