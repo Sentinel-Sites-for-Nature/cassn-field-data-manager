@@ -227,7 +227,8 @@ def test_four_jobs_fit_small_window_and_restore_empty_state(workspace_window, tm
 def test_review_summary_escapes_metadata_and_counts_each_device(workspace_window, tmp_path):
     _app, window = workspace_window
     window.current_deployment_folder = tmp_path
-    window.metadata = {"site_name": "Reserve <test>", "observer": "A & B"}
+    window.metadata = {"site_name": "Site <test>", "site_short_name": "DeepCanyon",
+                       "site_code": "BDC", "observer": "A & B"}
     window.devices = [(1, "One", "ML", "p1_ML")]
     window.populate_collection_list()
     window.file_inventory = [
@@ -235,7 +236,9 @@ def test_review_summary_escapes_metadata_and_counts_each_device(workspace_window
     ]
     window.update_review_tab()
     text = window.summary_text.toPlainText()
-    assert "Reserve <test>" in text
+    for label, value in (("Site", "Site <test>"), ("Site short name", "DeepCanyon"),
+                         ("Site code", "BDC")):
+        assert f"{label}\n{value}" in text
     assert "A & B" in text
     assert "1 files" in text
     assert "0 of 1" in text
