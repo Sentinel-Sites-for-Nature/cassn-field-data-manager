@@ -22,6 +22,7 @@ from pathlib import Path
 
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
+from cassn.core.wi_requests import require_wi_complete, staging_write_lock
 from cassn.box.upload_state import require_uploads_complete
 from cassn.box.publication import STATE_PATH, batch_remote_path, require_publication_complete
 from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths
@@ -297,6 +298,7 @@ def inspect_deployment_for_cleanup(
         plan.reasons.append("deployment target is not a directory")
         return plan
     try:
+        require_wi_complete(deployment)
         require_no_ingest_holds(deployment)
         require_publication_complete(deployment)
         require_uploads_complete(deployment)
@@ -554,7 +556,8 @@ def inspect_deployment_for_cleanup(
                         record = read_object(box_bytes)
                         if record.get("file_count") != len(archive_paths):
                             raise ValueError("event count does not match verified archive metadata")
-                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"])) != record:
+                        if read_object(merge_event(box_bytes, local_bytes, file_count=record["file_count"],
+                                                   deployment_lookup=deployment / "qc/lookup_snapshot/deployments.csv")) != record:
                             raise ValueError("Box event does not cover this batch")
                     store.assert_unchanged(ref)
                     continue
@@ -596,6 +599,21 @@ def clear_verified_deployment(plan: StagingCleanupPlan) -> StagingCleanupResult:
     if resolved == root or resolved.parent != root:
         raise StagingCleanupError("refusing to clear outside the staging root")
 
+    try:
+        with staging_write_lock(resolved):
+            require_wi_complete(resolved)
+            _remove_unchanged_deployment(plan, resolved)
+    except ValueError as exc:
+        raise StagingCleanupError(str(exc)) from exc
+
+    return StagingCleanupResult(
+        deployment_folder=resolved,
+        file_count=plan.file_count,
+        bytes_cleared=plan.local_bytes,
+    )
+
+
+def _remove_unchanged_deployment(plan, resolved):
     current_signature, errors = _event_signature(resolved)
     if errors or current_signature != plan.event_signature:
         raise StagingCleanupError(
@@ -616,9 +634,3 @@ def clear_verified_deployment(plan: StagingCleanupPlan) -> StagingCleanupResult:
         if lock_path.exists():
             lock_path.unlink(missing_ok=True)
         raise StagingCleanupError(f"could not clear {resolved}: {exc}") from exc
-
-    return StagingCleanupResult(
-        deployment_folder=resolved,
-        file_count=plan.file_count,
-        bytes_cleared=plan.local_bytes,
-    )

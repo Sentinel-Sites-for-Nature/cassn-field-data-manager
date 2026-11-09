@@ -39,6 +39,7 @@ from cassn.box.upload_state import STATE_DIRECTORY, require_uploads_complete
 from cassn.config import CHUNKED_UPLOAD_THRESHOLD
 from cassn.box.metadata_merge import SHARED_NAMES
 from cassn.box.publication import EventPublication, batch_remote_path
+from cassn.box.receipts import FINAL_FILES, publish_final_receipt
 from cassn.box.verification import (
     collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths, verify_box_hashes,
 )
@@ -100,6 +101,26 @@ def _is_already_exists(exc) -> bool:
     return "already exists" in msg or "item with the same name" in msg
 
 
+def _is_sign_in_loss(exc) -> bool:
+    """True when a Box upload failed because the hosted sign-in ended.
+
+    The hosted auth layer raises ``HostedError('reconnect')`` (or ``'denied'``)
+    from inside the SDK request path, and the transfer layers may wrap it, so
+    the exception chain is walked. Every later file would fail the same way,
+    so the caller stops the batch instead of listing thousands of failures.
+    """
+    from cassn.box.hosted import HostedError
+    seen = 0
+    while exc is not None and seen < 8:
+        if isinstance(exc, HostedError) and exc.kind in ("reconnect", "denied"):
+            return True
+        if "needs a new sign-in" in str(exc):
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
+
+
 class BoxUploadThread(QThread):
     """Background thread for uploading a deployment folder to Box."""
 
@@ -131,6 +152,7 @@ class BoxUploadThread(QThread):
         # Cooperative cancellation flag — set from the GUI thread via cancel()
         self._cancel_event = threading.Event()
         self._state_lock = threading.Lock()  # protects shared upload counters
+        self.needs_reconnect = False  # set when the Box sign-in ended mid-upload
         self.upload_workers = upload_workers
         self.upload_runtime = UploadRuntime(cancel=self._cancel_event, transfers=upload_workers,
                                             part_workers=part_workers)
@@ -154,6 +176,7 @@ class BoxUploadThread(QThread):
             require_no_ingest_holds(self.deployment_folder)
             metrics.output_path = self.deployment_folder / 'qc' / STATE_DIRECTORY / 'metrics.json'
             metrics.set_stage('preparing')
+            self.progress.emit(0, 0, "Checking the saved Box connection…")
             self.client = get_box_client(self.box_config)
             if not self.client:
                 self.finished.emit(False, "Could not authenticate with Box")
@@ -178,6 +201,7 @@ class BoxUploadThread(QThread):
             year = self.metadata["deployment_event_end_date"][:4]
             deploy_name = self.deployment_folder.name
 
+            self.progress.emit(0, 0, "Finding this event's folders on Box…")
             year_id = storage.find_or_create_folder(target_folder_id, year)
             reserve_id = storage.find_or_create_folder(year_id, site_name)
             deploy_id = storage.find_or_create_folder(reserve_id, deploy_name)
@@ -186,17 +210,23 @@ class BoxUploadThread(QThread):
             append_qc_report(self.deployment_folder, "box_publication", "", "info",
                              "Preparing a batch upload; completion requires metadata publication and verification.")
             publication = EventPublication(storage, deploy_id, self.deployment_folder)
+            self.progress.emit(0, 0, "Comparing local metadata with the existing Box event…")
             publication.prepare()  # Reject unsafe merges before sending media.
             publication.validate_batch_inventory(self.file_inventory)
+            publication.begin_verification_receipt()
+            self.progress.emit(0, 0, "Preparing Wildlife Insights metadata on Box…")
+            publication.publish_wi_inputs()
 
             def remote_path(path):
                 relative = path.relative_to(self.deployment_folder)
                 return batch_remote_path(relative, publication.attempt_id)
 
+            self.progress.emit(0, 0, "Listing local files for this Box upload…")
             uploadable_files = [
                 path
                 for path in self.deployment_folder.rglob("*")
                 if path.is_file() and storage.should_upload_file(path)
+                and path.relative_to(self.deployment_folder).as_posix() not in (*FINAL_FILES, "qc/box_upload_manifest.json")
             ]
 
             # Full paths keep hashes unambiguous across flat and split layouts.
@@ -234,6 +264,7 @@ class BoxUploadThread(QThread):
             # collected and unintentionally left it local-only.
             if manifest_path not in uploadable_files:
                 uploadable_files.append(manifest_path)
+            publication.prepare_current_qc(uploadable_files)
             uploadable_files = [fp for fp in uploadable_files
                                 if fp.relative_to(self.deployment_folder).as_posix() not in SHARED_NAMES]
             total_files = len(uploadable_files)
@@ -253,7 +284,8 @@ class BoxUploadThread(QThread):
                 }
             )
             parent_id_for_path: dict[tuple, str] = {(): deploy_id}
-            for path_parts in unique_parent_paths:
+            for folder_number, path_parts in enumerate(unique_parent_paths, 1):
+                self.progress.emit(0, 0, f"Preparing Box folders: {folder_number:,} of {len(unique_parent_paths):,}…")
                 if not path_parts:
                     continue
                 # Resolve each segment, building up the parent_id chain.
@@ -268,7 +300,8 @@ class BoxUploadThread(QThread):
 
             # Pre-populate the per-folder file-existence cache for every unique
             # parent. folder_file_map() is idempotent, so duplicate ids are free.
-            for folder_id in parent_id_for_path.values():
+            for folder_number, folder_id in enumerate(parent_id_for_path.values(), 1):
+                self.progress.emit(0, 0, f"Checking files already on Box: folder {folder_number:,} of {len(parent_id_for_path):,}…")
                 storage.folder_file_map(folder_id)
 
             # PHASE 2 — Parallel upload via ThreadPoolExecutor. Each upload is
@@ -294,6 +327,10 @@ class BoxUploadThread(QThread):
                     if _is_already_exists(exc) and "raw_data" in rel_path.parts:
                         metrics.add(skipped_files=1)
                         return ("ok", rel_path.as_posix(), f"skipped: {rel_path}")
+                    if _is_sign_in_loss(exc):
+                        # One lost sign-in fails every later file; stop scheduling.
+                        self.needs_reconnect = True
+                        self._cancel_event.set()
                     metrics.add(failed_files=1)
                     return ("fail", rel_path.as_posix(), str(exc)[:200])
 
@@ -325,6 +362,28 @@ class BoxUploadThread(QThread):
                         failed_uploads.append((rel_path, payload or ""))
                         completed += 1
                         self.progress.emit(completed, total_files, f"failed: {rel_path}")
+
+            if self.needs_reconnect:
+                landed = completed - len(failed_uploads)
+                remaining = total_files - landed
+                publication.fail("Box sign-in ended before metadata publication")
+                append_qc_report(
+                    self.deployment_folder,
+                    "box_upload",
+                    "",
+                    "warning",
+                    f"Box sign-in ended during upload. {landed}/{total_files} on Box, "
+                    f"{remaining} not uploaded. Reconnect and re-run the upload.",
+                )
+                self.finished.emit(
+                    False,
+                    "Box disconnected during the upload. Your Box sign-in ended, so the "
+                    f"upload stopped. {landed} of {total_files} files are on Box; "
+                    f"{remaining} still need to be uploaded. Nothing was lost. "
+                    "Click Connect to Box to sign in again, then run the upload again. "
+                    "Files already on Box will be skipped.",
+                )
+                return
 
             if self._cancel_event.is_set():
                 outcome = 'cancelled'
@@ -422,6 +481,27 @@ class BoxUploadThread(QThread):
             metrics.set_stage(outcome)
             if network is not None:
                 network.close()
+
+
+class BoxReceiptThread(QThread):
+    finished = Signal(bool, str)
+
+    def __init__(self, folder, state, box_config):
+        super().__init__()
+        self.folder = folder
+        self.state = state
+        self.box_config = box_config
+
+    def run(self):
+        try:
+            client = get_box_client(self.box_config)
+            if not client:
+                raise ValueError("Connect to Box to save the verification receipt.")
+            publish_final_receipt(BoxStorage(client), self.folder, self.state)
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+        else:
+            self.finished.emit(True, "")
 
 
 class BoxVerifyThread(QThread):

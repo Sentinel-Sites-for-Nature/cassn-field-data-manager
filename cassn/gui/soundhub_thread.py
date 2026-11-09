@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import threading
 from pathlib import Path
 
@@ -11,10 +12,7 @@ from cassn.soundhub.export import (
     build_recording_rows,
     enrich_audio_rows,
     read_bd_audio_rows,
-    refresh_project_csvs,
     validate_staging_manifests,
-    write_deployment_copy,
-    write_deployment_fragments,
 )
 from cassn.soundhub.lifecycle import (
     plan_completed_batch_cleanup,
@@ -24,9 +22,11 @@ from cassn.soundhub.staging import (
     SoundHubStagingError,
     fragments_root,
     project_root,
+    recover_staging,
     stage_deployment,
 )
 from cassn.soundhub.provenance import DEFAULT_SUBMITTER
+from cassn.soundhub.stage_display import manifest_rows, manifest_changes
 from cassn.soundhub.submission import (
     SoundHubSubmissionError,
     SoundHubSubmissionPlan,
@@ -43,6 +43,7 @@ class SoundHubStageThread(QThread):
     """
 
     progress = Signal(int, int, str)
+    recording_prepared = Signal(str, str)  # recorder deployment, source WAV name
     completed = Signal(bool, bool, str, dict)  # success, cancelled, message, result
 
     def __init__(self, deployment_folder, staging_root, lookups):
@@ -57,6 +58,8 @@ class SoundHubStageThread(QThread):
 
     def _check_existing_batch(self):
         """Keep slow filesystem and Box checks off the GUI thread, before writes."""
+        self.progress.emit(0, 0, "Checking saved SoundHub staging work…")
+        recover_staging(self.staging_root)
         root = project_root(self.staging_root)
         fragments = fragments_root(self.staging_root)
         has_fragments = fragments.is_dir() and any(
@@ -68,11 +71,11 @@ class SoundHubStageThread(QThread):
         if not (has_fragments or has_manifests):
             return
 
-        self.progress.emit(0, 0, "Checking existing SoundHub batch…")
+        self.progress.emit(0, 0, "Checking the shared SoundHub batch, including earlier events…")
         validate_staging_manifests(self.staging_root)
         if self._cancel_event.is_set():
             return
-        self.progress.emit(0, 0, "Checking existing batch submission records in Box…")
+        self.progress.emit(0, 0, "Checking earlier SoundHub submission records in Box before conversion…")
         lifecycle = plan_completed_batch_cleanup(self.staging_root)
         if self._cancel_event.is_set():
             return
@@ -125,11 +128,17 @@ class SoundHubStageThread(QThread):
             # manifest cannot be completed from the source metadata.
             build_recording_rows(audio_rows)
 
+            try:
+                before = manifest_rows(self.staging_root)
+            except (OSError, ValueError, KeyError, csv.Error):
+                before = None
+            self.progress.emit(0, 0, "Preparing bird recordings…")
             result = stage_deployment(
                 self.deployment_folder,
                 audio_rows,
                 self.staging_root,
                 progress=self.progress.emit,
+                recording_prepared=self.recording_prepared.emit,
                 is_cancelled=self._cancel_event.is_set,
             )
 
@@ -142,14 +151,13 @@ class SoundHubStageThread(QThread):
                 )
                 return
 
-            # CSVs are written only once every FLAC exists, so a partial staging
-            # tree can never be described by a complete manifest.
-            write_deployment_fragments(self.staging_root, audio_rows)
-            write_deployment_copy(self.deployment_folder, audio_rows)
-            csvs = refresh_project_csvs(self.staging_root)
-            validation = validate_staging_manifests(self.staging_root)
-            result["csvs"] = csvs
-            result["validation"] = validation
+            result["manifest_changes"] = None
+            if before is not None:
+                try:
+                    result["manifest_changes"] = manifest_changes(before, manifest_rows(self.staging_root))
+                except (OSError, ValueError, KeyError, csv.Error):
+                    pass  # Staging already validated; an unavailable display count cannot undo it.
+            csvs = result["csvs"]
 
             self.completed.emit(
                 True, False,

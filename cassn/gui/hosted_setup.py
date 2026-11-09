@@ -1,13 +1,13 @@
 """Responsive hosted setup, including a recoverable empty-project state."""
-from PySide6.QtCore import QThread, QTimer, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPalette
+from PySide6.QtCore import QSize, Signal, QThread, QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLayout, QLabel, QPushButton, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from cassn.gui.dialogs import WindowDialog as QDialog
 from cassn.gui.box_button import BoxConnectButton
 from cassn.box.hosted import HostedError, manager_for
 from cassn.config import LOCAL_DATA_DIR
-from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.appearance import style_cancel_button, ARTWORK, platform_logo, workspace_label, workspace_stylesheet
 from cassn.lookup_sync import bootstrap_lookup_tables, LookupBootstrapError
 
 
@@ -70,6 +70,8 @@ class HostedDisconnectDialog(QDialog):
 
 
 class HostedSetupDialog(QDialog):
+    loading_settings = Signal(bool)
+
     def __init__(self, config, parent=None, *, cache_dir=LOCAL_DATA_DIR):
         super().__init__(parent)
         self.project_name = config.profile.upper()
@@ -77,7 +79,7 @@ class HostedSetupDialog(QDialog):
         self.setObjectName("fieldWorkspace")
         self.setStyleSheet(workspace_stylesheet(QApplication.palette()))
         self.setMinimumSize(420, 360)
-        self.resize(620, 600)
+        self.resize(540, 380)
         self.config, self.cache_dir = config, cache_dir
         self.bootstrap = None
         self.connected = False
@@ -97,46 +99,81 @@ class HostedSetupDialog(QDialog):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(12, 12, 12, 16)
         layout.setSizeConstraint(QLayout.SetMinimumSize)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
+        layout.setAlignment(Qt.AlignTop)
         self.scroll.setWidget(body)
         outer.addWidget(self.scroll, 1)
-        layout.addWidget(workspace_label("CALIFORNIA SENTINEL SITE NETWORK", "muted"))
-        self.title = workspace_label("Welcome to the CA-SSN Data Manager", "pageTitle", wrap=True)
+        self.title = workspace_label("Opening your project…", "pageTitle", wrap=True)
         layout.addWidget(self.title)
-        self.subtitle = workspace_label(f"{self.project_name} project · Connect to Box to load your project settings.", "subtitle", wrap=True)
-        layout.addWidget(self.subtitle)
 
-        card = QFrame()
-        card.setObjectName("setupCard")
-        content = QVBoxLayout(card)
-        content.setContentsMargins(20, 20, 20, 20)
-        content.setSpacing(14)
-        self.intro_heading = workspace_label("Click Connect to Box below to begin.", "sectionTitle", wrap=True)
-        content.addWidget(self.intro_heading)
-        self.intro_note = workspace_label(
-            "Sign in with the Box account approved to access your project folder. "
-            "Your browser will open for secure sign-in. This Mac remembers your connection in Keychain.", "muted", wrap=True)
-        content.addWidget(self.intro_note)
-        self.connect_button = BoxConnectButton()
-        self.connect_button.setDefault(True)
-        content.addWidget(self.connect_button)
-        self.status = workspace_label("Checking your saved connection…", "muted", wrap=True)
-        content.addWidget(self.status)
+        organization = QFrame()
+        organization.setObjectName("sidebarOrganization")
+        brand = QVBoxLayout(organization)
+        brand.setContentsMargins(16, 10, 16, 14)
+        brand.setSpacing(6)
+        brand.addWidget(workspace_label("Organization", "organizationCaption"))
+        if config.profile == "csu":
+            name, artwork = "California State University", "csu-wordmark-stacked.svg"
+            size = QSize(205, 70)
+        else:
+            name, artwork = "University of California Nature", "uc-nature-lockup-hori-black.png"
+            size = QSize(190, 46)
+        self.organization_logo = QLabel(name)
+        self.organization_logo.setAccessibleName(name)
+        logo = QIcon(str(ARTWORK / artwork)).pixmap(size, self.devicePixelRatioF())
+        if not logo.isNull():
+            self.organization_logo.setPixmap(logo)
+        brand.addWidget(self.organization_logo, alignment=Qt.AlignLeft)
+        layout.addWidget(organization)
+        self.intro_note = workspace_label("", "muted", wrap=True)
+        self.intro_note.hide()
+        layout.addWidget(self.intro_note)
+        self.connection_status = QWidget()
+        self.connection_status.setAccessibleName("Checking your Box connection")
+        checking = QHBoxLayout(self.connection_status)
+        checking.setContentsMargins(0, 0, 0, 0)
+        checking.setSpacing(4)
+        self.connection_check = workspace_label("✓", "connected")
+        self.connection_check.hide()
+        checking.addWidget(self.connection_check)
+        self.connection_lead = workspace_label("Checking your", "contextTitle")
+        checking.addWidget(self.connection_lead)
+        checking.addWidget(platform_logo("box", height=18))
+        self.connection_tail = workspace_label("connection…", "contextTitle")
+        checking.addWidget(self.connection_tail)
+        checking.addStretch()
+        layout.addWidget(self.connection_status)
+        self.loading_settings.connect(self._show_loading_settings)
+        self.status = workspace_label("", "muted", wrap=True)
+        self.status.hide()
+        settings_row = QHBoxLayout()
+        self.settings_check = workspace_label("✓", "connected")
+        self.settings_check.hide()
+        settings_row.addWidget(self.settings_check, alignment=Qt.AlignTop)
+        settings_row.addWidget(self.status, 1)
+        layout.addLayout(settings_row)
+        self.open_timer = QTimer(self)
+        self.open_timer.setSingleShot(True)
+        self.open_timer.timeout.connect(self.accept)
         self.details = workspace_label("", "muted", wrap=True)
         self.details.hide()
-        content.addWidget(self.details)
+        layout.addWidget(self.details)
+        self.connect_button = BoxConnectButton()
+        self.connect_button.setAccessibleDescription("Sign in to Box to load your project settings.")
+        self.connect_button.setDefault(True)
+        self.connect_button.hide()
+        layout.addWidget(self.connect_button)
         self.retry_button = QPushButton("Reload project settings")
         self.retry_button.setProperty("role", "primary")
         self.retry_button.setToolTip("Reload project settings from Box using your saved connection. You do not need to sign in again.")
         self.retry_button.hide()
-        content.addWidget(self.retry_button)
+        layout.addWidget(self.retry_button)
         self.reopen_browser = QPushButton("Open browser again")
         self.reopen_browser.hide()
         self.reopen_browser.clicked.connect(lambda: self.open_browser(self._browser_url) if self._browser_url else None)
-        content.addWidget(self.reopen_browser)
-        layout.addWidget(card)
+        layout.addWidget(self.reopen_browser)
         link_color = "#8ed0bd" if QApplication.palette().color(QPalette.Window).lightness() < 128 else "#216e62"
-        help_label = QLabel('Need help with project access? Contact John at '
+        help_label = QLabel('Having trouble connecting to Box or loading your project settings? Contact John at '
                             f'<a style="color: {link_color}" href="mailto:jtimperato@ucdavis.edu">jtimperato@ucdavis.edu</a>.')
         help_label.setWordWrap(True)
         help_label.setOpenExternalLinks(True)
@@ -147,7 +184,7 @@ class HostedSetupDialog(QDialog):
         self.disconnect_button.hide()
         self.close_button = QPushButton("Close")
         row.addWidget(self.disconnect_button)
-        self.cancel_login_button = QPushButton("Cancel sign-in")
+        self.cancel_login_button = style_cancel_button(QPushButton("Cancel sign-in"))
         self.cancel_login_button.hide()
         self.cancel_login_button.clicked.connect(self.cancel_login)
         row.addWidget(self.cancel_login_button)
@@ -159,6 +196,28 @@ class HostedSetupDialog(QDialog):
         self.disconnect_button.clicked.connect(self.disconnect_box)
         self.close_button.clicked.connect(self.reject)
         QTimer.singleShot(0, self.load_project)
+
+    def _show_loading_settings(self, connected):
+        if self._closing:
+            return
+        self.connection_check.setVisible(connected)
+        self.connection_lead.setVisible(False)
+        state = "connected" if connected else "connection unavailable"
+        self.connection_tail.setText(state)
+        self.connection_status.setAccessibleName(f"Box {state}")
+        self.status.setText("Loading your project settings…")
+        self.status.show()
+
+    def _show_sign_in(self):
+        self.connection_status.hide()
+        self.title.setText("Connect your Box account")
+        self.intro_note.setText(
+            "Sign in with the account that has access to your project folder. "
+            "The app will load your settings. You can upload staged files to Box later."
+        )
+        self.intro_note.show()
+        self.connect_button.show()
+        self.connect_button.setDefault(True)
 
     def _busy(self, busy):
         for button in (self.connect_button, self.retry_button, self.disconnect_button):
@@ -172,7 +231,17 @@ class HostedSetupDialog(QDialog):
         require_live = self._require_live
         self._busy(True)
         self.details.hide()
-        self.status.setText(f"Loading {self.project_name} project configuration…")
+        self.title.setText("Opening your project…")
+        self.intro_note.hide()
+        self.connect_button.hide()
+        self.retry_button.hide()
+        self.status.hide()
+        self.settings_check.hide()
+        self.connection_check.hide()
+        self.connection_lead.show()
+        self.connection_tail.setText("connection…")
+        self.connection_status.setAccessibleName("Checking your Box connection")
+        self.connection_status.show()
         def load():
             manager = manager_for(self.config)
             connected = False
@@ -181,11 +250,12 @@ class HostedSetupDialog(QDialog):
                 manager.token()
                 connected = True
             except HostedError as exc:
-                auth_error = str(exc)
+                auth_error = None if exc.kind == "reconnect" and manager.session is None else str(exc)
                 if exc.kind in ("keychain_approval", "storage", "reconnect", "denied"):
                     # Keep recovery visible; do not retry credentials or silently
                     # enter offline mode after an authentication failure.
                     return None, False, auth_error
+            self.loading_settings.emit(connected)
             try:
                 snapshot = bootstrap_lookup_tables(self.config, self.cache_dir)
                 if (require_live or connected) and snapshot.source != "box":
@@ -203,6 +273,7 @@ class HostedSetupDialog(QDialog):
         self.worker.start()
 
     def loaded(self):
+        self.status.show()
         worker, self.worker = self.worker, None
         self._busy(False)
         if self._closing:
@@ -210,12 +281,20 @@ class HostedSetupDialog(QDialog):
             super().reject()
             return
         if worker.error:
+            if self.connected:
+                self.title.setText("Project settings need attention")
+                self.retry_button.show()
+            else:
+                self._show_sign_in()
             self.status.setText(worker.error)
         else:
             self.bootstrap, self.connected, error = worker.result
             if self.bootstrap is not None:
                 worker.deleteLater()
-                self.accept()
+                self.status.setText("Project settings loaded" if self.connected else "Saved project settings loaded")
+                self.settings_check.show()
+                self._busy(True)
+                self.open_timer.start(450)
                 return
             if isinstance(error, LookupBootstrapError):
                 if error.reason == "missing_files":
@@ -230,7 +309,8 @@ class HostedSetupDialog(QDialog):
                     self.details.setText("Check your internet connection and try again. If this continues, contact John to check the project configuration and folder access.")
                 self.details.show()
             else:
-                self.status.setText(error or "Connect to Box to set up this project.")
+                self.status.setText(error or "")
+                self.status.setVisible(bool(error))
             has_session = manager_for(self.config).session is not None
             self.disconnect_button.setVisible(has_session)
             self.disconnect_button.setEnabled(has_session)
@@ -238,12 +318,11 @@ class HostedSetupDialog(QDialog):
             self.connect_button.setVisible(not self.connected)
             self.connect_button.setDefault(not self.connected)
             self.retry_button.setDefault(self.connected)
-            self.intro_heading.setVisible(not self.connected)
-            self.intro_note.setVisible(not self.connected)
             if self.connected:
-                self.title.setText(f"{self.project_name} project setup")
-                self.subtitle.setText("Your Box connection is ready. Load the project settings to continue.")
-            self.connect_button.setText("Reconnect to Box" if self.connected else "Connect to Box")
+                self.title.setText("Project settings need attention")
+                self.intro_note.hide()
+            else:
+                self._show_sign_in()
         worker.deleteLater()
 
     def connect_box(self):
@@ -251,11 +330,15 @@ class HostedSetupDialog(QDialog):
         if self.worker is not None:
             return
         self._busy(True)
+        self.connection_status.hide()
         self._signing_in = True
         self._login_cancel_pending = False
         self.details.hide()
         self.connect_button.hide()
-        self.intro_heading.setText("Complete sign-in in your browser")
+        self.title.setText("Sign in to Box in your browser")
+        self.intro_note.setText("Return here after sign-in. Your project will open when the settings are ready.")
+        self.intro_note.show()
+        self.status.show()
         self.status.setText("Opening Box sign-in in your browser…")
         self.cancel_login_button.setEnabled(True)
         self.cancel_login_button.show()
@@ -298,9 +381,8 @@ class HostedSetupDialog(QDialog):
             self.activateWindow()
             self.load_project(require_live=True)
         else:
-            self.intro_heading.setText("Click Connect to Box below to begin.")
-            self.status.setText(worker.error or "Box sign-in cancelled. Connect again when you are ready.")
-            self.connect_button.show()
+            self._show_sign_in()
+            self.status.setText(worker.error or "Sign-in cancelled. Choose Connect to Box to try again.")
 
     def disconnect_box(self):
         dialog = HostedDisconnectDialog(self.config, self)
@@ -313,15 +395,13 @@ class HostedSetupDialog(QDialog):
             self.connect_button.show()
             self.connect_button.setDefault(True)
             self.retry_button.setDefault(False)
-            self.intro_heading.show()
-            self.intro_note.show()
-            self.title.setText("Welcome to the CA-SSN Data Manager")
-            self.subtitle.setText(f"{self.project_name} project · Connect to Box to load your project settings.")
+            self._show_sign_in()
             self.disconnect_button.setEnabled(False)
             self.disconnect_button.hide()
             self.retry_button.hide()
 
     def reject(self):
+        self.open_timer.stop()
         if self.worker is not None:
             self._closing = True
             self._busy(True)

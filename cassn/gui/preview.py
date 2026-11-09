@@ -69,10 +69,6 @@ class WorkspacePreview(FieldDataWizard):
     def _navigate_workspace(self, index):
         self.tabs.setCurrentIndex(index)
 
-    def _refresh_workspace_context(self, *_args):
-        super()._refresh_workspace_context()
-        self.workspace.header_status.setText("Preview · sample data · transfers disabled")
-
     def _update_copy_action(self, *_args):
         super()._update_copy_action()
         if hasattr(self, "copy_btn"):

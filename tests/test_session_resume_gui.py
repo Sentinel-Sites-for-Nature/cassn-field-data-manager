@@ -116,3 +116,88 @@ def test_unreadable_existing_session_is_never_overwritten(windows, monkeypatch):
     assert window.current_deployment_folder is None
     assert window.tabs.currentIndex() == 0
     assert path.read_text() == '{"interrupted":'
+
+
+def test_box_completion_state_matches_current_proof_on_reopen(windows):
+    from cassn.core.verification_evidence import verification_context, write_result
+
+    source = windows()
+    source.box_config = BoxConfig(field_data_folder_id="test-root")
+    _, session = saved_work(source)
+    folder = source.current_deployment_folder
+    context = verification_context(folder, source.file_inventory, source.metadata, source.box_config)
+    for kind in ("box", "hash"):
+        write_result(folder, kind, context, ok=True, summary="passed")
+    combined = folder / "qc/box_upload_verification.json"
+    evidence = combined.read_bytes()
+    reopened = windows()
+    reopened.box_config = source.box_config
+    def reopen():
+        reopened.restore_session(json.loads(session.read_text()))
+
+    reopen()
+    assert reopened.box_upload_complete and not reopened.box_panel_button.isEnabled()
+    assert not reopened.box_panel_button.isHidden()
+    assert not reopened.upload_group.isHidden() and reopened.hash_group.isHidden()
+    reopened.upload_group.disclosure.click()
+    assert combined.read_bytes() == evidence
+    write_result(folder, "hash", context, ok=False, summary="hash mismatch")
+    reopen()
+    assert not reopened.box_upload_complete and not reopened.upload_group.isHidden()
+    assert reopened.upload_status_label.property("platformStatus") != "complete"
+
+
+def test_review_acknowledgements_survive_reopen_and_expire_on_change(windows, monkeypatch):
+    from cassn.gui.qc_review import CollectionReviewDialog
+
+    window = windows()
+    _, path = saved_work(window)
+    finding = dict(title="Recording stopped early", message="One file", action="Check the folder",
+                   severity="warning", files=[], affected="p1_BD", technical="low voltage", evidence_key="one-file")
+    monkeypatch.setattr(FieldDataWizard, "_collection_review_findings", lambda self, _: [finding])
+
+    def accept(dialog):
+        assert not dialog.proceed.isEnabled()
+        dialog.acknowledge.click()
+        assert dialog.proceed.isEnabled()
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CollectionReviewDialog, "exec", accept)
+    assert window._confirm_collection_review([])
+    reopened = windows()
+    reopened.restore_session(json.loads(path.read_text()))
+
+    def inspect(dialog):
+        return dialog.DialogCode.Accepted if dialog.proceed.isEnabled() else dialog.DialogCode.Rejected
+
+    monkeypatch.setattr(CollectionReviewDialog, "exec", inspect)
+    assert reopened._confirm_collection_review([])
+    finding["message"] = "Two files"
+    finding["evidence_key"] = "two-files"
+    assert not reopened._confirm_collection_review([])
+    assert json.loads(path.read_text())["qc_acknowledgements"] == []
+
+
+def test_chooser_distinguishes_complete_skipped_and_unreadable_sessions(windows, tmp_path):
+    from datetime import datetime
+    from cassn.gui.session_chooser import SessionChooser
+    window = windows()
+    entries = [
+        dict(data={"metadata": {"site_name": "San Jacinto Mountains", "observer": "James",
+                                "deployment_start": "2026-06-10", "deployment_end": "2026-10-23"},
+                   "device_statuses": {"p1_ML": {"status": "Complete"}, "p1_BD": {"status": "Skipped"}}},
+             path=tmp_path / "sample-event" / "session.json", status="ok", saved_at=datetime(2026, 11, 5, 18)),
+        dict(data=None, path=tmp_path / "damaged" / "session.json", status="corrupted", error_msg="Unreadable JSON")
+    ]
+    chooser = SessionChooser(entries, window)
+    try:
+        row = chooser.tree.currentItem()
+        assert row.text(0) == "San Jacinto Mountains" and row.text(2) == "1 of 2"
+        assert row.text(1) == "2026-06-10 → 2026-10-23"
+        assert "James" in chooser.detail.text() and "Skipped devices: 1" in chooser.detail.text()
+        assert chooser.selected_session() is entries[0]
+        chooser.tree.setCurrentItem(chooser.tree.topLevelItem(1))
+        assert not chooser.resume.isEnabled()
+        assert "Unreadable JSON" in chooser.detail.text()
+    finally:
+        chooser.close()

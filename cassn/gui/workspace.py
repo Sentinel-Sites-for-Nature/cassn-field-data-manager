@@ -1,7 +1,9 @@
 """Presentation shell for the field workspace; workflow decisions stay in the wizard."""
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette, QPixmap, QTransform
+from math import ceil
+import time
+from PySide6.QtCore import QEvent, QPointF, Qt, Signal, QTimer
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPalette, QPixmap, QTextLayout, QTextOption, QTransform
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
     QVBoxLayout, QWidget, QProgressBar, QStyle, QStyleOptionProgressBar, QStylePainter,
@@ -12,6 +14,77 @@ from cassn.profile import PROFILE
 
 
 PAGE_NAMES = ("Deployments and devices", "Card ingest", "Review & upload")
+
+
+class UploadMessage(QLabel):
+    """Fit progress text to the panel, including filenames wider than a line."""
+
+    def __init__(self):
+        super().__init__()
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(True)
+        # A long filename must not set the minimum width of the Review page.
+        policy = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.hide()
+
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self):
+        self.setText("")
+
+    def _wrapped(self, width):
+        text = self.text().replace("\n", "\u2028")
+        layout = QTextLayout(text, self.font())
+        options = QTextOption()
+        options.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(options)
+        height = 0.0
+        layout.beginLayout()
+        while (line := layout.createLine()).isValid():
+            line.setLineWidth(max(1, width))
+            line.setPosition(QPointF(0, height))
+            height += line.height()
+        layout.endLayout()
+        return layout, ceil(height)
+
+    def heightForWidth(self, width):
+        return self._wrapped(width)[1]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        layout, _ = self._wrapped(self.width())
+        layout.draw(painter, QPointF(0, 0))
+
+
+class PreparationMessage(UploadMessage):
+    """Show elapsed waiting time without inventing a completion percentage."""
+
+    def __init__(self):
+        super().__init__()
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setInterval(1000)
+        self._pending_timer.timeout.connect(self._refresh_pending)
+
+    def setPendingText(self, text):
+        if not self._pending_timer.isActive():
+            self._pending_started = time.monotonic()
+        self._pending_text = text
+        self._refresh_pending()
+        self._pending_timer.start()
+
+    def _refresh_pending(self):
+        seconds = max(0, int(time.monotonic() - self._pending_started))
+        minutes, seconds = divmod(seconds, 60)
+        super().setText(f"{self._pending_text}\nPreparing · {minutes}:{seconds:02d} elapsed")
+
+    def setText(self, text):
+        self._pending_timer.stop()
+        super().setText(text)
 
 
 class UploadProgressBar(QProgressBar):
@@ -26,7 +99,15 @@ class UploadProgressBar(QProgressBar):
         if not self.isTextVisible() or self.maximum() <= self.minimum():
             return
         painter.setPen(self.palette().color(QPalette.Text))
-        painter.drawText(option.rect, Qt.AlignCenter, self.text())
+        text_flags = Qt.AlignCenter | Qt.TextWordWrap if self.property("wrapProgressText") else Qt.AlignCenter
+        label = self.text()
+        available = option.rect.width() - 6
+        if self.format().endswith(" · %p%") and self.fontMetrics().horizontalAdvance(label) > available:
+            percent = label.rsplit(" · ", 1)[-1]
+            label = f"{self.value():,} / {self.maximum():,} · {percent}"
+            if self.fontMetrics().horizontalAdvance(label) > available:
+                label = percent
+        painter.drawText(option.rect, text_flags, label)
         filled = self.style().subElementRect(QStyle.SE_ProgressBarContents, option, self)
         fraction = max(0, self.value() - self.minimum()) / (self.maximum() - self.minimum())
         filled.setWidth(round(filled.width() * fraction))
@@ -35,7 +116,7 @@ class UploadProgressBar(QProgressBar):
         painter.setClipRect(filled)
         dark = QApplication.palette().color(QPalette.Window).lightness() < 128
         painter.setPen(QColor("#152d25" if dark else "#ffffff"))
-        painter.drawText(option.rect, Qt.AlignCenter, self.text())
+        painter.drawText(option.rect, text_flags, label)
 
 
 
@@ -147,16 +228,6 @@ class FieldWorkspace(QWidget):
         side.addWidget(workflow)
         side.addStretch()
 
-        status = QFrame()
-        status.setObjectName("sidebarStatus")
-        status_layout = QVBoxLayout(status)
-        status_layout.setContentsMargins(12, 14, 12, 0)
-        status_layout.setSpacing(8)
-        self.header_status = workspace_label("", "muted", wrap=True)
-        status_layout.addWidget(self.header_status)
-        self.box_status = workspace_label("", "muted", wrap=True)
-        status_layout.addWidget(self.box_status)
-        side.addWidget(status)
         shell.addWidget(sidebar)
 
         content = QWidget()
@@ -226,19 +297,6 @@ class FieldWorkspace(QWidget):
                     label.style().unpolish(label)
                     label.style().polish(label)
 
-    def set_context(self, *, site, dates, devices, staging, box_connected, active_jobs):
-        self.box_status.setText("● Box connected" if box_connected else "○ Box not connected")
-        role = "connected" if box_connected else "muted"
-        if self.box_status.property("role") != role:
-            self.box_status.setProperty("role", role)
-            self.box_status.style().unpolish(self.box_status)
-            self.box_status.style().polish(self.box_status)
-        self.header_status.setVisible(bool(active_jobs))
-        self.header_status.setText(
-            f"{active_jobs} card{'s' if active_jobs != 1 else ''} copying"
-            if active_jobs else ""
-        )
-
     def resizeEvent(self, event):
         super().resizeEvent(event)
         compact = self.width() < 1180
@@ -277,13 +335,13 @@ class DeviceGridScroll(QScrollArea):
         super().__init__()
         self.setWidgetResizable(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setWidget(content)
         content.installEventFilter(self)
 
     def eventFilter(self, watched, event):
         if watched is self.widget() and event.type() == QEvent.LayoutRequest:
             height = self.widget().sizeHint().height() + self.horizontalScrollBar().sizeHint().height() + 4
-            if self.height() != height:
-                self.setFixedHeight(height)
+            if self.minimumHeight() != height:
+                self.setMinimumHeight(height)
         return super().eventFilter(watched, event)

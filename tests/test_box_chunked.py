@@ -414,3 +414,33 @@ def test_pending_chunk_blocks_staging_cleanup_even_with_old_pass(tmp_path,force)
     plan=inspect_deployment_for_cleanup(event,staging,storage,'field-root',force=force)
     assert not plan.clearable
     assert any('recovery record' in reason for reason in plan.reasons)
+
+
+@pytest.mark.parametrize('error', ['hosted_reconnect', 'http_401'])
+def test_refused_session_creation_leaves_no_record_and_retries_cleanly(tmp_path, error):
+    from cassn.box.hosted import HostedError
+    path, api, runtime, uploader = prepared(tmp_path)
+    refusals = [HostedError('reconnect') if error == 'hosted_reconnect' else fail(401)]
+    real_create = api.create
+
+    def create(parent, size, name):
+        if refusals:
+            raise refusals.pop()
+        return real_create(parent, size, name)
+
+    api.create = create
+    with pytest.raises(Exception):
+        uploader.upload(path, 'parent', 'source.wav')
+    assert not list(uploader.journal_dir.glob('*.json')), 'a refused creation must not hold the file for review'
+    assert uploader.upload(path, 'parent', 'source.wav') == 'file-1'
+    assert api.created == 1 and state(uploader)['state'] == 'complete'
+
+
+def test_uncertain_session_creation_keeps_record_for_review(tmp_path):
+    path, api, runtime, uploader = prepared(tmp_path)
+    api.create = lambda parent, size, name: (_ for _ in ()).throw(requests.ConnectionError('lost create reply'))
+    with pytest.raises(requests.ConnectionError):
+        uploader.upload(path, 'parent', 'source.wav')
+    assert state(uploader)['state'] == 'creating' and state(uploader)['session_id'] is None
+    with pytest.raises(UploadPaused, match='creation outcome is unknown'):
+        uploader.upload(path, 'parent', 'source.wav')

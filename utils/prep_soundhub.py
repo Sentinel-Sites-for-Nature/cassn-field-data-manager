@@ -45,8 +45,6 @@ from cassn.soundhub.export import (  # noqa: E402
     read_bd_audio_rows,
     refresh_project_csvs,
     validate_staging_manifests,
-    write_deployment_copy,
-    write_deployment_fragments,
 )
 from cassn.config import LOCAL_DATA_DIR  # noqa: E402
 from cassn.lookups import LookupTables  # noqa: E402
@@ -68,6 +66,7 @@ from cassn.soundhub.staging import (  # noqa: E402
     flac_available,
     fragments_root,
     project_root,
+    recover_staging,
     stage_deployment,
 )
 from cassn.soundhub.upload import (  # noqa: E402
@@ -94,6 +93,11 @@ def cmd_stage(args) -> int:
     settings = load_soundhub_config()
     lookups = LookupTables.load(LOCAL_DATA_DIR)
     staging_root = Path(args.staging or settings["staging_root"])
+    try:
+        recover_staging(staging_root)
+    except (SoundHubStagingError, OSError) as exc:
+        print(f"STAGING BLOCKED — {exc}")
+        return 1
     root = project_root(staging_root)
     if root.exists() or fragments_root(staging_root).exists():
         lifecycle = plan_completed_batch_cleanup(
@@ -146,9 +150,7 @@ def cmd_stage(args) -> int:
         try:
             build_recording_rows(audio_rows)
             result = stage_deployment(folder, audio_rows, staging_root, progress=show)
-            write_deployment_fragments(staging_root, audio_rows)
-            write_deployment_copy(folder, audio_rows)
-        except SoundHubStagingError as e:
+        except (SoundHubStagingError, OSError) as e:
             print(f"[{folder.name}] ERROR — {e}")
             failures += 1
             continue
@@ -158,6 +160,10 @@ def cmd_stage(args) -> int:
             f"{result['converted']} converted, {result['skipped']} already present\n"
         )
 
+    if failures:
+        return 1
+    if not fragments_root(staging_root).exists():
+        return 0
     csvs = refresh_project_csvs(staging_root)
     try:
         validate_staging_manifests(staging_root)

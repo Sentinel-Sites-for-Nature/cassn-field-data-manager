@@ -67,6 +67,45 @@ def test_new_window_action_creates_independent_lookup_state(manager):
     assert second.workspace.zoom == 100
 
 
+def test_new_window_offers_saved_deployments_without_resetting_active_window(manager, monkeypatch):
+    first = manager.new_window(open_sessions=False)
+    first.metadata["observer"] = "Existing window"
+    first._box_operation_active = True
+    sessions = [{"status": "ok", "data": {"deployment_folder": "/saved/deployment"}}]
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: sessions)
+    offered = []
+    monkeypatch.setattr(
+        FieldDataWizard, "offer_resume_session",
+        lambda self, found: offered.append((self, found)),
+    )
+
+    first.new_window_action.trigger()
+    QApplication.instance().processEvents()
+
+    second = manager.windows[1]
+    assert offered == [(second, sessions)]
+    assert first.metadata["observer"] == "Existing window"
+    assert first._box_operation_active
+    assert second.current_deployment_folder is None
+
+
+def test_ejection_reserves_every_volume_against_other_windows(manager, tmp_path):
+    first, second = manager.new_window(), manager.new_window()
+    volumes = {tmp_path / "card-one", tmp_path / "card-two"}
+    for volume in volumes:
+        volume.mkdir()
+    lease = first._card_eject_lease_factory()(volumes)
+    try:
+        for volume in volumes:
+            assert not second._claim_card_source(volume, "other")
+    finally:
+        lease.release()
+    volume = next(iter(volumes))
+    assert second._claim_card_source(volume, "other")
+    with pytest.raises(RuntimeError, match="Another window"):
+        first._card_eject_lease_factory()(volumes)
+
+
 def test_duplicate_deployment_blocked_before_create_or_restore(manager, tmp_path, monkeypatch):
     first, second = manager.new_window(), manager.new_window()
     first.staging_root = second.staging_root = tmp_path / "staging"
@@ -410,10 +449,10 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     worker.start.side_effect = lambda: setattr(worker.isRunning, "return_value", True)
     monkeypatch.setattr(wizard_module, "flac_available", lambda: True)
     monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args: worker)
-    monkeypatch.setattr(WindowMessageBox, "question", lambda *args: WindowMessageBox.Yes)
-    window.soundhub_group.setTitle("SoundHub upload progress")
+    monkeypatch.setattr(wizard_module.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
+    title = window.soundhub_group.title()
     window.stage_for_soundhub()
-    assert window.soundhub_group.title() == "SoundHub staging progress"
+    assert window.soundhub_group.title() == title == "Prepare and Stage Bird Audio Data for SoundHub Upload"
     assert window._staging_pending
     FieldDataWizard._set_box_controls_busy(window, False)
     assert not window.exit_btn.isEnabled()
@@ -488,3 +527,29 @@ def test_connect_box_blocked_during_another_windows_upload(manager, monkeypatch)
         login.assert_not_called()
     finally:
         held.release()
+
+
+@pytest.mark.parametrize("accept,authenticated", [(True, True), (False, True), (True, False)])
+def test_reconnect_waits_for_finished_upload_and_retries_once(manager, monkeypatch, accept, authenticated):
+    window = manager.new_window(open_sessions=False)
+    worker = MagicMock(needs_reconnect=True)
+    worker.isRunning.return_value = True
+    window._run_cloud_operation(lambda: setattr(window, "upload_thread", worker))
+    assert window._cloud_lease is not None
+    auth = MagicMock(return_value=authenticated)
+    retry = MagicMock()
+    monkeypatch.setattr(FieldDataWizard, "connect_to_box", auth)
+    monkeypatch.setattr(FieldDataWizard, "upload_to_box", retry)
+    monkeypatch.setattr(WindowMessageBox, "exec", lambda dialog: 0)
+    monkeypatch.setattr(WindowMessageBox, "clickedButton", lambda dialog: next(
+        b for b in dialog.buttons() if b.text() == ("Connect and Resume Upload" if accept else "Close")
+    ))
+
+    window.on_upload_finished(False, "Box disconnected during the upload.")
+    auth.assert_not_called()
+    retry.assert_not_called()
+    worker.isRunning.return_value = False
+    window._release_idle_cloud()
+    window._release_idle_cloud()
+    assert auth.call_count == int(accept)
+    assert retry.call_count == int(accept and authenticated)

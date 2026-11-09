@@ -17,6 +17,7 @@ removes its project mirror and fragments before the next batch begins.
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -374,6 +375,51 @@ def _read_csv(path: Path) -> list[dict]:
         return []
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
+
+
+@dataclass(frozen=True)
+class EventStagingSummary:
+    staged: int = 0
+    expected: int = 0
+    complete: bool = False
+    matched_paths: frozenset[str] = field(default_factory=frozenset, compare=False)
+
+
+def event_staging_summary(event_folder, staging_root) -> EventStagingSummary:
+    """Count current bird recordings with matching manifests and nonempty staged FLACs."""
+    root = project_root(staging_root)
+    if not (Path(event_folder) / "audio_file_metadata.csv").is_file():
+        return EventStagingSummary()
+    rows = read_bd_audio_rows(event_folder)
+    if not (root / RECORDING_CSV).is_file():
+        return EventStagingSummary(expected=len(rows))
+    expected = build_recording_rows(rows)
+    ids = {row["deployment_id"] for row in expected}
+    if not expected or any(not ident or Path(ident).name != ident or ident in {".", ".."} for ident in ids):
+        return EventStagingSummary()
+    staged = [r for r in _read_csv(root / RECORDING_CSV) if r["deployment_id"] in ids]
+    event_deployments = _read_csv(Path(event_folder) / "soundhub" / DEPLOYMENT_CSV)
+    staged_deployments = [r for r in _read_csv(root / DEPLOYMENT_CSV) if r["deployment_id"] in ids]
+    by_path = {r["path"]: r for r in staged}
+    matching_ids = {r["deployment_id"] for r in event_deployments if r in staged_deployments}
+    matched = set()
+    ready = 0
+    for row in expected:
+        media = root / row["path"]
+        if (row["deployment_id"] in matching_ids and row == by_path.get(row["path"])
+                and media.is_file() and media.stat().st_size > 0):
+            matched.add(row["path"])
+            ready += 1
+    complete = (ready == len(expected)
+                and sorted(staged, key=lambda r: r["path"]) == sorted(expected, key=lambda r: r["path"])
+                and {r["deployment_id"] for r in event_deployments} == ids
+                and sorted(staged_deployments, key=lambda r: r["deployment_id"]) ==
+                sorted(event_deployments, key=lambda r: r["deployment_id"]))
+    return EventStagingSummary(ready, len(expected), complete, frozenset(matched))
+
+
+def event_audio_is_staged(event_folder, staging_root) -> bool:
+    return event_staging_summary(event_folder, staging_root).complete
 
 
 def refresh_project_csvs(staging_root) -> dict:

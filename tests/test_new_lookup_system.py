@@ -711,6 +711,7 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda self: False)
+    monkeypatch.setattr(FieldDataWizard, "_soundhub_staging_root", lambda self: tmp_path / "soundhub")
     monkeypatch.setattr(card_thread_module, "ReconyxExtractor", DummyReconyx)
     monkeypatch.setattr(wizard_module, "EXIF_AVAILABLE", False)
 
@@ -738,15 +739,15 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
 
     window = FieldDataWizard(lookups=lookups, box_config=BoxConfig())
     try:
-        assert window.activity_log_group.isHidden()
-        assert window.activity_log_toggle.text() == "Show Activity Details"
-        window.activity_log_toggle.setChecked(True)
         assert not window.activity_log_group.isHidden()
-        assert window.activity_log_toggle.text() == "Hide Activity Details"
+        assert window.log_text.scope_filter.currentText() == "All activity"
+        assert window.activity_log_toggle.text() == "Activity log"
         window.activity_log_toggle.setChecked(False)
         assert window.activity_log_group.isHidden()
+        window.activity_log_toggle.setChecked(True)
+        assert not window.activity_log_group.isHidden()
 
-        assert window.upload_group.title() == "Box Upload Progress"
+        assert window.upload_group.title() == "Upload event files to Box"
         window.upload_progress_bar.hide()
         window._on_wi_split_progress(1, 4, "camera folder")
         assert window.upload_progress_bar.isHidden()
@@ -801,11 +802,12 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
         )
         # These synthetic images deliberately have no EXIF. Copying still
         # completes, but the new camera timezone check must not call them valid.
-        assert all(
-            "QC error: Camera timezone QC" in panel["messages"].toPlainText()
-            and "QC: All checks passed." not in panel["messages"].toPlainText()
-            for panel in window.card_ingest_panels.values()
-        )
+        for device in window.card_ingest_panels:
+            window._show_device_activity(device)
+            entries = [window.log_text.topLevelItem(i) for i in range(window.log_text.topLevelItemCount())]
+            visible = [row for row in entries if not row.isHidden()]
+            assert all(row.text(0).startswith(device) for row in visible)
+            assert any("Camera timezone QC" in row.text(0) and row.text(1) == "Error" for row in visible)
 
         window._populate_staged_event_tree()
         tree_root = window.staged_event_tree.topLevelItem(0)

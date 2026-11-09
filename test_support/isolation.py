@@ -119,7 +119,7 @@ class Policy:
                     self.path(arg.split('=', 1)[1], write=True)
                 elif not arg.startswith('-'):
                     self.path(arg, write=True)
-                elif arg not in ('--silent', '--verify', '--keep-foreign-metadata', '--output-name',
+                elif arg not in ('--silent', '--verify', '--test', '--keep-foreign-metadata', '--output-name',
                                  '-d', '-f', '-o', '--', *('-' + str(n) for n in range(9))):
                     raise TestIsolationError('Test isolation: unsupported native FLAC option')
             return

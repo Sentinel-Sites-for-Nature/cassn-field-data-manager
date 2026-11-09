@@ -1,83 +1,296 @@
-"""A compact collection check summary with selected evidence and optional diagnostics."""
+"""A compact collection check summary with selected evidence."""
 from __future__ import annotations
 
-from collections import Counter
 from html import escape
+from math import ceil
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QElapsedTimer, QEvent, QRectF, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QComboBox, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLayout,
+    QPushButton, QScrollArea, QTextEdit, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from cassn.core.inventory import inventory_storage_relpath
+from cassn.gui.appearance import workspace_label, workspace_stylesheet
+from cassn.gui.severity_tree import SeverityTree
 from cassn.gui.dialogs import WindowDialog, WindowMessageBox
 
 
+# Text identifies each level even when the user cannot distinguish the colors.
+_LEVELS = {
+    "error": ("Investigate", "#fbe2df", "#513330"),
+    "warning": ("Review", "#fff1c7", "#4c422a"),
+    "info": ("Notice", "#e5f3e9", "#293f34"),
+    "pending": ("Pending", "#eff1f2", "#333c43"),
+}
+
+
+def acknowledgement_key(finding):
+    if finding["severity"] not in {"error", "warning"}:
+        return None
+    return finding["evidence_key"]
+
+
+class FindingsTable(SeverityTree):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.itemExpanded.connect(self.fit_rows)
+        self.itemCollapsed.connect(self.fit_rows)
+
+    def fit_rows(self):
+        self.doItemsLayout()
+        item = self.topLevelItem(0)
+        height = self.header().height() + 2 * self.frameWidth()
+        while item is not None:
+            height += self.visualItemRect(item).height()
+            item = self.itemBelow(item)
+        if self.minimumHeight() != height:
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.setColumnWidth(1, self.viewport().width() // 3)
+            self.fit_rows()
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class EvidenceText(QTextEdit):
+    """Fit selected evidence to its text. Let the page handle scrolling."""
+
+    def __init__(self):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_text)
+
+    def _fit_text(self, size):
+        self.setFixedHeight(ceil(size.height()) + 2 * self.frameWidth() + 2)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class HoldToAcknowledge(QPushButton):
+    held = Signal()
+
+    duration_ms = 2000
+    idle_text = "Hold to acknowledge all and continue"
+
+    def __init__(self):
+        super().__init__(self.idle_text)
+        self.setAutoDefault(False)
+        self.setToolTip("Hold the mouse button or Space for two seconds. Release early to cancel.")
+        self.elapsed = QElapsedTimer()
+        self.progress = 0
+        self.finished = False
+        self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(25)
+        self.timer.timeout.connect(self._tick)
+
+    def _start(self):
+        if self.finished or self.elapsed.isValid():
+            return
+        self.setDown(True)
+        self.elapsed.start()
+        self.timer.start()
+        self._tick()
+
+    def _tick(self):
+        elapsed = self.elapsed.elapsed()
+        self.progress = min(elapsed / self.duration_ms, 1)
+        if elapsed >= self.duration_ms:
+            self.timer.stop()
+            self.elapsed.invalidate()
+            self.setDown(False)
+            self.held.emit()
+        self.update()
+
+    def _cancel(self):
+        self.timer.stop()
+        self.elapsed.invalidate()
+        self.setDown(False)
+        if not self.finished:
+            self.progress = 0
+            self.setText(self.idle_text)
+        self.update()
+
+    def show_result(self, saved):
+        self.finished = saved
+        self._cancel()
+        if saved:
+            self.progress = 1
+            self.setText("✓ All acknowledged")
+            QTimer.singleShot(900, self, self.hide)
+            self.update()
+
+    def _release(self):
+        # A release may arrive between the two-second mark and the next repaint.
+        if self.elapsed.isValid() and self.elapsed.elapsed() >= self.duration_ms:
+            self._tick()
+        self._cancel()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._start()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._release()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if not event.isAutoRepeat():
+                self._start()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            if not event.isAutoRepeat():
+                self._release()
+            event.accept()
+        else:
+            super().keyReleaseEvent(event)
+
+    def event(self, event):
+        if event.type() in (QEvent.Leave, QEvent.Hide, QEvent.FocusOut, QEvent.WindowDeactivate):
+            self._cancel()
+        return super().event(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.progress:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            track = QRectF(6, self.height() - 6, self.width() - 12, 4)
+            dark = self.palette().color(QPalette.Window).lightness() < 128
+            painter.setBrush(QColor("#384f48" if dark else "#dae7e1"))
+            painter.drawRoundedRect(track, 2, 2)
+            track.setWidth(track.width() * self.progress)
+            painter.setBrush(QColor("#8ed0bd" if dark else "#216e62"))
+            painter.drawRoundedRect(track, 2, 2)
+
+
 class CollectionReviewDialog(WindowDialog):
-    def __init__(self, findings, inventory, deployment_folder, parent=None):
+    def __init__(self, findings, inventory, deployment_folder, parent=None, *,
+                 acknowledged=(), save_acknowledgements=None):
         super().__init__(parent)
         self.setWindowTitle("Card ingest checks")
         self.resize(900, 640)
-        self._findings = findings
+        self._save_acknowledgements = save_acknowledgements
+        self._acknowledged = set(acknowledged)
+        self._required = set()
         self._folder = Path(deployment_folder)
         self._inventory = {
             (row.get("device_label", ""), row.get("new_filename", "")): row
             for row in inventory
         }
-        counts = Counter(f["severity"] for f in findings)
-        layout = QVBoxLayout(self)
-        heading = QLabel("Review card ingest checks" if findings else "Card ingest checks passed")
-        font = heading.font()
-        font.setPointSize(font.pointSize() + 3)
-        font.setBold(True)
-        heading.setFont(font)
-        layout.addWidget(heading)
-        summary = QLabel(
-            f"Needs investigation: {counts['error']} · To review: {counts['warning']} · Notices: {counts['info']}"
-            if findings else "No findings to address."
-        )
-        summary.setObjectName("qcSummary")
-        layout.addWidget(summary)
-        explanation = QLabel(
-            "Select a finding for affected files and next steps. Counts above refer to grouped findings.\n"
-            "You can continue to review the staged data. Nothing uploads until you start an upload."
-        )
-        explanation.setWordWrap(True)
-        layout.addWidget(explanation)
-        self.tree = QTreeWidget()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 8, 12, 12)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSizeConstraint(QLayout.SetMinimumSize)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+        self.setObjectName("fieldWorkspace")
+        zoom = getattr(getattr(parent, "workspace", None), "zoom", 100)
+        self.setStyleSheet(workspace_stylesheet(self.palette(), zoom) + """
+            QTreeWidget#qcFindings { selection-background-color: transparent; }
+            QTreeWidget#qcFindings::item:selected { background: transparent; }
+            QTextEdit#qcEvidence { border: none; }
+        """)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+        banner = QFrame()
+        banner.setObjectName("sidebarBrandBlock")
+        header = QVBoxLayout(banner)
+        header.setContentsMargins(18, 12, 18, 12)
+        heading = "Review card ingest checks" if findings else "Card ingest checks passed"
+        header.addWidget(workspace_label(heading, "sidebarBrand"))
+        event = workspace_label(self._folder.name, "muted")
+        event.setStyleSheet("color: #dcebe5;")
+        header.addWidget(event)
+        layout.addWidget(banner)
+        self.tree = FindingsTable(content)
         self.tree.setObjectName("qcFindings")
         self.tree.setAccessibleName("Card ingest findings")
-        self.tree.setHeaderLabels(["Finding", "Affected"])
-        self.tree.setRootIsDecorated(False)
+        self.tree.setHeaderLabels(["Finding", "Affected", "Status"])
+        self.tree.setRootIsDecorated(any(f.get("pending_devices") for f in findings))
         self.tree.setWordWrap(True)
+        self.tree.setTextElideMode(Qt.ElideNone)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        labels = {"error": "Investigate", "warning": "Review", "info": "Notice"}
+        self.tree.header().setSectionResizeMode(1, QHeaderView.Interactive)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.Fixed)
+        dark = self.palette().color(QPalette.Window).lightness() < 128
         for finding in findings:
+            label, light_color, dark_color = _LEVELS[finding["severity"]]
+            color = QColor(dark_color if dark else light_color)
             item = QTreeWidgetItem([
-                f"{labels[finding['severity']]} · " + finding["title"].replace(" + ", "\n"), finding["affected"],
+                f"{label}: " + finding["title"].replace(" + ", "\n"), finding["affected"],
             ])
+            for column in range(self.tree.columnCount()):
+                item.setBackground(column, color)
             item.setToolTip(0, finding["title"])
             item.setData(0, Qt.UserRole, finding)
+            key = acknowledgement_key(finding)
+            if key:
+                self._required.add(key)
+                item.setData(0, Qt.UserRole + 1, key)
+                item.setText(2, "Acknowledged" if key in self._acknowledged else "To review")
+            else:
+                item.setText(2, "No action needed")
             self.tree.addTopLevelItem(item)
-        layout.addWidget(self.tree, 2)
+            for device, description in finding.get("pending_devices", []):
+                child = QTreeWidgetItem(item, [f"Pending: {description}", device, "No action needed"])
+                for column in range(self.tree.columnCount()):
+                    child.setBackground(column, color)
+                child.setData(0, Qt.UserRole, dict(finding, message=f"{device} has no staged files."))
+        layout.addWidget(self.tree)
+        self.tree.ensurePolished()
+        status_width = max(self.tree.fontMetrics().horizontalAdvance(text) for text in ("Acknowledged", "No action needed"))
+        self.tree.setColumnWidth(2, status_width + 28)
+        self.tree.fit_rows()
+        card = QFrame()
+        card.setObjectName("setupCard")
+        evidence = QVBoxLayout(card)
+        evidence.setContentsMargins(14, 10, 14, 10)
+        evidence.setAlignment(Qt.AlignTop)
+        layout.addWidget(card)
+        self.detail_title = workspace_label("", "sectionTitle", wrap=True)
+        evidence.addWidget(self.detail_title)
         self.next_step = QLabel()
         self.next_step.setWordWrap(True)
         self.next_step.setObjectName("qcNextStep")
-        layout.addWidget(self.next_step)
-        self.details = QTextEdit()
+        evidence.addWidget(self.next_step)
+        self.details = EvidenceText()
         self.details.setObjectName("qcEvidence")
         self.details.setAccessibleName("Selected finding evidence")
         self.details.setReadOnly(True)
-        layout.addWidget(self.details, 3)
+        evidence.addWidget(self.details, 1)
         controls = QHBoxLayout()
         self.file_picker = QComboBox()
         self.file_picker.setObjectName("qcAffectedFiles")
-        self.file_picker.setAccessibleName("Affected file to open")
+        self.file_picker.setAccessibleName("Affected file")
         self.file_picker.setMinimumContentsLength(20)
         self.file_picker.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         controls.addWidget(self.file_picker, 1)
@@ -85,29 +298,49 @@ class CollectionReviewDialog(WindowDialog):
         self.open_file.setObjectName("qcOpenFile")
         self.open_file.clicked.connect(self._open_file)
         controls.addWidget(self.open_file)
-        self.technical = QToolButton()
-        self.technical.setText("Technical details")
-        self.technical.setCheckable(True)
-        self.technical.toggled.connect(self._show_evidence)
-        controls.addWidget(self.technical)
-        layout.addLayout(controls)
-        buttons = QDialogButtonBox()
-        back = buttons.addButton("Back to card ingest", QDialogButtonBox.RejectRole)
-        buttons.addButton("Continue to review", QDialogButtonBox.AcceptRole)
+        evidence.addLayout(controls)
+        self.save_error = workspace_label("Could not save the acknowledgement. Try again.", "contextTitle", wrap=True)
+        outer.addWidget(self.save_error)
+        self.save_error.hide()
+
+        self.acknowledge = QPushButton("Acknowledge finding")
+        self.acknowledge.setAccessibleName("Acknowledge this finding as reviewed")
+        self.acknowledge.setToolTip("I reviewed this finding and took any necessary action.")
+        self.acknowledge.setProperty("role", "primary")
+        self.acknowledge.clicked.connect(self._acknowledge_current)
+        self.hold_all = HoldToAcknowledge()
+        self.hold_all.held.connect(lambda: self._save_reviewed(self._required, bulk=True))
+        self.hold_all.setVisible(bool(self._required - self._acknowledged))
+        back = QPushButton("Back to card ingest")
         back.setDefault(True)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        back.clicked.connect(self.reject)
+        self.proceed = QPushButton("Continue to review")
+        self.proceed.setEnabled(self._required <= self._acknowledged)
+        self.proceed.setProperty("role", "primary" if self.proceed.isEnabled() else "")
+        self.proceed.clicked.connect(self.accept)
+
+        footer = QGridLayout()
+        outer.addLayout(footer)
+        footer.setColumnStretch(0, 1)
+        buttons = (self.acknowledge, self.hold_all, back, self.proceed)
+        for index, button in enumerate(buttons):
+            footer.addWidget(button, index // 2, index % 2 + 1)
+            button.ensurePolished()
+        # Reserve the two columns even when the bulk button changes its text during a hold.
+        width = max(button.sizeHint().width() for button in buttons)
+        for column in (1, 2):
+            footer.setColumnMinimumWidth(column, width)
         self.tree.currentItemChanged.connect(self._select_finding)
         self.file_picker.currentIndexChanged.connect(self._update_open_button)
         if findings:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         else:
+            self.acknowledge.hide()
+            self.detail_title.hide()
             self.tree.hide()
             self.details.setPlainText("No findings to address.")
             self.file_picker.hide()
             self.open_file.hide()
-            self.technical.hide()
 
     def _select_finding(self, *_):
         self.file_picker.clear()
@@ -115,7 +348,12 @@ class CollectionReviewDialog(WindowDialog):
         if not item:
             return
         finding = item.data(0, Qt.UserRole)
-        self.next_step.setText(f"<b>Next step:</b> {escape(finding['action'])}")
+        key = item.data(0, Qt.UserRole + 1)
+        self.acknowledge.setVisible(bool(key and key not in self._acknowledged))
+        self.detail_title.setText(finding.get("detail_title", finding["title"]))
+        explanation = finding.get("explanation", "")
+        lines = [escape(text) for text in (explanation, finding["action"]) if text]
+        self.next_step.setText("<br>".join(lines))
         seen = set()
         for file in finding["files"]:
             key = (file.get("device_label", ""), file["filename"])
@@ -126,17 +364,45 @@ class CollectionReviewDialog(WindowDialog):
         self.file_picker.setVisible(bool(seen))
         self.open_file.setVisible(bool(seen))
         self._update_open_button()
-        self._show_evidence()
+        self.details.setPlainText(finding["message"])
 
-    def _show_evidence(self, *_):
+    def _acknowledge_current(self):
         item = self.tree.currentItem()
-        if not item:
+        key = item.data(0, Qt.UserRole + 1)
+        if key not in self._required:
             return
-        finding = item.data(0, Qt.UserRole)
-        text = finding["message"]
-        if self.technical.isChecked():
-            text += "\n\nTechnical details\n" + finding["technical"]
-        self.details.setPlainText(text)
+        self._save_reviewed({key})
+
+    def _save_reviewed(self, keys, *, bulk=False):
+        updated = (self._acknowledged | keys) & self._required
+        if self._save_acknowledgements and not self._save_acknowledgements(updated):
+            self.save_error.show()
+            if bulk:
+                self.hold_all.show_result(False)
+            return
+        self.save_error.hide()
+        self._acknowledged = updated
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            if item.data(0, Qt.UserRole + 1) in updated:
+                item.setText(2, "Acknowledged")
+        self.acknowledge.hide()
+        complete = self._required <= updated
+        if bulk:
+            self.hold_all.show_result(complete)
+        else:
+            self.hold_all.setVisible(not complete)
+        self.proceed.setEnabled(complete)
+        if complete:
+            self.proceed.setProperty("role", "primary")
+            self.proceed.style().unpolish(self.proceed)
+            self.proceed.style().polish(self.proceed)
+        if bulk and complete:
+            self.accept()
+
+    def _audio_selected(self):
+        row = self._inventory.get(self.file_picker.currentData(), {})
+        return row.get("file_type") == "audio" or Path(row.get("new_filename", "")).suffix.lower() in {".wav", ".flac"}
 
     def _selected_path(self):
         key = self.file_picker.currentData()
@@ -149,19 +415,24 @@ class CollectionReviewDialog(WindowDialog):
                 return None
             path = (self._folder / relative).resolve()
             path.relative_to(self._folder.resolve())
+            if self._audio_selected():
+                folder = (self._folder / relative).parent.resolve()
+                folder.relative_to(self._folder.resolve())
+                return folder
             return path
         except (ValueError, OSError):
             return None
 
     def _update_open_button(self, *_):
         path = self._selected_path()
+        self.open_file.setText("Open folder" if self._audio_selected() else "Open file")
         self.open_file.setEnabled(path is not None)
         self.open_file.setToolTip(str(path) if path else "No matching inventory path is available. See the ingest log.")
 
     def _open_file(self):
         path = self._selected_path()
-        if path is None or not path.is_file():
-            WindowMessageBox.information(self, "File unavailable", "The retained file path is unavailable. Check the ingest log and storage location.")
+        if path is None or not (path.is_dir() if self._audio_selected() else path.is_file()):
+            WindowMessageBox.information(self, "Location unavailable", "Check the ingest log and storage location.")
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            WindowMessageBox.information(self, "Could not open file", f"Open this file manually:\n{path}")
+            WindowMessageBox.information(self, "Could not open location", f"Open this location manually:\n{path}")

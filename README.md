@@ -298,12 +298,9 @@ be brought forward through the Python icon in the Dock or Mission Control.
 - Review deployment summary
 - View file counts and sizes by device
 - At ingest completion, oversized camera folders are already prepared in Wildlife Insights batches of at most 15,000 images
-- Start transfers by hand from the grouped action menus at the bottom of the tab.
-  Nothing uploads on its own:
-  - **Prepare & Upload** — upload to Box or add bird audio to local SoundHub staging
-  - **QC Checks** — Box verification, Box↔local hashes, camera timezone checks
-  - **Deployment** — open either staging folder, switch deployment, start a new one
-- Start new deployment or exit
+- In **Upload and Stage Data**, use the platform panels to start Box upload, local SoundHub staging, or Wildlife Insights camera selection when configured.
+- Expand the Box panel for manual file-list and hash checks. Box runs both checks after upload.
+- Use **File** to open a saved event or start a new one.
 
 Later uploads to the same Box event preserve accumulated metadata from earlier
 batches. Conflicting identities or concurrent edits stop publication for review.
@@ -368,7 +365,11 @@ Choose a site and curated deployment event to populate deployment metadata, sele
 ![Deployments and devices with event metadata populated from lookup tables](screenshots/01-metadata-entry.png)
 
 #### Card ingest
-Monitor device status and individual card jobs while files are copied, renamed, and verified; adjust simultaneous cards and expand activity details as needed.
+Monitor device status and individual card jobs while files are copied, renamed, and verified; adjust simultaneous cards as needed. The activity log opens with all entries. Use **Show** to filter by plot or device.
+
+On macOS, a completed card job shows **Eject <card name>** when it is safe to eject.
+The app checks the original card and waits for any other job using that card to finish.
+Successful ejection clears the finished panel. If ejection fails, the panel shows the error and allows another attempt.
 
 ![Card ingest showing completed and active card jobs, concurrency controls, and activity details](screenshots/02-data-collection.png)
 
@@ -417,7 +418,25 @@ ORG_SITE_YYYYMMDD/
 
 ### Wildlife Insights Deployment CSV
 
+Use **Upload to Wildlife Insights** to start an upload, add cameras, or retry an eligible hold.
+The button stays visible and gray while a request is queued, uploading, or verifying.
+It stays gray after verification until another camera is ready. A retryable hold enables it after active requests finish.
+Review the destination project and photo count before confirming.
+If delivery was interrupted, the panel opens the saved selection for confirmation.
+During transfer and verification, the app checks progress once per second while the helper is available.
+The journal-reading helper reports confirmed photo counts. A verification receipt establishes completion.
+**Open Wildlife Insights** opens the destination project. For events with both UC projects, select Mammal or Small Animal.
+In the Box panel, **Open in Box** opens the event folder after Box assigns it an ID. Earlier, it opens the configured project data folder.
+
 At the end of each session, the app automatically generates deployment CSVs formatted for upload to Wildlife Insights from `image_file_metadata.csv`, saved to `WI_metadata/` within the deployment folder. One CSV is produced per camera device type (ML, SA). Requires event-scoped camera fields in `deployments.csv` and defaults in `wi_config.json`.
+
+On Box, open the event's **wildlife_insights** folder for manual upload inputs.
+FDM publishes `ML_deployments.csv` and `SA_deployments.csv` for the camera
+types present, before sending media. Later plots add rows to the same files.
+The input CSVs describe deployments; their presence does not confirm a transfer.
+The WI uploader adds `upload_record.md` and `upload_record.json` after it
+verifies the event's pinned deployments. The per-batch copies under
+`qc/box_batches/` describe the inputs staged for each individual Box upload.
 
 In Wildlife Insights deployment CSVs, latitude and longitude are written with exactly eight digits after the decimal point. Shorter values are padded with trailing zeroes and longer values are rounded to eight places, satisfying Wildlife Insights' requirement of four to eight decimal places without modifying the source lookup values.
 
@@ -536,14 +555,28 @@ UC SoundHub staging is available on **Review & upload**, including when using
 hosted Box sign-in. This screen provides local staging only; SoundHub upload and
 landing-zone checks are available through the maintenance CLI below.
 
-**Prepare & Upload → Add Bird Audio to SoundHub Staging…** transcodes the open
+**Stage Bird Audio** in the Wildlife Sound Hub panel transcodes the open
    deployment event's BD WAVs to FLAC (level 5, `--verify`,
    `--keep-foreign-metadata`) and adds or refreshes its rows in the cumulative
    local staging batch. Existing staged events remain, the two project CSVs are
    rebuilt, and nothing is uploaded. Source WAVs are never touched. Progress is
-   per-file and the job is cancellable; completed files are kept, so re-running
-   resumes. A copy of both CSVs is also written to the event's `soundhub/`
+   per-file and the job is cancellable. A copy of both CSVs is also written to the event's `soundhub/`
    subfolder so the metadata travels to Box alongside the raw data.
+
+After successful staging, the panel shows the result in green and disables **Stage Bird Audio**.
+Adding another plot's bird recordings makes the staging action available again.
+Expand the panel to see a **Deployment / Progress** row with the count and percentage for each recorder. The completion summary lists recordings converted or reused,
+changed rows in each project CSV, and totals for the entire batch. **Open Staging Folder** opens the local batch in Finder.
+
+After cancellation or failure, reopen the event and choose
+**Stage Bird Audio** in the panel. The app shows completed and remaining recording counts.
+It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
+Staging checks available disk space before conversion, including space for temporary files.
+If disk space runs out, free space and continue the same event.
+The app moves each completed recorder folder with one rename.
+It saves a completion marker before the moves and CSV updates.
+Staging, upload, and cleanup finish any marked operation before checking the batch.
+
 **Deployment → Open SoundHub Staging Folder** opens the local batch in Finder.
 Staging does not initiate an upload. CSU does not expose the UC staging destination.
 
@@ -806,9 +839,10 @@ to interpret it.
 Before leaving **Card ingest**, the checks dialog groups findings by the action
 needed. Unusual findings retain affected filenames and evidence; when the same
 file is unusually small and lacks a capture time or serial, its symptoms appear
-together. Select a finding to see next steps, measured sizes or burst context,
-and use **Open file** to inspect an available staged file. **Technical details**
-expands the original diagnostic and check explanation.
+together. Select a finding to see the next step, measured sizes or burst details.
+For an image, **Open file** opens the selected image. For audio, **Open folder**
+shows the directory containing the selected recording so you can compare its size
+with nearby recordings. Pending devices with zero staged files share one collapsed row.
 
 Resolved camera timezone-offset discrepancies appear as one notice with photo
 and device counts, without an exhaustive filename list. This means the timezone
@@ -834,7 +868,7 @@ opened or changed to build the summary.
 | `expected_file_count` | Source SD card is auto-counted (filtering hidden/system files) and silently compared against the **total inventoried files for the device**. Resume-safe — partial first-attempts plus completing-attempts compare correctly against source. | Automatic, after each SD card copy | Log panel + warning popup on mismatch; per-device entry in `qc_report.json` |
 | `sequence_gap` | Per camera device: validates app-assigned RECONYX event grouping. Each event should have `sequence_total` frames, observed positions should be sequential and start at 1, timestamps within an event should increase with adjacent frames no more than 2 seconds apart, and event numbers should be contiguous. | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
 | `temporal_plausibility` | Per device: flags files recorded before deployment start, files dated after the collection (deployment end) date, and clock-reset clusters (≥3 files at the same second). | Automatic at device completion | Log panel + per-device entry in `qc_report.json` |
-| `camera_timezone_consistency` | Camera clocks are expected to show current local Pacific time. Compares original EXIF capture time and offset against `America/Los_Angeles`. New processing resolves local civil time and flags reported-offset disagreements as warnings. Invalid, nonexistent, or ambiguous capture times remain unresolved errors. Historical mismatches remain errors until separately corrected. | Automatic at camera device completion; manual **QC Checks → Check Camera Timezones**; re-evaluated for readiness | One per-device result with counts and example filenames in the card panel, log, and `qc_report.json`. Original EXIF clock and offset, resolved UTC, and QC status are retained in new session rows and image CSVs. Exports and session resume do not recalculate old rows. Images are never corrected by this check; verified copying and Box backup remain available. |
+| `camera_timezone_consistency` | Camera clocks are expected to show current local Pacific time. Compares original EXIF capture time and offset against `America/Los_Angeles`. New processing resolves local civil time and flags reported-offset disagreements as warnings. Invalid, nonexistent, or ambiguous capture times remain unresolved errors. Historical mismatches remain errors until separately corrected. | Automatic at camera device completion; manual **File → Recheck camera timezones**; re-evaluated for readiness | One per-device result with counts and example filenames in the card panel, log, and `qc_report.json`. Original EXIF clock and offset, resolved UTC, and QC status are retained in new session rows and image CSVs. Exports and session resume do not recalculate old rows. Images are never corrected by this check; verified copying and Box backup remain available. |
 | `coordinate_validation` | Plot coordinates and elevation (from `plots.csv`) must be non-null and fall within the California study-area bounding box and elevation range (-100 m to 4,500 m). Catches unset (0,0) coordinates, a blank or non-numeric `elevation_m`, and values baked into the lookup table that land outside the expected region. | Automatic before CSV generation | Log panel + session-level entry in `qc_report.json` |
 | `lookup_snapshot` | Copies the lookup/config tables in use into `qc/lookup_snapshot/` (with a manifest) so regenerated metadata can be tied to the exact site, plot, camera, ARU, SoundHub, and WI configuration used. | Automatic at metadata generation | `qc/lookup_snapshot/` + session-level entry in `qc_report.json` |
 | `wi_image_split` | Enforces the Wildlife Insights 15,000-image folder limit. Oversized ML/SA folders are split without cutting trigger bursts, structurally verified, and synchronized back to session inventory. | Silent at camera ingest completion; first-Box-upload fallback for older sessions | Per-device entry in `qc_report.json` during ingest; existing preparation panel and session-level QC entry for the upload fallback |
@@ -973,7 +1007,7 @@ the card and local copy. Cancellation is checked during these verification reads
 
 - **Resume mid-deployment.** Inventory checkpoints are saved to local `session.json` during copying and at card completion. New rows retain the original source path, filesystem device/inode, size and modification time as retry evidence. Resume compares path, inode, size and modification time and reads both source checksums before reusing a record, then checks the staged bytes too. macOS can change the filesystem device number when a card is reinserted; that change alone no longer prevents a retry. Missing or truncated known copies can be restored from the verified retained source. Cards must be inactive while reading; timestamps and checksums cannot establish a live snapshot or scientific attribution. Older rows without this evidence, or a source whose path or other retained details have changed, require reviewed recovery instead of automatic skipping. This is deliberately conservative and increases resume read time.
 - **Reconnect after a card interruption.** Reinsert the original card, reopen the deployment if needed, select the same plot/device, and start its card copy again. Completed files are rechecked before the remaining files are copied. Build 4017 also recognizes the specific source-evidence error saved by build 4016 when only the mount number changed. It retains that block until every previously inventoried source file and its staged copy passes verification and the session is saved. Changed files, missing source files, conflicting staged copies, unrelated safety holds, and failed verification still stop recovery. Directory read failures and a card replacement during copying cannot silently report successful completion.
-- **Ingest review holds.** Files missing from the session are preserved, including files in split folders. Equal-byte files from another source, multiple CONFIGs claiming one name, and burst-name collisions stop the affected acquisition. Keep the source card. The full error is retained in `qc/qc_report.json` and can be reopened through QC Checks. Safety holds remain until a reviewed recovery reconciles the files and records a resolution; retrying or dismissing a dialog does not clear them. Other devices can continue, but the affected event cannot upload or be cleaned up (including forced cleanup). No automatic identity-repair tool is included in this change.
+- **Ingest review holds.** Files missing from the session are preserved, including files in split folders. Equal-byte files from another source, multiple CONFIGs claiming one name, and burst-name collisions stop the affected acquisition. Keep the source card. The full error is retained in `qc/qc_report.json` and can be reviewed from Card ingest. Safety holds remain until a reviewed recovery reconciles the files and records a resolution; retrying or dismissing a dialog does not clear them. Other devices can continue, but the affected event cannot upload or be cleaned up (including forced cleanup). No automatic identity-repair tool is included in this change.
 - **Session compatibility.** Unsupported session versions remain visible in Open Deployment with an explanation; FDM does not open or overwrite them. Interrupted temporary files are preserved unless created and owned by the current copy attempt. Plain filename counters recover all emitted widths, including values above 99,999.
 - **Resume WI preparation.** Each image move is atomic. If preparation is cancelled, completed moves remain in place and their exact nested paths are saved in `session.json`; retrying the card ingest finishes the remaining moves. After a crash, actual image locations are recovered before copying resumes. Older sessions can also resume preparation through the first-upload fallback. Ingest completion and Box upload require successful preparation and saved inventory paths.
 - **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.

@@ -1,5 +1,6 @@
 """The workspace shell must preserve workflow gates and fit a laptop window."""
 
+import json
 import os
 from unittest.mock import MagicMock
 
@@ -8,7 +9,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from cassn.box.auth import BoxConfig, hosted_config
 from cassn.gui.wizard import FieldDataWizard
@@ -33,23 +34,19 @@ def workspace_window(monkeypatch, request):
 
 @pytest.mark.parametrize("workspace_window", [hosted_config("uc"), hosted_config("csu"), BoxConfig()], indirect=True)
 def test_review_exposes_uc_staging_without_soundhub_upload(workspace_window):
-    from PySide6.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QPushButton, QToolButton
 
     _app, window = workspace_window
     uc = window.box_config.profile != "csu"
     assert window.soundhub_stage_btn.isVisible() == uc
     assert window.open_soundhub_btn.isVisible() == uc
-    buttons = [button for button in window.tabs.widget(2).findChildren(QToolButton) if button.menu()]
-    # Qt requires && to render a literal ampersand instead of a mnemonic.
-    prepare = next(button for button in buttons if button.text() == "Prepare && Upload ▾")
-    assert window.upload_now_btn in prepare.menu().actions()
-    assert window.soundhub_stage_btn in prepare.menu().actions()
-    menus = [button.menu() for button in buttons]
-    visible = [action for menu in menus for action in menu.actions() if action.isVisible()]
-    assert (window.soundhub_stage_btn in visible) == uc
-    assert (window.open_soundhub_btn in visible) == uc
-    assert not any("Upload Bird Data to SoundHub" in action.text() or "SoundHub Landing Zone" in action.text()
-                   for action in visible)
+    window.tabs.setCurrentIndex(2)
+    assert window.soundhub_group.isHidden() != uc
+    assert window.soundhub_panel_button.text() == "Stage Bird Audio"
+    assert not any(button.menu() for button in window.tabs.widget(2).findChildren(QToolButton))
+    actions = window.soundhub_group.findChildren(QPushButton)
+    assert not any("Upload Bird Data to SoundHub" in button.text() or "SoundHub Landing Zone" in button.text()
+                   for button in actions)
 
 
 @pytest.mark.parametrize("workspace_window", [hosted_config("uc")], indirect=True)
@@ -60,7 +57,7 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.current_deployment_folder = tmp_path / "event"
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
     monkeypatch.setattr(wizard, "flac_available", lambda: True)
-    monkeypatch.setattr(wizard.QMessageBox, "question", lambda *args: wizard.QMessageBox.Yes)
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     worker = MagicMock()
     stage = MagicMock(return_value=worker)
     upload = MagicMock(side_effect=AssertionError("Staging must not start an upload"))
@@ -71,11 +68,13 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.soundhub_stage_btn.trigger()
     stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups)
     worker.start.assert_called_once()
+    assert window.soundhub_group.disclosure.isChecked()
     assert not window.soundhub_stage_btn.isEnabled()
     window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
-    assert window.soundhub_stage_btn.isEnabled()
-    assert "nothing was uploaded" in notice.call_args.args[2]
-    assert "Upload Bird Data to SoundHub" not in notice.call_args.args[2]
+    assert not window.soundhub_stage_btn.isEnabled()
+    assert window.soundhub_stage_btn.text() == "Bird Audio Already Staged"
+    notice.assert_not_called()
+    assert window.soundhub_status_label.text() == "Staged and validated. Ready for upload."
     upload.assert_not_called()
     window.soundhub_stage_thread = None
 
@@ -111,7 +110,7 @@ def test_sidebar_review_respects_validation_refusal(workspace_window, tmp_path, 
 def test_collection_checks_require_explicit_continue(
     workspace_window, tmp_path, monkeypatch, accept, sidebar
 ):
-    from PySide6.QtWidgets import QDialogButtonBox, QTreeWidget
+    from PySide6.QtWidgets import QTreeWidget
     from cassn.core.quality_control import append_qc_report
     from cassn.gui import wizard
 
@@ -139,11 +138,16 @@ def test_collection_checks_require_explicit_continue(
         findings = [tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(tree.topLevelItemCount())]
         text = "\n".join(finding["message"] for finding in findings)
         assert "Old copy failure" not in text
-        for expected in ("p1_ML", "Small image", "Invalid offset", "Pending", "Missing latitude", "Missing elevation"):
+        assert tree.topLevelItem(tree.topLevelItemCount() - 1).text(0).startswith("Pending")
+        for expected in ("p1_ML", "Small image", "Invalid offset", "Missing latitude", "Missing elevation"):
             assert expected in text
-        buttons = dialog.findChild(QDialogButtonBox)
+        if accept:
+            for i, finding in enumerate(findings):
+                if finding["severity"] in {"error", "warning"}:
+                    tree.setCurrentItem(tree.topLevelItem(i))
+                    dialog.acknowledge.click()
         target = "Continue to review" if accept else "Back to card ingest"
-        next(button for button in buttons.buttons() if button.text() == target).click()
+        next(button for button in dialog.findChildren(QPushButton) if button.text() == target).click()
         return dialog.result()
 
     monkeypatch.setattr(wizard.QDialog, "exec", respond)
@@ -223,7 +227,8 @@ def test_four_jobs_fit_small_window_and_restore_empty_state(workspace_window, tm
 def test_review_summary_escapes_metadata_and_counts_each_device(workspace_window, tmp_path):
     _app, window = workspace_window
     window.current_deployment_folder = tmp_path
-    window.metadata = {"site_name": "Reserve <test>", "observer": "A & B"}
+    window.metadata = {"site_name": "Site <test>", "site_short_name": "DeepCanyon",
+                       "site_code": "BDC", "observer": "A & B"}
     window.devices = [(1, "One", "ML", "p1_ML")]
     window.populate_collection_list()
     window.file_inventory = [
@@ -231,7 +236,9 @@ def test_review_summary_escapes_metadata_and_counts_each_device(workspace_window
     ]
     window.update_review_tab()
     text = window.summary_text.toPlainText()
-    assert "Reserve <test>" in text
+    for label, value in (("Site", "Site <test>"), ("Site short name", "DeepCanyon"),
+                         ("Site code", "BDC")):
+        assert f"{label}\n{value}" in text
     assert "A & B" in text
     assert "1 files" in text
     assert "0 of 1" in text
@@ -292,6 +299,14 @@ def test_deployment_page_fits_desktop_and_stacks_on_laptop(monkeypatch, connecte
         assert window.metadata_columns.direction() == QBoxLayout.LeftToRight
         assert scroll.verticalScrollBar().maximum() == 0
         assert scroll.horizontalScrollBar().maximum() == 0
+        from cassn.gui.workspace import DeviceGridScroll
+        matrix = window.findChild(DeviceGridScroll)
+        previous = matrix.viewport().height()
+        window.resize(1380, 1070)
+        for _ in range(3):
+            app.processEvents()
+        assert matrix.viewport().height() > previous
+        assert matrix.viewport().height() >= matrix.widget().sizeHint().height()
         window.resize(1000, 740)
         for _ in range(3):
             app.processEvents()
@@ -315,6 +330,40 @@ def test_unreadable_collection_qc_report_remains_visible(workspace_window, tmp_p
     assert any(f["severity"] == "error" and f["title"] == "QC report could not be read" for f in findings)
 
 
+def test_review_groups_only_empty_pending_devices(workspace_window, tmp_path):
+    from PySide6.QtWidgets import QLabel, QTreeWidgetItem
+    from cassn.gui.qc_review import CollectionReviewDialog
+
+    _app, window = workspace_window
+    window.current_deployment_folder = tmp_path
+    window.file_inventory = [{"device_label": "p3_SA", "new_filename": "one.jpg"}]
+    for device, status, count in [
+        ("p1_ML", "Pending", "0"), ("p2_ML", "Pending", "0"),
+        ("p3_SA", "Pending", "0"), ("p3_ML", "Incomplete", "1"),
+    ]:
+        row = QTreeWidgetItem(window.device_tree, [device, "Camera", status, count])
+        row.setData(0, Qt.UserRole, device)
+    dialog = CollectionReviewDialog(window._collection_review_findings([]), window.file_inventory, tmp_path)
+    try:
+        assert dialog.findChild(QLabel, "qcSummary") is None
+        tree = dialog.tree
+        assert tree.currentItem().text(1) == "p3_ML"
+        assert tree.topLevelItem(1).text(1) == "p3_SA"
+        parent = tree.topLevelItem(2)
+        assert parent.childCount() == 2 and not parent.isExpanded()
+        assert [parent.child(i).text(1) for i in range(2)] == ["p1_ML", "p2_ML"]
+        assert len({tree.topLevelItem(i).background(0).color().name() for i in range(3)}) == 3
+        for i in range(3):
+            item = tree.topLevelItem(i)
+            assert item.background(0) == item.background(1)
+            assert item.data(0, Qt.DecorationRole) is None
+        parent.setExpanded(True)
+        tree.setCurrentItem(parent.child(0))
+        assert dialog.details.toPlainText() == "p1_ML has no staged files."
+    finally:
+        dialog.close()
+
+
 def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_window, tmp_path, monkeypatch):
     from cassn.gui import soundhub_thread, wizard
     from cassn.soundhub.staging import project_root
@@ -335,19 +384,163 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     worker = MagicMock()
     stage = MagicMock(return_value=worker)
     monkeypatch.setattr(wizard, "SoundHubStageThread", stage)
-    question = MagicMock(return_value=wizard.QMessageBox.No)
-    monkeypatch.setattr(wizard.QMessageBox, "question", question)
+    def cancel(dialog):
+        text = [label.text() for label in dialog.findChildren(QLabel)]
+        assert "Current batch: 2 deployments · 3 recordings" in text
+        assert "event" in text
+        assert {b.text() for b in dialog.findChildren(QPushButton)} == {"Cancel", "Stage bird audio"}
+        return dialog.DialogCode.Rejected
 
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", cancel)
     window.stage_for_soundhub()
-    assert "2 SoundHub deployment(s), 3 recording(s)" in question.call_args.args[2]
     validate.assert_not_called()
     check_box.assert_not_called()
     stage.assert_not_called()
 
-    question.return_value = wizard.QMessageBox.Yes
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     window.stage_for_soundhub()
     worker.start.assert_called_once()
-    assert window.soundhub_status_label.text() == "Checking existing SoundHub batch…"
+    assert window.soundhub_group.disclosure.isChecked()
+    assert window.soundhub_status_label.text().startswith("Checking previously staged bird recordings before conversion…")
     validate.assert_not_called()
     check_box.assert_not_called()
     window.soundhub_stage_thread = None
+
+
+def test_soundhub_continue_action_restores_saved_counts(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+    from cassn.soundhub.staging import work_root
+
+    _app, window = workspace_window
+    event = tmp_path / "event"
+    event.mkdir()
+    deployment_id = "UC_RanchoMarino_plot2_BD_20260803"
+    (event / "audio_file_metadata.csv").write_text(
+        "filename,deployment_id,device_type,file_type\n"
+        f"{deployment_id}_00001.wav,{deployment_id},BD,audio\n"
+        f"{deployment_id}_00002.wav,{deployment_id},BD,audio\n"
+    )
+    staging = tmp_path / "soundhub"
+    folder = work_root(staging) / deployment_id
+    folder.mkdir(parents=True)
+    (folder / f"{deployment_id}_00001.flac").write_bytes(b"completed")
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: staging)
+    window.current_deployment_folder = event
+    window.tabs.setCurrentIndex(2)
+    assert window.soundhub_stage_btn.text() == "Continue SoundHub Staging…"
+    assert "1 completed, 1 remaining" in window.soundhub_status_label.text()
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    def cancel(dialog):
+        text = [label.text() for label in dialog.findChildren(QLabel)]
+        assert "1 completed · 1 remaining" in text
+        assert "Continue staging" in [b.text() for b in dialog.findChildren(QPushButton)]
+        return dialog.DialogCode.Rejected
+
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", cancel)
+    window.stage_for_soundhub()
+
+def test_activity_log_shows_device_severity_and_complete_diagnostic(workspace_window):
+    _, window = workspace_window
+    log = window.log_text
+    log.clear()
+    window.log("[p1_BD] Warning: Check the recorder.")
+    window.log("QC [p2_ML] pass: Camera dates match.")
+    window.log("✗ [p3_BD] Copy stopped.\nDetails: <card unavailable>")
+    assert [log.topLevelItem(i).text(1) for i in range(3)] == ["Warning", "Passed", "Error"]
+    entry = log.topLevelItem(2)
+    assert entry.text(0) == "p3_BD · Copy stopped."
+    assert entry.child(0).text(0) == "Copy stopped.\nDetails: <card unavailable>"
+
+
+def test_soundhub_completed_and_failed_restore(workspace_window, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    _, window = workspace_window
+    event = tmp_path / "event"
+    event.mkdir()
+    window.current_deployment_folder = event
+    window.metadata["site_short_name"] = "example"
+    window.save_session()
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "staging")
+    from cassn.soundhub.export import EventStagingSummary
+    monkeypatch.setattr(wizard, "event_staging_summary", lambda *_: EventStagingSummary(1, 1, True))
+    monkeypatch.setattr(wizard.QMessageBox, "information", lambda *args: None)
+    monkeypatch.setattr(wizard.QMessageBox, "warning", lambda *args: None)
+
+    window.on_soundhub_stage_complete(True, False, "Bird audio staged.", {
+        "converted": 26, "skipped": 13, "deployment_ids": ["recorder1", "recorder2"],
+        "manifest_changes": {"deployment.csv": {"added": 2, "updated": 1, "removed": 0},
+                             "recording.csv": {"added": 26, "updated": 0, "removed": 0}},
+        "csvs": {"deployment_count": 57, "recording_count": 788},
+    })
+    session = event / "session.json"
+    before = session.read_bytes()
+    window._refresh_soundhub_resume()
+    assert not window.soundhub_group.isHidden() and not window.soundhub_group.disclosure.isChecked()
+    assert session.read_bytes() == before
+    window.restore_session(json.loads(before))
+    window.tabs.setCurrentIndex(2)
+    assert not window.soundhub_group.isHidden() and not window.soundhub_panel_button.isEnabled()
+    assert "recording.csv: 26 added · 0 updated" in window.soundhub_history_label.text()
+    assert "Entire local batch: 57 deployments · 788 recordings" in window.soundhub_history_label.text()
+    assert "26 newly converted · 13 already present" in window.soundhub_history_label.text()
+
+    window.on_soundhub_stage_complete(False, False, "Disk full", {})
+    window.restore_session(json.loads(session.read_text()))
+    window.tabs.setCurrentIndex(2)
+    assert not window.soundhub_group.isHidden() and window.soundhub_panel_button.isEnabled()
+    assert "Disk full" in window.soundhub_status_label.text()
+    assert not window.soundhub_group.isHidden()
+
+
+def test_device_filter_keeps_card_history_after_panel_removal(workspace_window, tmp_path):
+    _, window = workspace_window
+    window._create_card_panel("p1_BD", tmp_path)
+    window._on_card_log("p1_BD", "Warning: Low battery")
+    window.log("Error: [p2_BD] Card unavailable")
+    window._show_device_activity("p1_BD")
+    window._remove_card_panel("p1_BD")
+    log = window.log_text
+    assert log.scope_filter.currentText() == "p1_BD"
+    rows = [log.topLevelItem(i) for i in range(log.topLevelItemCount())]
+    visible = [r for r in rows if not r.isHidden()]
+    assert [r.text(0) for r in visible] == ["p1_BD · Low battery"]
+    assert visible[0].background(0) == visible[0].background(2)
+    log.scope_filter.setCurrentIndex(0)
+    assert all(not row.isHidden() for row in rows)
+
+
+def test_plot_filter_includes_progress_from_each_device_in_that_plot(workspace_window):
+    _, window = workspace_window
+    log = window.log_text
+    log.clear()
+    for label in ("p1_BD", "p1_ML", "p10_BD"):
+        window._on_card_log(label, "[12] sample.wav  (1.0 MB)")
+    assert log.topLevelItemCount() == 3
+    log.scope_filter.setCurrentIndex(log.scope_filter.findText("Plot 1"))
+    assert [log.topLevelItem(i).isHidden() for i in range(3)] == [False, False, True]
+    assert log.topLevelItem(0).text(0) == "p1_BD · [12] sample.wav  (1.0 MB)"
+    window._on_card_log("p10_BD", "...10 files processed")
+    assert log.topLevelItem(3).isHidden()
+    log.scope_filter.setCurrentIndex(0)
+    assert all(not log.topLevelItem(i).isHidden() for i in range(4))
+
+
+def test_single_placement_label_toggles_only_that_device(workspace_window):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from cassn.gui.preview import sample_lookups
+
+    app, window = workspace_window
+    window.lookups = sample_lookups()
+    event = window.lookups.deployments["SantaCruzIsland"][0]
+    window.lookups.activate_deployment_round(event["deployment_round_id"])
+    window._rebuild_plot_grid("SantaCruzIsland")
+    window.show()
+    app.processEvents()
+    _, checkbox = window.device_checkboxes[1]["ML"][0]
+    assert checkbox.text() == "p1_ML"
+    assert checkbox.isChecked()
+    QTest.mouseClick(checkbox, Qt.LeftButton, pos=QPoint(checkbox.width() - 10, checkbox.height() // 2))
+    assert not checkbox.isChecked()
+    assert window.device_checkboxes[1]["SA"][0][1].isChecked()

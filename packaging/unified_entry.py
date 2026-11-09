@@ -23,7 +23,8 @@ if "--self-check" in sys.argv:
     config = load_box_config()
     Transport(config.service_url)
     assert config.is_complete and config.client_secret is None
-    assert (BUNDLE_DIR / "assets" / "workspace" / "box.webp").is_file()
+    for filename in ("box.webp", "wildlife-soundhub.png", "wildlife-insights.png"):
+        assert (BUNDLE_DIR / "assets" / "workspace" / filename).is_file()
     assert (BUNDLE_DIR / "assets" / "ssn-california-map-transparent.png").is_file()
     assert (BUNDLE_DIR / "assets" / "ssn_data_manager_icon.png").is_file()
     assert Path(certifi.where()).is_file()

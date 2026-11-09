@@ -32,8 +32,11 @@ def test_box_upload_writes_summary_before_uploader_starts(tmp_path, monkeypatch)
         file_inventory=[],
         devices=[],
         box_config={},
+        _box_present_paths=None,
+        _box_count_folder=None,
         upload_progress_bar=MagicMock(),
         upload_status_label=MagicMock(),
+        box_history_label=MagicMock(),
         upload_metrics_label=MagicMock(),
         cancel_upload_btn=MagicMock(),
         log=MagicMock(),
@@ -66,7 +69,7 @@ def test_box_upload_does_not_start_while_ingest_is_active(tmp_path, monkeypatch)
 
 
 def test_card_ingest_is_blocked_during_entire_box_cycle(monkeypatch):
-    context = SimpleNamespace(_box_operation_active=True)
+    context = SimpleNamespace(_box_operation_active=True, _card_ejection_active=lambda: False)
     message = MagicMock()
     chooser = MagicMock()
     monkeypatch.setattr(wizard_module.QMessageBox, "information", message)
@@ -156,6 +159,30 @@ def test_box_lock_releases_after_verification(tmp_path, monkeypatch):
     context._update_copy_action.assert_called_once()
 
 
+def test_verified_upload_reports_success_in_box_panel_without_popup(tmp_path, monkeypatch):
+    dialog = MagicMock()
+    monkeypatch.setattr(wizard_module, "QMessageBox", dialog)
+    monkeypatch.setattr(wizard_module, "readiness", lambda *args, **kwargs: (True, True))
+    monkeypatch.setattr("cassn.box.publication.require_publication_complete", lambda folder: None)
+    window = MagicMock()
+    window.current_deployment_folder = tmp_path
+    window.file_inventory = [{}, {}]
+    window._post_upload_box_issues = []
+    window._post_upload_box_summary = "2 of 2 files present"
+
+    FieldDataWizard._finish_post_upload_verification(window, True, "2 hashes match", [])
+
+    assert window.box_upload_complete
+    window._show_saved_box_result.assert_called_once_with(True)
+    window.upload_status_label.setText.assert_called_with(
+        "✓ Upload complete and verified."
+    )
+    window.upload_metrics_label.setText.assert_called_with(
+        "• Files checked: 2\n• Box file list: Passed\n• File hashes: Passed"
+    )
+    assert not dialog.mock_calls
+
+
 def test_box_preparation_acquires_guard_before_worker_starts(tmp_path, monkeypatch):
     context = MagicMock()
     context.current_deployment_folder = tmp_path
@@ -178,6 +205,7 @@ def test_box_preparation_acquires_guard_before_worker_starts(tmp_path, monkeypat
     monkeypatch.setattr(wizard_module, "WISplitThread", lambda *_args: preparation)
     FieldDataWizard.upload_to_box(context)
     preparation.start.assert_called_once()
+    context.upload_group.disclosure.setChecked.assert_called_once_with(True)
     assert context._box_operation_active is True
 
 
@@ -225,7 +253,7 @@ def test_successful_upload_keeps_deployment_controls_locked():
 
 def test_active_box_operation_prevents_switch_reset_and_close(monkeypatch):
     monkeypatch.setattr(wizard_module.QMessageBox, 'information', MagicMock())
-    context = SimpleNamespace(_box_operation_active=True)
+    context = SimpleNamespace(_box_operation_active=True, _card_disk_threads=set())
     FieldDataWizard.open_different_deployment(context)
     FieldDataWizard.start_new_deployment(context)
     event = MagicMock()

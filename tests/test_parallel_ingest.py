@@ -649,6 +649,8 @@ def test_audio_metadata_is_read_from_verified_destination(tmp_path, monkeypatch)
     monkeypatch.setattr(wizard_module, "parse_audiomoth_wav_comment", comment)
     monkeypatch.setattr(wizard_module, "parse_audiomoth_guano", guano)
     context = _ProcessContext(event, IngestHashRegistry(), _AudioLookups())
+    progress = []
+    context._ingest_progress = lambda copied, detail: progress.append((copied, detail))
 
     result = FieldDataWizard.process_sd_card_files(
         context,
@@ -662,6 +664,9 @@ def test_audio_metadata_is_read_from_verified_destination(tmp_path, monkeypatch)
     )
 
     assert result == (1, 0, 0)
+    assert progress[0][0] == 0 and progress[0][1].startswith("Copying 20260510_000000.WAV")
+    assert any(n == 0 and s.startswith("Checking 20260510_000000.WAV") for n, s in progress)
+    assert progress[-1][0] == 1
     assert len(seen_paths) == 2
     assert all(path.parent == destination for path in seen_paths)
     assert context.file_inventory[0]["recording_duration_sec"] == 32400

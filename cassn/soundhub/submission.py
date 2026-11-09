@@ -21,7 +21,7 @@ from cassn.soundhub.upload import (
     upload_project,
     verify_project,
 )
-from cassn.soundhub.staging import SoundHubStagingError
+from cassn.soundhub.staging import SoundHubStagingError, recover_staging
 from cassn.soundhub.transfers import TransferArchive
 
 
@@ -63,9 +63,10 @@ def plan_soundhub_submission(
     settings: dict | None = None,
     box_year_root: Path | None = None,
 ) -> SoundHubSubmissionPlan:
-    """Validate and describe the next pending batch without writing anywhere."""
+    """Finish interrupted local staging, then describe the next pending batch."""
     settings = dict(settings or load_soundhub_config())
     staging_root = Path(staging_root or settings["staging_root"]).expanduser().resolve()
+    recover_staging(staging_root)
     validation_errors: list[str] = []
     try:
         validate_staging_manifests(staging_root)

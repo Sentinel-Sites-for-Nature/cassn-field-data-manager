@@ -49,7 +49,8 @@ def test_missing_project_stays_open_without_repeating_login(app, monkeypatch, tm
     snapshot = SimpleNamespace(source="box", lookups=object())
     monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", lambda *a: snapshot)
     dialog.retry_button.click()
-    settle(app, lambda: dialog.bootstrap is snapshot)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is snapshot
     assert dialog.result() == QDialog.Accepted
     dialog.close()
 
@@ -82,23 +83,64 @@ def test_empty_project_error_scrolls_on_small_window_with_footer_reachable(app, 
 
 
 @pytest.mark.parametrize("profile", ["uc", "csu"])
-def test_fresh_welcome_uses_shared_brand_and_one_primary_action(app, monkeypatch, tmp_path, profile):
+def test_project_loading_then_sign_in_has_one_primary_action(app, monkeypatch, tmp_path, profile):
     from dataclasses import replace
     from PySide6.QtWidgets import QLabel
     monkeypatch.setattr(hosted_setup.QTimer, "singleShot", lambda *_: None)
     dialog = hosted_setup.HostedSetupDialog(replace(csu_config(), profile=profile), cache_dir=tmp_path)
     dialog.show()
     app.processEvents()
-    assert dialog.title.text() == "Welcome to the CA-SSN Data Manager"
+    assert dialog.title.text() == "Opening your project…"
+    assert dialog.connection_status.isVisible()
+    assert dialog.connection_status.accessibleName() == "Checking your Box connection"
+    assert any(label.accessibleName() == "Box logo" for label in dialog.connection_status.findChildren(QLabel))
+    name = "University of California Nature" if profile == "uc" else "California State University"
+    assert dialog.organization_logo.accessibleName() == name
+    assert not dialog.organization_logo.pixmap().isNull()
+    assert not dialog.connect_button.isVisible()
+    from cassn.box.hosted import HostedError
+    def no_session():
+        raise HostedError("reconnect")
+    monkeypatch.setattr(hosted_setup, "manager_for", lambda _: SimpleNamespace(token=no_session, session=None))
+    dialog.load_project()
+    settle(app, lambda: dialog.worker is None)
+    assert dialog.title.text() == "Connect your Box account"
+    assert dialog.connect_button.isVisible()
+    assert not dialog.status.isVisible()
     assert not dialog.connect_button.icon().isNull()
     assert dialog.connect_button.isDefault()
     assert not dialog.retry_button.isVisible()
     assert not dialog.disconnect_button.isVisible()
     labels = dialog.findChildren(QLabel)
-    assert any("Click Connect to Box below to begin." in label.text() for label in labels)
-    assert any("approved to access your project folder" in label.text() for label in labels)
+    assert any("account that has access to your project folder" in label.text() for label in labels)
     assert any('href="mailto:jtimperato@ucdavis.edu"' in label.text() and label.openExternalLinks() for label in labels)
     dialog.close()
+
+
+def test_loading_settings_replaces_connection_check(app, monkeypatch, tmp_path):
+    from threading import Event
+    ready = Event()
+    snapshot = SimpleNamespace(source="box", lookups=object())
+    def load(*args):
+        assert ready.wait(4)
+        return snapshot
+    monkeypatch.setattr(hosted_setup, "manager_for", lambda _: SimpleNamespace(token=lambda: object()))
+    monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", load)
+    dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
+    dialog.show()
+    try:
+        settle(app, lambda: dialog.status.text() == "Loading your project settings…")
+        assert dialog.connection_status.isVisible()
+        assert dialog.connection_check.isVisible()
+        assert dialog.connection_status.accessibleName() == "Box connected"
+        assert not dialog.connect_button.isVisible()
+    finally:
+        ready.set()
+        settle(app, lambda: dialog.worker is None)
+    assert dialog.settings_check.isVisible()
+    assert dialog.status.text() == "Project settings loaded"
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.result() == QDialog.Accepted
 
 
 def test_valid_config_accepts_startup_and_offline_stays_disconnected(app, monkeypatch, tmp_path):
@@ -109,7 +151,8 @@ def test_valid_config_accepts_startup_and_offline_stays_disconnected(app, monkey
     monkeypatch.setattr(hosted_setup, "bootstrap_lookup_tables", lambda *a: snapshot)
     dialog = hosted_setup.HostedSetupDialog(csu_config(), cache_dir=tmp_path)
     dialog.show()
-    settle(app, lambda: dialog.bootstrap is snapshot)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is snapshot
     assert dialog.result() == QDialog.Accepted
     assert not dialog.connected
     dialog.close()
@@ -133,7 +176,7 @@ def test_failed_reconnect_does_not_publish_old_connected_flag(app, monkeypatch, 
     window.close()
 
 
-def test_connection_changes_update_every_window_sidebar(app, monkeypatch, tmp_path):
+def test_connection_changes_update_every_window(app, monkeypatch, tmp_path):
     from cassn.gui.windows import DeploymentWindows
     from cassn.gui.wizard import FieldDataWizard
     from cassn.gui.preview import sample_lookups
@@ -148,8 +191,7 @@ def test_connection_changes_update_every_window_sidebar(app, monkeypatch, tmp_pa
         first._publish_connection(connected)
         for window in (first, second):
             assert window.box_authenticated == connected
-            assert window.workspace.box_status.text() == (
-                "● Box connected" if connected else "○ Box not connected")
+            assert window.box_connection_label.text() == ("✓ Connected" if connected else "Box disconnected — connect to upload")
     for window in (first, second):
         window.current_deployment_folder = None
         window.close()
@@ -314,7 +356,10 @@ def test_authentication_failure_stays_recoverable_without_cache_retry(app, monke
     assert calls == ['token']
     assert dialog.result() != QDialog.Accepted
     assert dialog.connect_button.isVisible() and dialog.connect_button.isEnabled()
-    assert str(HostedError(kind)) in dialog.status.text()
+    if kind == "reconnect":
+        assert dialog.status.isHidden()
+    else:
+        assert str(HostedError(kind)) in dialog.status.text()
     assert not dialog.connected
     dialog.close()
 
@@ -339,7 +384,8 @@ def test_successful_login_keeps_settings_failure_on_welcome_until_reload(app, mo
     settle(app, lambda: dialog.worker is None)
     assert dialog.connected and dialog.result() != QDialog.Accepted
     dialog.retry_button.click()
-    settle(app, lambda: dialog.bootstrap is live)
+    settle(app, lambda: dialog.result() == QDialog.Accepted)
+    assert dialog.bootstrap is live
     assert dialog.result() == QDialog.Accepted and dialog.connected
     dialog.close()
 

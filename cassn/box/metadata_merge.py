@@ -15,8 +15,11 @@ from uuid import uuid4
 
 
 CSV_NAMES = ("image_file_metadata.csv", "audio_file_metadata.csv")
+WI_INPUT_NAMES = {kind: f"wildlife_insights/{kind}_deployments.csv" for kind in ("ML", "SA")}
+WI_STAGED_NAMES = {kind: f"WI_metadata/wildlife_insights_{kind}_deployments.csv" for kind in WI_INPUT_NAMES}
 SHARED_NAMES = (*CSV_NAMES, "deployment_event_record.json", "qc/qc_report.json")
 BOX_HISTORY = ("is_uploaded_to_box", "box_uploader", "box_upload_datetime")
+WI_HISTORY = ("is_submitted_to_wi", "wi_submitter", "wi_submission_datetime")
 
 
 class MetadataConflict(ValueError):
@@ -53,6 +56,63 @@ def csv_bytes(fields, rows) -> bytes:
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue().encode("utf-8")
+
+
+def merge_wi_input(previous, incoming):
+    """Keep earlier plots and stop before overwriting a conflicting manual edit."""
+    from cassn.export.wildlife_insights import WI_COLUMNS, rows_to_csv_bytes
+
+    if previous is None:
+        previous = rows_to_csv_bytes([])
+    reader = csv.DictReader(io.StringIO(previous.decode("utf-8-sig"), newline=""), strict=True)
+    if reader.fieldnames != list(WI_COLUMNS):
+        raise MetadataConflict("Unexpected Box WI deployment CSV header")
+    by_id = {}
+    for row in reader:
+        key = row.get("deployment_id")
+        if not key or key in by_id or None in row or None in row.values():
+            raise MetadataConflict("Invalid or duplicate Box WI deployment row")
+        by_id[key] = row
+    added = False
+    for row in incoming:
+        key = row["deployment_id"]
+        if key in by_id:
+            if by_id[key] != row:
+                raise MetadataConflict(f"Box WI input differs for {key}; review before replacing it")
+        else:
+            by_id[key] = row
+            added = True
+    return rows_to_csv_bytes(list(by_id.values())) if added else previous
+
+
+def carry_wi_only_update(before: bytes, newer: bytes, candidate: bytes) -> bytes:
+    """Carry a concurrent WI stamp into our union without accepting other edits.
+
+    File identity/version checks belong to the publication caller. Row order
+    need not match, but the header, keys and every non-WI cell must match.
+    """
+    fields, rows = read_csv(before)
+    new_fields, new_rows = read_csv(newer)
+    if fields != new_fields or not set(WI_HISTORY).issubset(fields):
+        raise MetadataConflict("Concurrent image metadata header is not a WI-only change")
+    indexed = {(r["deployment_id"], r["filename"]): r for r in rows}
+    updated = {(r["deployment_id"], r["filename"]): r for r in new_rows}
+    if indexed.keys() != updated.keys():
+        raise MetadataConflict("Concurrent image metadata row keys changed")
+    for key, old in indexed.items():
+        if any(old[field] != updated[key][field] for field in fields if field not in WI_HISTORY):
+            raise MetadataConflict(f"Concurrent image metadata has a non-WI edit: {key}")
+    if indexed == updated:
+        raise MetadataConflict("Concurrent image version has no WI cell change")
+    candidate_fields, candidate_rows = read_csv(candidate)
+    if not set(WI_HISTORY).issubset(candidate_fields):
+        raise MetadataConflict("Image metadata candidate lacks WI columns")
+    target = {(r["deployment_id"], r["filename"]): r for r in candidate_rows}
+    if not indexed.keys() <= target.keys():
+        raise MetadataConflict("Image metadata candidate lost existing row keys")
+    for key, new in updated.items():
+        target[key].update({field: new[field] for field in WI_HISTORY})
+    return csv_bytes(candidate_fields, candidate_rows)
 
 
 def stamp_box_provenance(path: Path, uploader: str, uploaded_at: str):
@@ -123,7 +183,39 @@ def read_object(payload: bytes) -> dict:
         raise MetadataConflict(f"Cannot safely read shared JSON: {exc}") from exc
 
 
-def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes:
+def _check_pending_device(label, previous, incoming, placements, records, file_ids):
+    """Prove the missing ID is a pending device, without inferring an ID from its label."""
+    from cassn.lookups import deployment_storage_label
+
+    conflict = MetadataConflict(f"Cannot confirm the deployment ID for {label}. "
+                                "Review the event records and saved device lookup before uploading.")
+    deployment_id = previous.get("deployment_id") or incoming.get("deployment_id")
+    for field in ("plot_number", "plot_label", "device_type"):
+        if not previous.get(field) or previous[field] != incoming.get(field):
+            raise conflict
+    matches = [p for p in placements if deployment_storage_label(p) == label
+               or p["deployment_id"] == deployment_id]
+    if len(matches) != 1:
+        raise conflict
+    placement = matches[0]
+    if (placement["deployment_id"] != deployment_id or deployment_storage_label(placement) != label
+            or placement["plot_number"] != str(incoming["plot_number"])
+            or placement["device_type"] != incoming["device_type"]):
+        raise conflict
+    for index, record in enumerate(records):
+        devices = record.get("devices", [])
+        matching = [d for d in devices if d.get("device_label") == label or d.get("deployment_id") == deployment_id]
+        if len(matching) != 1 or matching[0].get("device_label") != label:
+            raise conflict
+        if file_ids is not None:
+            ids = file_ids[index]
+            if (not ids.issubset({d.get("deployment_id") for d in devices})
+                    or (deployment_id in ids) != (matching[0].get("deployment_id") == deployment_id)):
+                raise conflict
+
+
+def merge_event(remote: bytes | None, local: bytes, *, file_count: int,
+                deployment_lookup: Path | None = None, file_ids=None) -> bytes:
     new = read_object(local)
     old = read_object(remote) if remote is not None else {}
     for obj in (new, old):
@@ -156,6 +248,7 @@ def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes
             if old_info.get(field) and new_info.get(field) and old_info[field] != new_info[field]:
                 raise MetadataConflict(f"Event record disagrees on {field}")
     devices = {}
+    placements = None
     for row in old.get("devices", []) + new["devices"]:
         if not isinstance(row, dict) or not row.get("device_label"):
             raise MetadataConflict("Device record has no unambiguous label")
@@ -165,7 +258,16 @@ def merge_event(remote: bytes | None, local: bytes, *, file_count: int) -> bytes
             if any(previous[field] != row[field] for field in previous.keys() & row.keys()):
                 raise MetadataConflict(f"Conflicting deployment mapping for {label}")
             if previous.get("deployment_id") != row.get("deployment_id"):
-                raise MetadataConflict(f"Legacy deployment mapping needs review for {label}")
+                # FDM lists pending devices before their first file supplies an ID.
+                # A label alone cannot establish that an older row is the same device.
+                from cassn.lookups import load_device_deployments
+                if placements is None:
+                    placements = []
+                    if deployment_lookup is not None and deployment_lookup.is_file():
+                        placements = [p for p in load_device_deployments(deployment_lookup)
+                                      if p["deployment_event_id"] == new_info["deployment_event_id"]
+                                      and p["site_short_name"] == new_info.get("site_short_name")]
+                _check_pending_device(label, previous, row, placements, (old, new), file_ids)
             devices[label] = {**row, **previous}
         else:
             devices[label] = dict(row)

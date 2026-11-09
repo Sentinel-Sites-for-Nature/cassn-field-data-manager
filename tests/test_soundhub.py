@@ -8,6 +8,7 @@ import struct
 import subprocess
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,8 +34,11 @@ from cassn.soundhub.staging import (
     _wav_missing_final_pad,
     flac_available,
     project_root,
+    recover_staging,
     stage_deployment,
+    staging_progress,
     validate_deployment_id,
+    work_root,
 )
 from cassn.box.verification import is_orphan_on_box
 from cassn.soundhub.upload import project_prefix, staged_objects, upload_project
@@ -537,6 +541,33 @@ def test_stage_splits_plots_into_separate_deployments(deployment, tmp_path):
 
 
 @needs_flac
+def test_event_staged_status_follows_current_recordings(deployment, tmp_path):
+    from cassn.soundhub.export import event_audio_is_staged, event_staging_summary
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    assert not event_audio_is_staged(deployment, staging)
+    stage_deployment(deployment, rows, staging)
+    assert event_audio_is_staged(deployment, staging)
+    total = len(rows)
+    assert event_staging_summary(deployment, staging).staged == total
+    flac = next(project_root(staging).glob("*/*.flac"))
+    flac.rename(flac.with_suffix(".missing"))
+    assert not event_audio_is_staged(deployment, staging)
+    assert event_staging_summary(deployment, staging).staged == total - 1
+    flac.with_suffix(".missing").rename(flac)
+    with (deployment / "audio_file_metadata.csv").open() as stream:
+        fields = csv.DictReader(stream).fieldnames
+    with (deployment / "audio_file_metadata.csv").open("a", newline="") as stream:
+        csv.DictWriter(stream, fields, extrasaction="ignore").writerow(
+            audio_row("UC_StrathearnRanch_plot3_BD_20260714", "00001")
+        )
+    assert not event_audio_is_staged(deployment, staging)
+    summary = event_staging_summary(deployment, staging)
+    assert (summary.staged, summary.expected) == (total, total + 1)
+
+
+@needs_flac
 def test_stage_is_idempotent(deployment, tmp_path):
     staging = tmp_path / "staging"
     rows = read_bd_audio_rows(deployment)
@@ -544,6 +575,181 @@ def test_stage_is_idempotent(deployment, tmp_path):
     second = stage_deployment(deployment, rows, staging)
     assert second["converted"] == 0
     assert second["skipped"] == 3
+
+
+@needs_flac
+@pytest.mark.parametrize("interruption", ["disk_full", "cancel"])
+def test_worker_resumes_eight_recordings_in_an_existing_batch(
+    deployment, tmp_path, monkeypatch, interruption,
+):
+    from PySide6.QtWidgets import QApplication
+    from cassn.gui import soundhub_thread
+    from cassn.soundhub import staging as module
+
+    app = QApplication.instance() or QApplication([])
+    staging = tmp_path / "staging"
+    stage_deployment(deployment, read_bd_audio_rows(deployment), staging)
+    event = tmp_path / "UC_RanchoMarino_20260803"
+    rows = [audio_row("UC_RanchoMarino_plot2_BD_20260803", f"{i:05d}") for i in range(1, 11)]
+    for row in rows:
+        make_wav(event / "raw_data" / "p2_BD" / row["filename"])
+    with (event / "audio_file_metadata.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    monkeypatch.setattr(soundhub_thread, "enrich_audio_rows", lambda rows, lookups: rows)
+    monkeypatch.setattr(soundhub_thread, "plan_completed_batch_cleanup", lambda *args: SimpleNamespace(
+        closed=False, errors=[], provenance=object(),
+    ))
+    converter = module.convert_wav_to_flac
+
+    def fail_at_nine(source, destination):
+        if source.stem.endswith("00009"):
+            destination.with_suffix(".flac.partial").write_bytes(b"unfinished")
+            raise SoundHubStagingError("disk is full")
+        converter(source, destination)
+
+    worker = soundhub_thread.SoundHubStageThread(event, staging, None)
+    results = []
+    worker.completed.connect(lambda *args: results.append(args))
+    if interruption == "disk_full":
+        monkeypatch.setattr(module, "convert_wav_to_flac", fail_at_nine)
+    else:
+        worker.progress.connect(lambda current, total, name: worker.cancel() if current == 8 else None)
+    worker.run()
+    assert not results[0][0]
+    assert len(list(work_root(staging).glob("*/*.flac"))) == 8
+    assert staging_progress(event, staging) == (8, 10)
+    validate_staging_manifests(staging)  # The existing event remains valid.
+    # Another event can still be staged while this event is unfinished.
+    stage_deployment(deployment, read_bd_audio_rows(deployment), staging)
+
+    monkeypatch.setattr(module, "convert_wav_to_flac", converter)
+    # Reopen the event with a fresh worker, as after an application restart.
+    retry = soundhub_thread.SoundHubStageThread(event, staging, None)
+    retry.completed.connect(lambda *args: results.append(args))
+    retry.run()
+    assert results[-1][0], results[-1][2]
+    assert results[-1][3]["converted"] == 2
+    assert results[-1][3]["skipped"] == 8
+    assert staging_progress(event, staging) is None
+    assert not (work_root(staging) / "pending.json").exists()
+    assert not list(project_root(staging).rglob("*.partial"))
+    validate_staging_manifests(staging)
+    app.processEvents()
+
+
+@needs_flac
+@pytest.mark.parametrize("failure", ["rename", "csv", "fragment", "replace"])
+def test_completion_recovery_repeats_folder_moves_and_csv_writes(
+    deployment, tmp_path, monkeypatch, failure,
+):
+    from cassn.soundhub import export
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    if failure == "replace":
+        stage_deployment(deployment, rows, staging)
+    rename = Path.rename
+    write_csv = export._write_csv
+
+    def interrupted_rename(path, target):
+        result = rename(path, target)
+        if path.parent == work_root(staging):
+            raise OSError("process stopped after a folder rename")
+        if failure == "replace" and path.parent == project_root(staging):
+            raise OSError("process stopped while replacing an existing recorder folder")
+        return result
+
+    def interrupted_csv(path, fields, contents):
+        write_csv(path, fields, contents)
+        if path == project_root(staging) / "deployment.csv":
+            raise OSError("disk filled between project CSV updates")
+        if failure == "fragment" and path.parent.parent == fragments_root(staging):
+            raise OSError("disk filled between fragment CSV updates")
+
+    with monkeypatch.context() as patch:
+        if failure in ("rename", "replace"):
+            patch.setattr(Path, "rename", interrupted_rename)
+        else:
+            patch.setattr(export, "_write_csv", interrupted_csv)
+        with pytest.raises(SoundHubStagingError):
+            stage_deployment(deployment, rows, staging)
+    assert (work_root(staging) / "pending.json").exists()
+    completion = recover_staging(staging)
+    assert completion["csvs"]["recording_count"] == 3
+    assert recover_staging(staging) is None
+    validate_staging_manifests(staging)
+
+
+@needs_flac
+@pytest.mark.parametrize("entry", ["stage", "upload", "cleanup"])
+def test_batch_actions_finish_pending_completion_before_checks(
+    deployment, tmp_path, monkeypatch, entry,
+):
+    from cassn.gui import soundhub_thread
+    from cassn.soundhub import export
+    from cassn.soundhub.lifecycle import plan_completed_batch_cleanup
+    from cassn.soundhub.submission import plan_soundhub_submission
+
+    staging = tmp_path / "staging"
+
+    def fail_refresh(root):
+        raise OSError("full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(export, "refresh_project_csvs", fail_refresh)
+        with pytest.raises(SoundHubStagingError):
+            stage_deployment(deployment, read_bd_audio_rows(deployment), staging)
+    assert (work_root(staging) / "pending.json").exists()
+    if entry == "stage":
+        monkeypatch.setattr(soundhub_thread, "plan_completed_batch_cleanup", lambda *args: SimpleNamespace(
+            closed=False, errors=[], provenance=object(),
+        ))
+        worker = soundhub_thread.SoundHubStageThread(deployment, staging, None)
+        worker._check_existing_batch()
+    elif entry == "upload":
+        box_year = tmp_path / "empty_box"
+        box_year.mkdir()
+        plan_soundhub_submission(staging, settings={"staging_root": str(staging)}, box_year_root=box_year)
+    else:
+        plan_completed_batch_cleanup(staging, force=True)
+    assert not (work_root(staging) / "pending.json").exists()
+    validate_staging_manifests(staging)
+
+
+@needs_flac
+@pytest.mark.parametrize("hard_links", [True, False])
+def test_restaging_an_existing_recorder_with_more_files(deployment, tmp_path, monkeypatch, hard_links):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    stage_deployment(deployment, rows, staging)
+    if not hard_links:
+        def unsupported_link(source, destination):
+            raise OSError("hard links are not supported")
+
+        monkeypatch.setattr(module.os, "link", unsupported_link)
+    extra = audio_row(rows[0]["deployment_id"], "00003")
+    make_wav(deployment / "raw_data" / "p1_BD" / extra["filename"])
+    result = stage_deployment(deployment, [*rows, extra], staging)
+    assert result["converted"] == 1
+    assert result["skipped"] == 3
+    assert not list(work_root(staging).glob("*.previous"))
+    validate_staging_manifests(staging)
+
+
+def test_disk_estimate_includes_remaining_outputs_and_temporary_files(deployment, tmp_path, monkeypatch):
+    from cassn.soundhub import staging as module
+
+    rows = read_bd_audio_rows(deployment)
+    sizes = [_index_source_wavs(deployment)[row["filename"]].stat().st_size for row in rows]
+    required = sum(sizes) + 2 * max(sizes)
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda path: SimpleNamespace(free=required - 1))
+    with pytest.raises(SoundHubStagingError, match="including temporary files"):
+        stage_deployment(deployment, rows, tmp_path / "staging")
+    assert not list(work_root(tmp_path / "staging").glob("*/*.flac"))
 
 
 @needs_flac
