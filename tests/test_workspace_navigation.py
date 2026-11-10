@@ -55,6 +55,7 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
 
     _app, window = workspace_window
     window.current_deployment_folder = tmp_path / "event"
+    (tmp_path / "soundhub").mkdir()
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
     monkeypatch.setattr(wizard, "flac_available", lambda: True)
     monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
@@ -461,6 +462,7 @@ def test_soundhub_completed_and_failed_restore(workspace_window, tmp_path, monke
     window.current_deployment_folder = event
     window.metadata["site_short_name"] = "example"
     window.save_session()
+    (tmp_path / "staging").mkdir()
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "staging")
     from cassn.soundhub.export import EventStagingSummary
     monkeypatch.setattr(wizard, "event_staging_summary", lambda *_: EventStagingSummary(1, 1, True))

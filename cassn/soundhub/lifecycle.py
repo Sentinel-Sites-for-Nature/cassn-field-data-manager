@@ -11,6 +11,7 @@ touches Box, S3, or source WAVs.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,25 @@ def is_verified_submission_report(text: str) -> bool:
         line.strip() in (VERIFIED_REPORT_MARKER, RECOVERED_REPORT_MARKER)
         for line in text.splitlines()
     )
+
+
+def transfer_records_cover(staging_root, recording_paths, destination: str) -> bool:
+    """Fast local check that verified transfer records list every staged recording; Box stays the authority."""
+    paths = set(recording_paths)
+    if not paths:
+        return False
+    verified: set[str] = set()
+    for journal in (Path(staging_root).parent / "transfers").glob("*/transfer.json"):
+        try:
+            record = json.loads(journal.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(record, dict) or record.get("destination") != destination
+                or (record.get("verification") or {}).get("ok") is not True):
+            continue
+        verified.update(item.get("relative") for item in (record.get("planned") or {}).get("objects", [])
+                        if isinstance(item, dict))
+    return paths <= verified
 
 
 class SoundHubLifecycleError(Exception):
@@ -147,7 +167,8 @@ def _local_files(
             if path.is_symlink():
                 errors.append(f"refusing to clear staging containing a symlink: {path}")
                 continue
-            if path.is_file():
+            hidden = any(part.startswith(".") for part in path.relative_to(root).parts)
+            if path.is_file() and not hidden:
                 stat = path.stat()
                 relative = path.relative_to(root).as_posix()
                 signature.append((f"{label}/{relative}", stat.st_size, stat.st_mtime_ns))

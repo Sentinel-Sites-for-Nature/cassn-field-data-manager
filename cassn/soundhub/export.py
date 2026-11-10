@@ -433,7 +433,8 @@ def refresh_project_csvs(staging_root) -> dict:
     deployment_rows: list[dict] = []
     recording_rows: list[dict] = []
 
-    for fragment_dir in sorted(p for p in fragments.glob("*") if p.is_dir()):
+    for fragment_dir in sorted(p for p in fragments.glob("*")
+                               if p.is_dir() and not p.name.startswith(".")):
         deployment_rows.extend(
             _require_header(fragment_dir / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS)
         )
@@ -496,7 +497,8 @@ def validate_staging_manifests(staging_root) -> dict:
     """Prove cumulative manifests are complete and exactly match fragments."""
     staging_root = Path(staging_root).expanduser().resolve()
     fragments = fragments_root(staging_root)
-    fragment_dirs = sorted(path for path in fragments.glob("*") if path.is_dir())
+    fragment_dirs = sorted(path for path in fragments.glob("*")
+                           if path.is_dir() and not path.name.startswith("."))
     if not fragment_dirs:
         raise SoundHubStagingError(f"No SoundHub deployment fragments found in {fragments}")
 
@@ -629,10 +631,11 @@ def validate_staging_manifests(staging_root) -> dict:
                 f"{root / RECORDING_CSV} row {number}: staged FLAC is missing: {media}"
             )
 
+    # Hidden names include the ._ files macOS writes on ExFAT drives.
     actual_media = {
         (path.parent.name, path.name)
         for path in root.glob("*/*.flac")
-        if path.is_file()
+        if path.is_file() and not path.name.startswith(".")
     }
     if actual_media != recording_keys:
         extra = sorted(actual_media - recording_keys)

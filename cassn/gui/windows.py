@@ -479,6 +479,30 @@ class DeploymentWindow(FieldDataWizard):
             self._soundhub_pending = False
             self._release_idle_cloud()
 
+    def _save_soundhub_staging_root(self, root):
+        """Hold the settings lock and the current batch lock, so no other window is using the batch."""
+        try:
+            lease = ResourceLease(self.manager.lock_directory, ["gui-settings", self._soundhub_batch_key()])
+        except ResourceBusy:
+            QMessageBox.information(
+                self, "SoundHub Batch in Use",
+                "Another window is staging or submitting the SoundHub batch. "
+                "Wait for it to finish, then change the location.",
+            )
+            return False
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot Reserve SoundHub Staging", str(exc))
+            return False
+        try:
+            saved = super()._save_soundhub_staging_root(root)
+        finally:
+            lease.release()
+        if saved:
+            for window in self.manager.windows:
+                if window is not self:
+                    window._refresh_soundhub_resume()
+        return saved
+
     def save_config(self):
         """Merge roots from other windows and atomically retain credentials/settings."""
         try:
