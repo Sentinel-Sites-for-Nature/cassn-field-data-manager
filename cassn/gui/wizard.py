@@ -268,6 +268,7 @@ class FieldDataWizard(QMainWindow):
         self._box_present_paths = None
         self._box_count_error = ""
         self._box_event_progress = None
+        self._staging_recording = (0, 0)
         self._soundhub_event_progress = None
         self._box_operation_active = False
         self.provenance_thread = None
@@ -1421,6 +1422,9 @@ class FieldDataWizard(QMainWindow):
         if self.wi_upload_helper:
             from cassn.gui.wi_upload import WildlifeInsightsControl
             self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
+
+        # Keep unused viewport height below the last platform panel.
+        layout.addStretch()
 
         self.file_menu = self.menuBar().addMenu("File")
         self.menuBar().insertMenu(self.menuBar().actions()[0], self.file_menu)
@@ -3466,6 +3470,10 @@ class FieldDataWizard(QMainWindow):
 
     def _show_saved_box_result(self, verified):
         self.box_upload_complete = verified
+        if verified:
+            self.upload_group.show_progress(1, 1, "Event files verified against Box", complete=True)
+        else:
+            self.upload_group.hide_progress()
         self.upload_group.show()
         self.upload_metrics_label.clear()
         self.upload_metrics_label.setToolTip("")
@@ -3559,6 +3567,7 @@ class FieldDataWizard(QMainWindow):
         FieldDataWizard._show_box_count_summary(self)
         complete = verified and current == total
         if not complete:
+            self.upload_group.hide_progress()
             self.upload_metrics_label.clear()
         self.box_upload_complete = complete
         self.box_panel_button.setEnabled(not complete and self.upload_now_btn.isEnabled() and bool(self.file_inventory))
@@ -3643,6 +3652,7 @@ class FieldDataWizard(QMainWindow):
         except Exception as exc:
             FieldDataWizard._set_box_controls_busy(self, False)
             self.cancel_upload_btn.hide()
+            self.upload_group.hide_progress()
             if isinstance(exc, OSError):
                 target = self.upload_status_label if self.hash_group.isHidden() else self.hash_status_label
                 target.setText(f"Verification could not start: {exc}")
@@ -3748,6 +3758,7 @@ class FieldDataWizard(QMainWindow):
         self.upload_metrics_label.clear()
         self.upload_metrics_label.setToolTip("")
         self.upload_group.show()
+        self.upload_group.show_progress(0, 0, "Preparing files for Box")
         self.upload_progress_bar.hide()
         self.upload_progress_bar.setValue(0)
         set_platform_status(self.upload_status_label, "")
@@ -3794,6 +3805,7 @@ class FieldDataWizard(QMainWindow):
             )
             return
 
+        self.upload_group.show_progress(current, total, "Preparing files for Box")
         percent = int((current / total) * 100)
         if path:
             self.upload_status_label.setText(
@@ -3839,6 +3851,7 @@ class FieldDataWizard(QMainWindow):
         self.new_btn.setEnabled(True)
         self.exit_btn.setEnabled(True)
         self.cancel_upload_btn.hide()
+        self.upload_group.hide_progress()
         self._box_operation_active = False
         self._update_copy_action()
         self.box_verify_btn.setEnabled(self.box_authenticated)
@@ -3862,6 +3875,7 @@ class FieldDataWizard(QMainWindow):
                 self._box_event_progress = EventProgress.box(self.current_deployment_folder, self.file_inventory)
         except (OSError, ValueError, KeyError, TypeError):
             self._box_event_progress = None
+        self.upload_group.show_progress(0, 0, "Uploading event files to Box")
         self.upload_progress_bar.show()
         self.box_history_label.hide()
         if self._box_event_progress:
@@ -3933,6 +3947,7 @@ class FieldDataWizard(QMainWindow):
             event_bar(self.upload_progress_bar, current, total, "files checked this transfer")
         else:
             return
+        self.upload_group.show_progress(self.upload_progress_bar.value(), self.upload_progress_bar.maximum(), "Uploading event files to Box")
         FieldDataWizard._show_box_count_summary(self)
 
     def _show_box_count_summary(self):
@@ -3984,6 +3999,10 @@ class FieldDataWizard(QMainWindow):
         """Handle upload completion"""
         if not self._box_callback_is_current('upload_thread'):
             return
+        if success:
+            self.upload_group.show_progress(0, 0, "Publishing and checking Box metadata")
+        else:
+            self.upload_group.hide_progress()
         # A successful upload still owns this deployment through provenance
         # and verification. Do not let their callbacks follow a new session.
         self.cancel_upload_btn.hide()
@@ -4084,6 +4103,7 @@ class FieldDataWizard(QMainWindow):
     def _start_post_upload_verification(self):
         """Run Box file-list verification, then Box/local hash verification."""
         if not self.current_deployment_folder or not self.file_inventory:
+            self.upload_group.hide_progress()
             self.open_btn.setEnabled(True)
             self.switch_deployment_btn.setEnabled(True)
             self.exit_btn.setEnabled(True)
@@ -4176,6 +4196,7 @@ class FieldDataWizard(QMainWindow):
                 self.log(f"  Hash verify: {filename}")
             return
 
+        self.upload_group.show_progress(checked, total, "Verifying Box file hashes")
         hash_percent = int((checked / total) * 90)
         percent = min(100, 10 + hash_percent)
         self.upload_progress_bar.setValue(percent)
@@ -4275,6 +4296,7 @@ class FieldDataWizard(QMainWindow):
             return
         all_ok, hash_ok, summary, issues = self._receipt_result
         if not saved:
+            self.upload_group.hide_progress()
             FieldDataWizard._set_box_controls_busy(self, False)
             self._show_saved_box_result(False)
             self.upload_status_label.setText("Box could not save the verification receipt. Select Upload to Box to retry.")
@@ -4285,6 +4307,7 @@ class FieldDataWizard(QMainWindow):
         FieldDataWizard._display_post_upload_result(self, all_ok, hash_ok, summary, issues)
 
     def _display_post_upload_result(self, all_ok, hash_ok, hash_summary, hash_issues):
+        self.upload_group.hide_progress()
         box_missing = [i for i in self._post_upload_box_issues if i["type"] == "missing_from_box"]
         has_box_warning = any(i["type"] == "extra_on_box" for i in self._post_upload_box_issues)
         self.box_upload_complete = all_ok
@@ -4757,9 +4780,10 @@ class FieldDataWizard(QMainWindow):
                 return True
         return False
 
-    def _refresh_soundhub_resume(self):
-        if not hasattr(self, "soundhub_stage_btn") or self._soundhub_busy():
+    def _refresh_soundhub_resume(self, *, staging_finished=False):
+        if not hasattr(self, "soundhub_stage_btn") or (not staging_finished and self._soundhub_busy()):
             return
+        self.soundhub_group.hide_progress()
         set_platform_status(self.soundhub_status_label)
         self.soundhub_stage_btn.setEnabled(True)
         self.open_soundhub_btn.setEnabled(True)
@@ -4830,6 +4854,7 @@ class FieldDataWizard(QMainWindow):
         uploaded = (result.get("operation") == "upload" and result.get("state") == "complete"
                     and result.get("generation") == generation)
         if staged or uploaded:
+            self.soundhub_group.show_progress(1, 1, "Bird recording staging complete", complete=True)
             self.soundhub_stage_btn.setEnabled(False)
             set_platform_status(self.soundhub_status_label, "complete")
             self.soundhub_status_label.setText(result["message"] if uploaded else "Staged and validated. Ready for upload."
@@ -4969,7 +4994,7 @@ class FieldDataWizard(QMainWindow):
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
             action.setEnabled(enabled and not self._box_operation_active)
 
-    def stage_for_soundhub(self):
+    def stage_for_soundhub(self, *, queue_selection=None):
         """Add or refresh this event in the cumulative local SoundHub batch."""
         if not self.current_deployment_folder:
             QMessageBox.information(self, "No Data", "No deployment data to prepare.")
@@ -5007,8 +5032,10 @@ class FieldDataWizard(QMainWindow):
             retry_failed = (self._soundhub_result.get("folder") == str(self.current_deployment_folder)
                             and self._soundhub_result.get("operation") == "staging"
                             and self._soundhub_result.get("state") in {"failed", "interrupted", "cancelled"})
-            summary = event_staging_summary(self.current_deployment_folder, staging_root) if counts is None else None
-            if not retry_failed and summary is not None and summary.complete:
+            summary = event_staging_summary(self.current_deployment_folder, staging_root)
+            deployment_counts = Counter(row["deployment_id"] for row in read_bd_audio_rows(self.current_deployment_folder))
+            staged_counts = Counter(path.split("/", 1)[0] for path in summary.matched_paths)
+            if not retry_failed and counts is None and summary.complete:
                 self._show_bird_audio_staged()
                 return
         except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError) as exc:
@@ -5017,11 +5044,19 @@ class FieldDataWizard(QMainWindow):
         resuming = retry_failed or counts is not None or bool(summary and summary.staged)
         confirm = SoundHubStageDialog(
             self, self.current_deployment_folder.name, existing_deployments, existing_recordings, counts,
+            deployment_counts=deployment_counts, staged_counts=staged_counts, queueing=queue_selection is not None,
             event_folder=self.current_deployment_folder, staging_root=staging_root, resuming=resuming,
         )
-        if confirm.exec() != QDialog.Accepted:
+        if confirm.exec() != QDialog.Accepted or not confirm.selected_deployments():
             return
 
+        selected = confirm.selected_deployments()
+        if queue_selection is not None:
+            queue_selection(staging_root, selected)
+        else:
+            self._start_soundhub_stage(staging_root, selected)
+
+    def _start_soundhub_stage(self, staging_root, selected):
         try:
             self._soundhub_event_progress = EventProgress.soundhub(self.current_deployment_folder, staging_root)
         except (OSError, ValueError, KeyError, csv.Error, SoundHubStagingError):
@@ -5036,10 +5071,12 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group.disclosure.setChecked(True)
         self._set_soundhub_actions_enabled(False)
 
+        self.soundhub_group.show_progress(0, 0, "Preparing bird recordings")
         self.soundhub_stage_thread = SoundHubStageThread(
-            self.current_deployment_folder, staging_root, self.lookups
+            self.current_deployment_folder, staging_root, self.lookups,
+            selected_deployments=selected,
         )
-        self.soundhub_stage_thread.progress.connect(self.on_soundhub_progress)
+        self.soundhub_stage_thread.progress.connect(self._on_staging_progress)
         self.soundhub_stage_thread.recording_prepared.connect(self._soundhub_recording_prepared)
         self.soundhub_stage_thread.completed.connect(self.on_soundhub_stage_complete)
         self.soundhub_stage_thread.start()
@@ -5198,7 +5235,15 @@ class FieldDataWizard(QMainWindow):
             event_bar(bar, len(files - progress.remaining), len(files), "recording" if len(files) == 1 else "recordings")
         self.soundhub_recorders.fit_rows()
 
+    def _on_staging_progress(self, current, total, name):
+        self._staging_recording = (current, total)
+        self.soundhub_group.show_progress(max(0, current - 1), total, "Preparing selected bird recordings")
+        self.on_soundhub_progress(current, total, name)
+
     def _soundhub_recording_prepared(self, deployment, filename):
+        current, total = self._staging_recording
+        if total:
+            self.soundhub_group.show_progress(current, total, "Preparing selected bird recordings")
         progress = self._soundhub_event_progress
         if progress:
             key = (Path(deployment) / Path(filename).with_suffix(".flac")).as_posix()
@@ -5215,6 +5260,7 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_status_label.setText(f"Preparing {name}" if total and self._soundhub_event_progress else name)
 
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
+        self.soundhub_group.hide_progress()
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
         self._show_soundhub_location()
@@ -5238,11 +5284,7 @@ class FieldDataWizard(QMainWindow):
         self.log(operation_message(message, success, warning=cancelled))
 
         if success:
-            self._show_bird_audio_staged()
-            self.soundhub_status_label.setText("Staged and validated. Ready for upload.")
-            set_platform_status(self.soundhub_status_label, "complete")
-            self.soundhub_history_label.setText(detail or message)
-            self.soundhub_history_label.show()
+            self._refresh_soundhub_resume(staging_finished=True)
             return
 
         message += "\nChoose Stage Bird Audio to retry."

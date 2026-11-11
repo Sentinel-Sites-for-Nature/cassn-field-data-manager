@@ -491,6 +491,13 @@ def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
         media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
+    sidecar = media.with_name("._" + media.name)
+    sidecar.write_bytes(bytes.fromhex("00051607 00020000") + bytes(24))
+    assert validate_staging_manifests(staging)["recording_count"] == 3
+    sidecar.write_bytes(b"fLaC")
+    with pytest.raises(SoundHubStagingError, match="1 unlisted FLAC"):
+        validate_staging_manifests(staging)
+    sidecar.unlink()
     stale = project_root(staging) / rows[0]["deployment_id"] / "stale.flac"
     stale.write_bytes(b"stale")
 
@@ -602,6 +609,27 @@ def test_stage_splits_plots_into_separate_deployments(deployment, tmp_path):
     assert len(list((root / "UC_StrathearnRanch_plot1_BD_20260714").glob("*.flac"))) == 2
     assert len(list((root / "UC_StrathearnRanch_plot2_BD_20260713").glob("*.flac"))) == 1
     assert not (root / "UC_StrathearnRanch_plot1_BT_20260714").exists()
+
+
+@needs_flac
+def test_stage_one_recorder_then_the_other(deployment, tmp_path):
+    from cassn.soundhub.export import event_staging_summary
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    first, second = sorted({row["deployment_id"] for row in rows})
+    for ident in (first, second):
+        selected = [row for row in rows if row["deployment_id"] == ident]
+        result = stage_deployment(deployment, selected, staging, event_rows=rows)
+        assert result["deployment_ids"] == [ident]
+        summary = event_staging_summary(deployment, staging)
+        if ident == first:
+            assert not (project_root(staging) / second).exists()
+            assert summary.staged == len(selected)
+            assert not summary.complete
+        else:
+            assert summary.complete
+            assert summary.staged == len(rows)
 
 
 @needs_flac
