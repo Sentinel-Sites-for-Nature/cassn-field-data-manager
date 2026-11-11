@@ -3447,6 +3447,10 @@ class FieldDataWizard(QMainWindow):
 
     def _show_saved_box_result(self, verified):
         self.box_upload_complete = verified
+        if verified:
+            self.upload_group.show_progress(1, 1, "Event files verified against Box", complete=True)
+        else:
+            self.upload_group.hide_progress()
         self.upload_group.show()
         self.upload_metrics_label.clear()
         self.upload_metrics_label.setToolTip("")
@@ -3540,6 +3544,7 @@ class FieldDataWizard(QMainWindow):
         FieldDataWizard._show_box_count_summary(self)
         complete = verified and current == total
         if not complete:
+            self.upload_group.hide_progress()
             self.upload_metrics_label.clear()
         self.box_upload_complete = complete
         self.box_panel_button.setEnabled(not complete and self.upload_now_btn.isEnabled() and bool(self.file_inventory))
@@ -4755,6 +4760,7 @@ class FieldDataWizard(QMainWindow):
     def _refresh_soundhub_resume(self, *, staging_finished=False):
         if not hasattr(self, "soundhub_stage_btn") or (not staging_finished and self._soundhub_busy()):
             return
+        self.soundhub_group.hide_progress()
         set_platform_status(self.soundhub_status_label)
         self.soundhub_stage_btn.setEnabled(True)
         self.soundhub_stage_btn.setText("Prepare and stage bird audio for Wildlife Sound Hub")
@@ -4813,6 +4819,7 @@ class FieldDataWizard(QMainWindow):
         uploaded = (result.get("operation") == "upload" and result.get("state") == "complete"
                     and result.get("generation") == generation)
         if staged or uploaded:
+            self.soundhub_group.show_progress(1, 1, "Bird recording staging complete", complete=True)
             self.soundhub_stage_btn.setEnabled(False)
             set_platform_status(self.soundhub_status_label, "complete")
             self.soundhub_status_label.setText(result["message"] if uploaded else "Staged and validated. Ready for upload."

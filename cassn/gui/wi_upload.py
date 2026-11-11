@@ -220,6 +220,8 @@ class WildlifeInsightsControl(QObject):
         for name, photos in new.items():
             self._add_camera({"deployment": name, "images": photos}, {}, "staged", False, projects.get(name))
 
+        self.new_cameras.setVisible(bool(new or eligibility_error))
+        complete_selection = self.selection_complete()
         if phase_totals["uploading"]:
             self.group.show_progress(phase_done["uploading"], phase_totals["uploading"], "Uploading photos to Wildlife Insights")
         elif phase_totals["verifying"]:
@@ -227,6 +229,8 @@ class WildlifeInsightsControl(QObject):
                                      "Verifying photos in Wildlife Insights")
         elif states["cleaning"]:
             self.group.show_progress(0, 0, "Finishing Wildlife Insights checks")
+        elif complete_selection:
+            self.group.show_progress(1, 1, "Camera uploads verified in Wildlife Insights", complete=True)
         else:
             self.group.hide_progress()
         self.verified_summary.setVisible(bool(verified))
@@ -243,7 +247,6 @@ class WildlifeInsightsControl(QObject):
         idle = not (self.has_selection or self.notice.text())
         self.active_summary.setText("No camera images are ready to upload." if idle else " · ".join(summary))
         self.active_summary.setVisible(bool(summary) or idle)
-        self.new_cameras.setVisible(bool(new or eligibility_error))
         if eligibility_error:
             self.new_cameras.setText(f"Cannot check newly staged cameras. {eligibility_error}")
         if new:
@@ -253,7 +256,7 @@ class WildlifeInsightsControl(QObject):
             self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {total:,} {unit}")
         self.tree.setVisible(bool(self.tree.topLevelItemCount()))
         self.tree.fit_rows()
-        set_platform_status(self.verified_summary, "complete" if self.selection_complete() else "")
+        set_platform_status(self.verified_summary, "complete" if complete_selection else "")
         self._refresh_action()
         if any(not complete(j, sources) for j in self.jobs.values()):
             interval = ACTIVE_POLL_MS if states["uploading"] or states["verifying"] else QUEUE_POLL_MS
@@ -340,9 +343,7 @@ class WildlifeInsightsControl(QObject):
     def message(self, text, *, error=True):
         self.panel_error = error
         self.notice.setText(text)
-        self.notice.setVisible(bool(text))
-        set_platform_status(self.verified_summary, "complete" if self.selection_complete() else "")
-        self._refresh_action()
+        self.render()
         self.group.show()
 
     def selection_complete(self):

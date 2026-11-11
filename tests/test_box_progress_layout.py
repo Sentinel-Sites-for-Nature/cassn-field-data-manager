@@ -211,6 +211,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             app.processEvents()
         for panel, percentage in zip(active_panels, ("100%", "50%", "26%")):
             assert panel.activity.isVisible()
+            assert not panel.activity_check.isVisible()
             assert panel.activity_percent.text() == percentage
             assert panel.header.rect().contains(panel.activity.geometry())
             assert not panel.activity.geometry().intersects(panel._heading.geometry())
@@ -234,7 +235,6 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                        integrity={"kind": "integrity_verified_image_batch", "manifest_sha256": "c"*64,
                                   "receipt_sha256": "d"*64, "image_count": scope["images"]})
         control.render()
-        assert control.group.activity.isHidden()
         window._show_saved_box_result(True)
         monkeypatch.setattr("cassn.gui.wizard.staging_progress", lambda *_: None)
         from cassn.soundhub.export import EventStagingSummary
@@ -258,6 +258,9 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             for _ in range(3):
                 app.processEvents()
             assert panel.header.isVisible()
+            assert panel.activity_check.isVisible()
+            assert panel.activity_percent.text() == "100%"
+            assert panel.activity_bar.value() == 100
             assert not panel._body_area.isVisible()
             assert not panel._detail_area.isVisible()
             assert not panel.footer.isVisible()

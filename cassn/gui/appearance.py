@@ -89,6 +89,7 @@ QTreeWidget::item:selected {{ background: {tint}; color: {text}; }}
 QHeaderView::section {{ background: {background}; color: {muted}; border: none; border-bottom: 1px solid {line}; padding: 10px 5px; font-weight: normal; }}
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+QLabel#headerCheck {{ color: #176342; font-weight: bold; }}
 QLabel#headerPercent {{ color: #163f31; }}
 QProgressBar#headerProgress {{ background: #afc8b9; border-radius: 3px; min-height: 6px; max-height: 6px; }}
 QProgressBar#headerProgress::chunk {{ background: #176342; border-radius: 3px; }}
@@ -329,6 +330,11 @@ class PlatformPanel(QGroupBox):
         self.activity_bar.setFixedWidth(84)
         self.activity_percent = QLabel()
         self.activity_percent.setObjectName("headerPercent")
+        self.activity_check = QLabel("✓")
+        self.activity_check.setObjectName("headerCheck")
+        self.activity_check.setAccessibleName("Complete")
+        self.activity_check.hide()
+        meter.addWidget(self.activity_check)
         meter.addWidget(self.activity_bar)
         meter.addWidget(self.activity_percent)
         header.addWidget(self.activity, 0, 2)
@@ -359,8 +365,9 @@ class PlatformPanel(QGroupBox):
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
 
-    def show_progress(self, done, total, description):
+    def show_progress(self, done, total, description, *, complete=False):
         opening = self.activity.isHidden()
+        self.activity_check.setVisible(complete)
         self.activity_bar.setRange(0, 100 if total else 0)
         percent = min(100, max(0, 100 * done // total)) if total else 0
         self.activity_bar.setValue(percent)
@@ -428,7 +435,7 @@ class PlatformPanel(QGroupBox):
         controls = self.disclosure.sizeHint()
         beside = inner - 20 - slot - controls.width()
         self.activity_percent.setFixedWidth(self.activity_percent.fontMetrics().horizontalAdvance("100%") + 2)
-        beside -= self.activity_bar.width() + self.activity_percent.width() + 16
+        beside -= self.activity_bar.width() + self.activity_percent.width() + self.activity_check.sizeHint().width() + 22
         longest_word = max(metrics.horizontalAdvance(word) for title in _PANEL_TITLES.values() for word in title.split())
         stacked = beside < longest_word
         if stacked != self._stacked:
