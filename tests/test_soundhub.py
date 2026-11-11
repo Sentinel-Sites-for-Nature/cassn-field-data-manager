@@ -482,6 +482,13 @@ def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
         media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
+    sidecar = media.with_name("._" + media.name)
+    sidecar.write_bytes(bytes.fromhex("00051607 00020000") + bytes(24))
+    assert validate_staging_manifests(staging)["recording_count"] == 3
+    sidecar.write_bytes(b"fLaC")
+    with pytest.raises(SoundHubStagingError, match="1 unlisted FLAC"):
+        validate_staging_manifests(staging)
+    sidecar.unlink()
     stale = project_root(staging) / rows[0]["deployment_id"] / "stale.flac"
     stale.write_bytes(b"stale")
 

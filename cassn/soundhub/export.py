@@ -492,6 +492,14 @@ def _parse_time(value: str, *, path: Path, row_number: int, field: str) -> None:
     )
 
 
+def _recording_sidecar(path: Path, recording_keys: set[tuple[str, str]]) -> bool:
+    # macOS stores Finder metadata beside each recording on some removable disks.
+    if not path.name.startswith("._") or (path.parent.name, path.name[2:]) not in recording_keys:
+        return False
+    with path.open("rb") as stream:
+        return stream.read(8) == bytes.fromhex("00051607 00020000")  # AppleDouble v2
+
+
 def validate_staging_manifests(staging_root) -> dict:
     """Prove cumulative manifests are complete and exactly match fragments."""
     staging_root = Path(staging_root).expanduser().resolve()
@@ -632,7 +640,7 @@ def validate_staging_manifests(staging_root) -> dict:
     actual_media = {
         (path.parent.name, path.name)
         for path in root.glob("*/*.flac")
-        if path.is_file()
+        if path.is_file() and not _recording_sidecar(path, recording_keys)
     }
     if actual_media != recording_keys:
         extra = sorted(actual_media - recording_keys)
