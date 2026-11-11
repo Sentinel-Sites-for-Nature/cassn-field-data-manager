@@ -146,6 +146,56 @@ def workspace_label(text: str, role: str, *, wrap: bool = False) -> QLabel:
     return label
 
 
+class ElidedLabel(QLabel):
+    """One line that shortens long text in the middle; the tooltip keeps the full text."""
+
+    def __init__(self, role: str = ""):
+        super().__init__()
+        if role:
+            self.setProperty("role", role)
+        self.setTextFormat(Qt.PlainText)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._full = ""
+
+    def fullText(self) -> str:
+        return self._full
+
+    def setFullText(self, text: str):
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        shown = self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, max(0, self.width()))
+        if shown != self.text():
+            self.setText(shown)
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self._full), super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+
+class _PanelBody(QWidget):
+    """Ask for the text height at the current width, not at Qt's narrowest wrap width."""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self.width() > 0 and self.hasHeightForWidth():
+            hint.setHeight(self.heightForWidth(self.width()))
+        return hint
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self.updateGeometry()
+
+
 _PLATFORMS = {
     "box": ("Box", "box.webp"),
     "soundhub": ("Wildlife Sound Hub", "wildlife-soundhub.png"),
@@ -317,7 +367,7 @@ class PlatformPanel(QGroupBox):
         self.disclosure.setCheckable(True)
         header.addWidget(self.disclosure, 0, 2)
         layout.addWidget(self.header)
-        self._body_area = QWidget()
+        self._body_area = _PanelBody()
         body_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         body_policy.setHeightForWidth(True)
         self._body_area.setSizePolicy(body_policy)
