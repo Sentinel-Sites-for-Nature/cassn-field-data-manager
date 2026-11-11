@@ -423,6 +423,7 @@ def test_staging_keeps_batch_owned_until_completion_and_blocks_submission(manage
 def test_busy_batch_queues_selected_recorders_in_order(manager, tmp_path, monkeypatch):
     from cassn.gui import wizard
 
+    (tmp_path / "soundhub").mkdir()  # Staging refuses a missing folder.
     owner, second, third = [manager.new_window() for _ in range(3)]
     worker = MagicMock()
     worker.isRunning.return_value = False

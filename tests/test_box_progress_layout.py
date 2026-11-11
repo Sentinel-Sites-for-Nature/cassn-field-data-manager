@@ -155,6 +155,9 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             assert f"{count}.00 files/s" in window.upload_metrics_label.text()
             for label in (status, window.upload_metrics_label, window.hash_status_label):
                 assert label.height() >= label.heightForWidth(label.width())
+            for panel in panels:
+                # Extra height must not open gaps inside an expanded panel.
+                assert panel.height() <= panel.heightForWidth(panel.width()) + 1
             assert len({p.header.height() for p in panels}) == 1
             assert len({p.logo.x() for p in panels}) == 1
             assert len({p._heading.x() for p in panels}) == 1

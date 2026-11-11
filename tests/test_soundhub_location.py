@@ -209,7 +209,7 @@ def saved_root(config):
 
 
 def location_text(window):
-    return window.soundhub_location_label.text().replace("​", "")
+    return window.soundhub_location_label.fullText() + "\n" + window.soundhub_location_detail.fullText()
 
 
 def test_change_row_shows_path_and_cancelled_new_batch_warning_keeps_setting(panel, tmp_path):

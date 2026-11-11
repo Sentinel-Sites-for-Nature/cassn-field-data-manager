@@ -77,7 +77,7 @@ from cassn.gui.soundhub_stage_dialog import SoundHubStageDialog
 from cassn.gui.card_ingest_thread import CardIngestThread, IngestHashRegistry
 from cassn.gui.card_eject import CardDiskThread, card_attachment, identify_card, eject_card
 from cassn.gui.dialogs import WindowDialog as QDialog, WindowMessageBox as QMessageBox
-from cassn.gui.appearance import set_platform_status, style_cancel_button, PlatformPanel, platform_logo
+from cassn.gui.appearance import ElidedLabel, set_platform_status, style_cancel_button, PlatformPanel, platform_logo
 from cassn.gui.workspace import (
     CardJobsScroll, DeviceGridScroll, FieldWorkspace, device_heading,
     UploadMessage, PreparationMessage, UploadProgressBar, workspace_label,
@@ -1321,18 +1321,25 @@ class FieldDataWizard(QMainWindow):
         soundhub_layout = self.soundhub_group.body
 
         self.soundhub_location_row = QWidget()
+        self.soundhub_location_row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         location_layout = QHBoxLayout(self.soundhub_location_row)
-        location_layout.setContentsMargins(0, 0, 0, 0)
-        self.soundhub_location_label = workspace_label("", "contextTitle", wrap=True)
-        self.soundhub_location_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        location_layout.addWidget(self.soundhub_location_label, 1)
+        location_layout.setContentsMargins(0, 0, 0, 4)
+        location_layout.setSpacing(12)
+        location_text = QVBoxLayout()
+        location_text.setContentsMargins(0, 0, 0, 0)
+        location_text.setSpacing(2)
+        self.soundhub_location_label = ElidedLabel()
+        self.soundhub_location_detail = ElidedLabel("muted")
+        location_text.addWidget(self.soundhub_location_label)
+        location_text.addWidget(self.soundhub_location_detail)
+        location_layout.addLayout(location_text, 1)
         self.soundhub_location_btn = QPushButton("Change…")
         self.soundhub_location_btn.setToolTip(
             "Choose the folder that holds the SoundHub staging batch, for example on an "
             "external drive. All events use this folder. Staged data is not moved."
         )
         self.soundhub_location_btn.clicked.connect(self.change_soundhub_staging_root)
-        location_layout.addWidget(self.soundhub_location_btn, 0, Qt.AlignTop)
+        location_layout.addWidget(self.soundhub_location_btn, 0, Qt.AlignVCenter)
         self.soundhub_group.details.addWidget(self.soundhub_location_row)
 
         self.soundhub_recorders = ProgressTable("Deployment")
@@ -4883,10 +4890,8 @@ class FieldDataWizard(QMainWindow):
             detail = status.describe()
         except (OSError, ValueError, KeyError, csv.Error) as exc:
             status, detail = None, f"Could not check this location: {exc}"
-        # Zero-width spaces let a long path wrap at its slashes.
-        shown = str(root).replace("/", "/\u200b")
-        self.soundhub_location_label.setText(f"Staging location: {shown}\n{detail}")
-        self.soundhub_location_label.setToolTip(str(root))
+        self.soundhub_location_label.setFullText(f"Staging location: {root}")
+        self.soundhub_location_detail.setFullText(detail)
         return status
 
     def change_soundhub_staging_root(self):
