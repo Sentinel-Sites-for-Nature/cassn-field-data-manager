@@ -507,18 +507,19 @@ def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
 
 def test_staging_validation_ignores_macos_partner_files(deployment, tmp_path):
     # ExFAT drives get a hidden ._ file beside every file and folder.
+    apple_double = bytes.fromhex("00051607 00020000") + b"Mac OS X        "
     staging = tmp_path / "staging"
     rows = read_bd_audio_rows(deployment)
     write_deployment_fragments(staging, rows)
     for fragment in list(fragments_root(staging).iterdir()):
-        (fragment.parent / f"._{fragment.name}").write_bytes(b"\x00\x05\x16\x07")
+        (fragment.parent / f"._{fragment.name}").write_bytes(apple_double)
     refresh_project_csvs(staging)
     for recording in build_recording_rows(rows):
         media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
         media.parent.mkdir(parents=True, exist_ok=True)
         media.write_bytes(b"test flac")
-        (media.parent / f"._{media.name}").write_bytes(b"\x00\x05\x16\x07")
-        (media.parent.parent / f"._{media.parent.name}").write_bytes(b"\x00\x05\x16\x07")
+        (media.parent / f"._{media.name}").write_bytes(apple_double)
+        (media.parent.parent / f"._{media.parent.name}").write_bytes(apple_double)
 
     assert refresh_project_csvs(staging)["recording_count"] == 3
     assert validate_staging_manifests(staging) == {
