@@ -420,6 +420,47 @@ def test_staging_keeps_batch_owned_until_completion_and_blocks_submission(manage
     attempted.assert_called_once()
 
 
+def test_busy_batch_queues_selected_recorders_in_order(manager, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    owner, second, third = [manager.new_window() for _ in range(3)]
+    worker = MagicMock()
+    worker.isRunning.return_value = False
+    owner._run_staging_operation(lambda: setattr(owner, "soundhub_stage_thread", worker))
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+
+    def choose(dialog):
+        assert dialog.checks.keys() == {"p1", "p2"}
+        dialog.checks["p1"].setChecked(False)
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", choose)
+    start = MagicMock()
+    for index, window in enumerate((second, third)):
+        event = tmp_path / f"event{index}"
+        event.mkdir()
+        (event / "audio_file_metadata.csv").write_text(
+            "deployment_id,filename,device_type,file_type\np1,a.wav,BD,audio\np2,b.wav,BD,audio\n"
+        )
+        window.current_deployment_folder = event
+        monkeypatch.setattr(window, "_start_soundhub_stage", start)
+        window.stage_for_soundhub()
+        assert window._work_running()
+        assert manager.staging_queue[window].deployments == {"p2"}
+        window._try_queued_stage()
+    start.assert_not_called()
+    owner._staging_pending = False
+    owner._release_idle_cloud()
+    third._try_queued_stage()
+    start.assert_not_called()
+    second._try_queued_stage()
+    start.assert_called_once_with(tmp_path / "soundhub", {"p2"})
+    third.cancel_soundhub()
+    third._try_queued_stage()
+    assert not manager.staging_queue
+    assert start.call_count == 1
+
+
 def test_declined_or_failed_staging_does_not_release_box_ownership(manager):
     window = manager.new_window()
     window._run_cloud_operation(lambda: setattr(window, "_box_operation_active", True))
@@ -448,7 +489,8 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     worker.isRunning.return_value = False
     worker.start.side_effect = lambda: setattr(worker.isRunning, "return_value", True)
     monkeypatch.setattr(wizard_module, "flac_available", lambda: True)
-    monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args: worker)
+    monkeypatch.setattr(wizard_module, "read_bd_audio_rows", lambda *_: [{"deployment_id": "first"}])
+    monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args, **kwargs: worker)
     monkeypatch.setattr(wizard_module.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     title = window.soundhub_group.title()
     window.stage_for_soundhub()

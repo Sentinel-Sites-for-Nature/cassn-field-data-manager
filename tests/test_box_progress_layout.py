@@ -48,6 +48,36 @@ def test_platform_buttons_use_guarded_actions_and_box_connection_state(monkeypat
         app.processEvents()
 
 
+def test_completed_box_panel_fits_visible_results_and_buttons(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", "/synthetic/helper"))
+    monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: False)
+    monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda _: [])
+    window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
+    try:
+        window.tabs.setCurrentIndex(2)
+        window.resize(1400, 980)
+        window.upload_status_label.setText("All event files verified against Box.")
+        metrics = window.upload_metrics_label
+        metrics.setText("• Files checked: 25,115\n• Box file list: Passed\n• File hashes: Passed")
+        window.upload_progress_bar.show()
+        window.show()
+        app.processEvents()
+        panel = window.upload_group
+        for _ in range(2):
+            panel.disclosure.click()
+            for _ in range(3):
+                app.processEvents()
+            assert metrics.height() == metrics.heightForWidth(metrics.width())
+            assert panel.footer.height() == panel.footer.heightForWidth(panel.footer.width())
+            panel.disclosure.click()
+            app.processEvents()
+            assert panel.height() <= panel.header.height() + 4
+    finally:
+        window.close()
+        app.processEvents()
+
+
 @pytest.mark.parametrize("zoom", [80, 100, 130, 160, 200])
 def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeypatch, tmp_path, zoom):
     app = QApplication.instance() or QApplication([])
@@ -174,10 +204,16 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
         window.on_upload_progress(4, 4, path)
         rows[0]["confirmed"] = 2200
         control.render()
+        window._on_staging_progress(3, 6, "sample.wav")
+        window._soundhub_recording_prepared("recorder-3", "sample.wav")
         window._show_recorder_progress(EventProgress(6, set(), recorders))
         for _ in range(3):
             app.processEvents()
-        for panel in active_panels:
+        for panel, percentage in zip(active_panels, ("100%", "50%", "26%")):
+            assert panel.activity.isVisible()
+            assert panel.activity_percent.text() == percentage
+            assert panel.header.rect().contains(panel.activity.geometry())
+            assert not panel.activity.geometry().intersects(panel._heading.geometry())
             assert not panel._body_area.isVisible()
             assert not panel._detail_area.isVisible()
             assert not panel.footer.isVisible()
@@ -198,6 +234,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
                        integrity={"kind": "integrity_verified_image_batch", "manifest_sha256": "c"*64,
                                   "receipt_sha256": "d"*64, "image_count": scope["images"]})
         control.render()
+        assert control.group.activity.isHidden()
         window._show_saved_box_result(True)
         monkeypatch.setattr("cassn.gui.wizard.staging_progress", lambda *_: None)
         from cassn.soundhub.export import EventStagingSummary

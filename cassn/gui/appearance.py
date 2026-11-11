@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtCore import QEvent, QRect, QSize, Qt
 from PySide6.QtGui import QPalette, QPixmap, QRegion
-from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QLabel, QLayout, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QProgressBar, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 ARTWORK = Path(__file__).resolve().parents[2] / "assets" / "workspace"
 
@@ -89,6 +89,9 @@ QTreeWidget::item:selected {{ background: {tint}; color: {text}; }}
 QHeaderView::section {{ background: {background}; color: {muted}; border: none; border-bottom: 1px solid {line}; padding: 10px 5px; font-weight: normal; }}
 QProgressBar {{ background: {soft}; border: none; border-radius: 4px; min-height: 8px; max-height: 8px; color: transparent; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+QLabel#headerPercent {{ color: #163f31; }}
+QProgressBar#headerProgress {{ background: #afc8b9; border-radius: 3px; min-height: 6px; max-height: 6px; }}
+QProgressBar#headerProgress::chunk {{ background: #176342; border-radius: 3px; }}
 QProgressBar#boxUploadProgress, QProgressBar#eventProgress {{ min-height: {round(26 * zoom / 100)}px; max-height: 16777215px; color: {text}; text-align: center; }}
 QProgressBar#boxUploadProgress::chunk {{ background: {accent}; }}
 QScrollArea {{ border: none; background: transparent; }}
@@ -303,7 +306,8 @@ class PlatformPanel(QGroupBox):
         header.setColumnStretch(1, 1)
         self._stacked = False
         header.setContentsMargins(14, 4, 14, 4)
-        header.setSpacing(10)
+        header.setHorizontalSpacing(6)
+        header.setVerticalSpacing(10)
         self.logo = QLabel()
         self.logo.setProperty("role", "platformLogo")
         self.logo.setAccessibleName(f"{name} logo")
@@ -315,10 +319,24 @@ class PlatformPanel(QGroupBox):
         self.disclosure = QToolButton()
         self.disclosure.setObjectName("progressDisclosure")
         self.disclosure.setCheckable(True)
-        header.addWidget(self.disclosure, 0, 2)
+        self.activity = QWidget()
+        meter = QHBoxLayout(self.activity)
+        meter.setContentsMargins(0, 0, 0, 0)
+        meter.setSpacing(6)
+        self.activity_bar = QProgressBar()
+        self.activity_bar.setObjectName("headerProgress")
+        self.activity_bar.setTextVisible(False)
+        self.activity_bar.setFixedWidth(84)
+        self.activity_percent = QLabel()
+        self.activity_percent.setObjectName("headerPercent")
+        meter.addWidget(self.activity_bar)
+        meter.addWidget(self.activity_percent)
+        header.addWidget(self.activity, 0, 2)
+        self.activity.hide()
+        header.addWidget(self.disclosure, 0, 3)
         layout.addWidget(self.header)
         self._body_area = QWidget()
-        body_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        body_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         body_policy.setHeightForWidth(True)
         self._body_area.setSizePolicy(body_policy)
         self.body = QVBoxLayout(self._body_area)
@@ -340,6 +358,23 @@ class PlatformPanel(QGroupBox):
         self.disclosure.toggled.connect(self._set_expanded)
         self.setAccessibleName(f"{name} {self.title()}")
         self._heading.installEventFilter(self)
+
+    def show_progress(self, done, total, description):
+        opening = self.activity.isHidden()
+        self.activity_bar.setRange(0, 100 if total else 0)
+        percent = min(100, max(0, 100 * done // total)) if total else 0
+        self.activity_bar.setValue(percent)
+        self.activity_percent.setText(f"{percent}%" if total else "…")
+        self.activity_bar.setAccessibleName(description)
+        self.activity.setToolTip(description)
+        if opening:
+            self.activity.show()
+            self._size_header()
+
+    def hide_progress(self):
+        if not self.activity.isHidden():
+            self.activity.hide()
+            self._size_header()
 
     def add_action_button(self, label, action, *, primary=False, available=None):
         button = QPushButton(label)
@@ -392,6 +427,8 @@ class PlatformPanel(QGroupBox):
         inner = max(1, self.width() - 30)
         controls = self.disclosure.sizeHint()
         beside = inner - 20 - slot - controls.width()
+        self.activity_percent.setFixedWidth(self.activity_percent.fontMetrics().horizontalAdvance("100%") + 2)
+        beside -= self.activity_bar.width() + self.activity_percent.width() + 16
         longest_word = max(metrics.horizontalAdvance(word) for title in _PANEL_TITLES.values() for word in title.split())
         stacked = beside < longest_word
         if stacked != self._stacked:
@@ -399,7 +436,7 @@ class PlatformPanel(QGroupBox):
             grid = self.header.layout()
             grid.removeWidget(self._heading)
             if stacked:
-                grid.addWidget(self._heading, 1, 0, 1, 3)
+                grid.addWidget(self._heading, 1, 0, 1, 4)
             else:
                 grid.addWidget(self._heading, 0, 1)
         text_width = inner if stacked else beside
@@ -409,9 +446,21 @@ class PlatformPanel(QGroupBox):
         height = marks + 10 + tallest if stacked else max(marks, tallest)
         self.header.setFixedHeight(height + 10)
 
+    def _fit_content_height(self):
+        height = self.layout().totalHeightForWidth(self.width())
+        if height >= 0 and (self.minimumHeight() != height or self.maximumHeight() != height):
+            self.setFixedHeight(height)
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QEvent.LayoutRequest and self.isVisible():
+            self._fit_content_height()
+        return handled
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._size_header()
+        self._fit_content_height()
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -46,10 +46,11 @@ class SoundHubStageThread(QThread):
     recording_prepared = Signal(str, str)  # recorder deployment, source WAV name
     completed = Signal(bool, bool, str, dict)  # success, cancelled, message, result
 
-    def __init__(self, deployment_folder, staging_root, lookups):
+    def __init__(self, deployment_folder, staging_root, lookups, *, selected_deployments=None):
         super().__init__()
         self.deployment_folder = Path(deployment_folder)
         self.staging_root = Path(staging_root)
+        self.selected_deployments = selected_deployments
         self.lookups = lookups
         self._cancel_event = threading.Event()
 
@@ -124,6 +125,12 @@ class SoundHubStageThread(QThread):
                 )
                 return
 
+            event_rows = audio_rows
+            if self.selected_deployments is not None:
+                audio_rows = [row for row in event_rows if row["deployment_id"] in self.selected_deployments]
+                if not audio_rows or {row["deployment_id"] for row in audio_rows} != self.selected_deployments:
+                    raise SoundHubStagingError("The selected deployments have changed. Review the staging selection again.")
+
             # Fail before a potentially hours-long transcode if the recording
             # manifest cannot be completed from the source metadata.
             build_recording_rows(audio_rows)
@@ -137,6 +144,7 @@ class SoundHubStageThread(QThread):
                 self.deployment_folder,
                 audio_rows,
                 self.staging_root,
+                event_rows=event_rows,
                 progress=self.progress.emit,
                 recording_prepared=self.recording_prepared.emit,
                 is_cancelled=self._cancel_event.is_set,

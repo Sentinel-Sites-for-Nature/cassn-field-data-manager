@@ -178,6 +178,9 @@ class WildlifeInsightsControl(QObject):
         self.notice.setVisible(bool(self.notice.text()))
         verified = {}
         states = Counter()
+        phase_totals = Counter()
+        phase_done = Counter()
+        counts_known = True
         sources = replacement_sources(self.jobs)
         new, eligibility_error = self._new_selections()
         projects = _exported_projects(self.folder, display_only=True) if self.folder else {}
@@ -206,10 +209,26 @@ class WildlifeInsightsControl(QObject):
                         verified[name] = scope["images"]
                 if stage != "verified":
                     states[stage] += 1
+                if stage in {"uploading", "verifying"}:
+                    phase_totals[stage] += scope["images"]
+                    count = row.get("confirmed" if stage == "uploading" else "verified_count")
+                    if type(count) is int:
+                        phase_done[stage] += count
+                    elif stage == "verifying":
+                        counts_known = False
                 self._add_camera(scope, row, stage, key in self.unavailable, projects.get(name))
         for name, photos in new.items():
             self._add_camera({"deployment": name, "images": photos}, {}, "staged", False, projects.get(name))
 
+        if phase_totals["uploading"]:
+            self.group.show_progress(phase_done["uploading"], phase_totals["uploading"], "Uploading photos to Wildlife Insights")
+        elif phase_totals["verifying"]:
+            self.group.show_progress(phase_done["verifying"], phase_totals["verifying"] if counts_known else 0,
+                                     "Verifying photos in Wildlife Insights")
+        elif states["cleaning"]:
+            self.group.show_progress(0, 0, "Finishing Wildlife Insights checks")
+        else:
+            self.group.hide_progress()
         self.verified_summary.setVisible(bool(verified))
         cameras = "camera" if len(verified) == 1 else "cameras"
         self.verified_summary.setText(f"{len(verified)} {cameras} verified · {sum(verified.values()):,} photos")

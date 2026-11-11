@@ -541,6 +541,27 @@ def test_stage_splits_plots_into_separate_deployments(deployment, tmp_path):
 
 
 @needs_flac
+def test_stage_one_recorder_then_the_other(deployment, tmp_path):
+    from cassn.soundhub.export import event_staging_summary
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    first, second = sorted({row["deployment_id"] for row in rows})
+    for ident in (first, second):
+        selected = [row for row in rows if row["deployment_id"] == ident]
+        result = stage_deployment(deployment, selected, staging, event_rows=rows)
+        assert result["deployment_ids"] == [ident]
+        summary = event_staging_summary(deployment, staging)
+        if ident == first:
+            assert not (project_root(staging) / second).exists()
+            assert summary.staged == len(selected)
+            assert not summary.complete
+        else:
+            assert summary.complete
+            assert summary.staged == len(rows)
+
+
+@needs_flac
 def test_event_staged_status_follows_current_recordings(deployment, tmp_path):
     from cassn.soundhub.export import event_audio_is_staged, event_staging_summary
 

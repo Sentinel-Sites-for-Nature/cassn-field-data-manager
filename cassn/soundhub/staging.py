@@ -382,6 +382,7 @@ def stage_deployment(
     progress=None,
     is_cancelled=None,
     recording_prepared=None,
+    event_rows=None,
 ) -> dict:
     """Convert a deployment event's BD WAVs into the SoundHub staging tree.
 
@@ -517,7 +518,8 @@ def stage_deployment(
             if recording_prepared is not None:
                 recording_prepared(deployment_id, src.name)
 
-    write_deployment_copy(deployment_folder, audio_rows)
+    # The event export includes every recorder, even when staging a subset.
+    write_deployment_copy(deployment_folder, audio_rows if event_rows is None else event_rows)
     marker = work_root(staging_root) / "pending.json"
     temporary = marker.with_suffix(".tmp")
     with temporary.open("w", encoding="utf-8") as stream:

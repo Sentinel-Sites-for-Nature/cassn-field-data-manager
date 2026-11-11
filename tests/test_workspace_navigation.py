@@ -57,6 +57,7 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     window.current_deployment_folder = tmp_path / "event"
     monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "soundhub")
     monkeypatch.setattr(wizard, "flac_available", lambda: True)
+    monkeypatch.setattr(wizard, "read_bd_audio_rows", lambda folder: [{"deployment_id": "first"}])
     monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     worker = MagicMock()
     stage = MagicMock(return_value=worker)
@@ -66,10 +67,13 @@ def test_hosted_uc_staging_starts_only_local_worker(workspace_window, tmp_path, 
     notice = MagicMock()
     monkeypatch.setattr(wizard.QMessageBox, "information", notice)
     window.soundhub_stage_btn.trigger()
-    stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups)
+    stage.assert_called_once_with(window.current_deployment_folder, tmp_path / "soundhub", window.lookups,
+                                  selected_deployments={"first"})
     worker.start.assert_called_once()
     assert window.soundhub_group.disclosure.isChecked()
     assert not window.soundhub_stage_btn.isEnabled()
+    from cassn.soundhub.export import EventStagingSummary
+    monkeypatch.setattr(wizard, "event_staging_summary", lambda *_: EventStagingSummary(1, 1, True))
     window.on_soundhub_stage_complete(True, False, "Prepared local batch", {})
     assert not window.soundhub_stage_btn.isEnabled()
     assert window.soundhub_stage_btn.text() == "Bird Audio Already Staged"
@@ -370,6 +374,12 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
 
     _app, window = workspace_window
     window.current_deployment_folder = tmp_path / "event"
+    window.current_deployment_folder.mkdir()
+    (window.current_deployment_folder / "audio_file_metadata.csv").write_text(
+        "deployment_id,filename,device_type,file_type\nfirst,a.wav,BD,audio\nsecond,b.wav,BD,audio\n"
+    )
+    from cassn.soundhub.export import EventStagingSummary
+    monkeypatch.setattr(wizard, "event_staging_summary", lambda *_: EventStagingSummary(expected=2))
     staging = tmp_path / "soundhub"
     root = project_root(staging)
     root.mkdir(parents=True)
@@ -397,8 +407,19 @@ def test_soundhub_dialog_uses_local_counts_before_background_checks(workspace_wi
     check_box.assert_not_called()
     stage.assert_not_called()
 
-    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
+    def select_second(dialog):
+        assert dialog.selected_deployments() == {"first", "second"}
+        for check in dialog.checks.values():
+            check.setChecked(False)
+        action = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Stage bird audio")
+        assert not action.isEnabled()
+        dialog.checks["second"].setChecked(True)
+        assert action.isEnabled()
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", select_second)
     window.stage_for_soundhub()
+    assert stage.call_args.kwargs["selected_deployments"] == {"second"}
     worker.start.assert_called_once()
     assert window.soundhub_group.disclosure.isChecked()
     assert window.soundhub_status_label.text().startswith("Checking previously staged bird recordings before conversion…")

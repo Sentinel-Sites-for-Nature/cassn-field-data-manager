@@ -34,6 +34,7 @@ def test_box_upload_writes_summary_before_uploader_starts(tmp_path, monkeypatch)
         box_config={},
         _box_present_paths=None,
         _box_count_folder=None,
+        upload_group=MagicMock(),
         upload_progress_bar=MagicMock(),
         upload_status_label=MagicMock(),
         box_history_label=MagicMock(),

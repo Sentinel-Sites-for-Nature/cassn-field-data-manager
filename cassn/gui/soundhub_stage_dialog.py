@@ -2,7 +2,7 @@
 import csv
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QFrame, QHBoxLayout, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from cassn.gui.appearance import style_cancel_button, workspace_label, workspace_stylesheet
 from cassn.gui.dialogs import WindowDialog
@@ -43,7 +43,7 @@ class _ReadPreview(QRunnable):
 
 class SoundHubStageDialog(WindowDialog):
     def __init__(self, parent, event_name, deployments, recordings, progress, *,
-                 event_folder=None, staging_root=None, resuming=False):
+                 deployment_counts, staged_counts, event_folder=None, staging_root=None, resuming=False, queueing=False):
         super().__init__(parent)
         self.setWindowTitle("SoundHub staging")
         self.setObjectName("fieldWorkspace")
@@ -54,6 +54,8 @@ class SoundHubStageDialog(WindowDialog):
         layout.setSpacing(14)
         continuing = progress is not None or resuming
         heading = "Continue staging bird audio?" if continuing else "Stage bird audio?"
+        if queueing:
+            heading = "Queue bird audio for staging?"
         layout.addWidget(workspace_label(heading, "pageTitle", wrap=True))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -76,6 +78,19 @@ class SoundHubStageDialog(WindowDialog):
             done, total = progress
             facts.addWidget(workspace_label(f"{done:,} completed · {total - done:,} remaining", "contextTitle", wrap=True))
         content.addWidget(card)
+        if queueing:
+            content.addWidget(workspace_label("The shared batch is busy. Selected deployments will start automatically when it is your turn.", "muted", wrap=True))
+        content.addWidget(workspace_label("Choose deployments to stage", "contextTitle"))
+        self.checks = {}
+        for ident, count in sorted(deployment_counts.items()):
+            staged = staged_counts[ident]
+            unit = "recording" if count == 1 else "recordings"
+            check = QCheckBox(f"{ident}  ·  {count:,} {unit}")
+            if staged:
+                check.setText(f"{check.text()}  ·  {staged:,} already staged")
+            check.setChecked(staged < count)
+            self.checks[ident] = check
+            content.addWidget(check)
         batch = (f"Current batch: {deployments:,} deployment{'s' if deployments != 1 else ''}"
                  f" · {recordings:,} recording{'s' if recordings != 1 else ''}")
         content.addWidget(workspace_label(batch, "contextTitle", wrap=True))
@@ -90,15 +105,20 @@ class SoundHubStageDialog(WindowDialog):
         actions.addWidget(cancel)
         actions.addStretch()
         stage = QPushButton("Continue staging" if continuing else "Stage bird audio")
+        if queueing:
+            stage.setText("Queue bird audio")
         stage.setProperty("role", "primary")
+        for check in self.checks.values():
+            check.toggled.connect(lambda: stage.setEnabled(bool(self.selected_deployments())))
+        stage.setEnabled(bool(self.selected_deployments()))
         stage.setDefault(True)
         stage.clicked.connect(self.accept)
         actions.addWidget(stage)
         layout.addLayout(actions)
         screen = parent.screen() if parent else QApplication.primaryScreen()
         available = screen.availableGeometry()
-        self.resize(min(round(470 * zoom / 100), available.width() - 32),
-                    min(round(390 * zoom / 100), available.height() - 64))
+        self.resize(min(round(590 * zoom / 100), available.width() - 32),
+                    min(round(510 * zoom / 100), available.height() - 64))
         if event_folder is not None and staging_root is not None:
             reader = _ReadPreview(event_folder, staging_root)
             reader.signals.event.connect(self._show_event, Qt.QueuedConnection)
@@ -107,6 +127,9 @@ class SoundHubStageDialog(WindowDialog):
         else:
             self.event_facts.setText("Local event counts unavailable.")
             self.size_label.setText("Local batch size unavailable.")
+
+    def selected_deployments(self):
+        return {ident for ident, check in self.checks.items() if check.isChecked()}
 
     @Slot(str)
     def _show_event(self, text):
