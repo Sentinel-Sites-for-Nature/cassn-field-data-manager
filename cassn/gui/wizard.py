@@ -92,7 +92,13 @@ from cassn.soundhub.export import (
     read_bd_audio_rows,
     write_deployment_copy,
 )
-from cassn.soundhub.staging import SoundHubStagingError, flac_available, project_root, staging_progress
+from cassn.soundhub.location import (
+    CLOSED_BATCH, EMPTY, NOT_STAGING, OPEN_BATCH, UNAVAILABLE,
+    save_soundhub_staging_root, staging_internal_folder, staging_root_status,
+)
+from cassn.soundhub.staging import (
+    SoundHubStagingError, flac_available, project_root, require_staging_root, staging_progress,
+)
 from cassn.soundhub.submission import plan_soundhub_submission
 from cassn.soundhub.upload import (
     boto3_available,
@@ -115,6 +121,7 @@ from cassn.config import (
     IMAGE_FIELDS,
     LOCAL_DATA_DIR,
     ORGANIZATIONS,
+    SOUNDHUB_PROJECT_SHORT_NAME,
 )
 from cassn.core.audio_metadata import (
     parse_audiomoth_config_file,
@@ -1312,6 +1319,21 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_group = PlatformPanel("soundhub")
         soundhub_layout = self.soundhub_group.body
 
+        self.soundhub_location_row = QWidget()
+        location_layout = QHBoxLayout(self.soundhub_location_row)
+        location_layout.setContentsMargins(0, 0, 0, 0)
+        self.soundhub_location_label = workspace_label("", "contextTitle", wrap=True)
+        self.soundhub_location_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        location_layout.addWidget(self.soundhub_location_label, 1)
+        self.soundhub_location_btn = QPushButton("Change…")
+        self.soundhub_location_btn.setToolTip(
+            "Choose the folder that holds the SoundHub staging batch, for example on an "
+            "external drive. All events use this folder. Staged data is not moved."
+        )
+        self.soundhub_location_btn.clicked.connect(self.change_soundhub_staging_root)
+        location_layout.addWidget(self.soundhub_location_btn, 0, Qt.AlignTop)
+        self.soundhub_group.details.addWidget(self.soundhub_location_row)
+
         self.soundhub_recorders = ProgressTable("Deployment")
         self.soundhub_group.details.addWidget(self.soundhub_recorders)
         self.soundhub_recorders.hide()
@@ -1384,6 +1406,7 @@ class FieldDataWizard(QMainWindow):
             # The existing SoundHub staging configuration belongs to UC.
             for action in (self.soundhub_stage_btn, self.open_soundhub_btn):
                 action.setVisible(False)
+            self.soundhub_location_row.setVisible(False)
         self.box_panel_button = self.upload_group.add_action_button(
             "Upload to Box", self.upload_now_btn, primary=True,
             available=lambda: bool(self.file_inventory) and not self.box_upload_complete,
@@ -4726,7 +4749,7 @@ class FieldDataWizard(QMainWindow):
     # ------------------------------------------------------------------
 
     def _soundhub_staging_root(self) -> Path:
-        return Path(load_soundhub_config()["staging_root"])
+        return Path(load_soundhub_config(self.config_file)["staging_root"])
 
     def _soundhub_busy(self) -> bool:
         for thread in (self.soundhub_stage_thread, self.soundhub_upload_thread):
@@ -4739,9 +4762,21 @@ class FieldDataWizard(QMainWindow):
             return
         set_platform_status(self.soundhub_status_label)
         self.soundhub_stage_btn.setEnabled(True)
+        self.open_soundhub_btn.setEnabled(True)
         self.soundhub_stage_btn.setText("Prepare and stage bird audio for Wildlife Sound Hub")
         self.soundhub_history_label.hide()
         folder = self.current_deployment_folder
+        location = self._show_soundhub_location()
+        if location is not None and location.state == UNAVAILABLE:
+            set_platform_status(self.soundhub_status_label, "error")
+            self.soundhub_status_label.setText(
+                f"SoundHub staging location is not available: {location.path}. "
+                "Connect the drive or choose another location."
+            )
+            self.soundhub_stage_btn.setEnabled(False)
+            self.open_soundhub_btn.setEnabled(False)
+            self._show_recorder_progress(None)
+            return
         if not folder or self.box_config.profile == "csu":
             self.soundhub_group.setVisible(self.box_config.profile != "csu")
             self.soundhub_status_label.setText("No bird recordings are ready to stage.")
@@ -4813,6 +4848,102 @@ class FieldDataWizard(QMainWindow):
             self.soundhub_status_label.setText("No bird recordings are ready to stage.")
             self.soundhub_stage_btn.setEnabled(False)
 
+    def _show_soundhub_location(self):
+        """Show the saved staging location and its status; return the status when it was read."""
+        if self.box_config.profile == "csu":
+            return None
+        root = self._soundhub_staging_root()
+        try:
+            status = staging_root_status(root)
+            detail = status.describe()
+        except (OSError, ValueError, KeyError, csv.Error) as exc:
+            status, detail = None, f"Could not check this location: {exc}"
+        # Zero-width spaces let a long path wrap at its slashes.
+        shown = str(root).replace("/", "/\u200b")
+        self.soundhub_location_label.setText(f"Staging location: {shown}\n{detail}")
+        self.soundhub_location_label.setToolTip(str(root))
+        return status
+
+    def change_soundhub_staging_root(self):
+        """Choose the folder that holds the SoundHub batch for all events; staged data is not moved."""
+        if self._soundhub_busy():
+            return
+        current = self._soundhub_staging_root()
+        start = next((path for path in (current, *current.parents) if path.is_dir()), Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Choose SoundHub Staging Location", str(start))
+        if not chosen:
+            return
+        chosen = Path(os.path.abspath(chosen))
+        if chosen == Path(os.path.abspath(current)):
+            self._refresh_soundhub_resume()
+            return
+        title = "SoundHub Staging Location"
+        inside = staging_internal_folder(chosen)
+        if inside:
+            QMessageBox.warning(
+                self, title,
+                f"This folder is inside {inside}:\n{chosen}\n\n"
+                f"Select the folder that contains {SOUNDHUB_PROJECT_SHORT_NAME}, "
+                ".cassn_fragments and .cassn_work.",
+            )
+            return
+        try:
+            status = staging_root_status(chosen)
+        except (OSError, ValueError, KeyError, csv.Error) as exc:
+            QMessageBox.warning(self, title, f"Could not check this folder:\n{chosen}\n\n{exc}")
+            return
+        if status.state == UNAVAILABLE:
+            QMessageBox.warning(self, title, f"This folder is not available:\n{chosen}")
+            return
+        if status.state == NOT_STAGING:
+            QMessageBox.warning(
+                self, title,
+                f"This folder has other files and is not a SoundHub staging folder:\n{chosen}\n\n"
+                f"Select the folder that contains {SOUNDHUB_PROJECT_SHORT_NAME}, "
+                "or an empty folder for a new batch.",
+            )
+            return
+        if status.state == CLOSED_BATCH:
+            QMessageBox.warning(
+                self, title,
+                f"This folder holds a submitted SoundHub batch ({status.recordings:,} recordings):\n"
+                f"{chosen}\n\nNew deployments cannot be added to a submitted batch, so the "
+                "location was not changed. After SoundHub acceptance is confirmed, clear the "
+                "batch in Terminal with:\n\npython utils/prep_soundhub.py clear-completed",
+            )
+            return
+        if status.state == EMPTY:
+            text = (f"This folder has no SoundHub staging data:\n{chosen}\n\n"
+                    "Staging here starts a new SoundHub batch.")
+            try:
+                earlier = staging_root_status(current)
+            except (OSError, ValueError, KeyError, csv.Error):
+                earlier = None
+            if earlier is not None and earlier.state in (OPEN_BATCH, CLOSED_BATCH):
+                kind = ("staged data that is not submitted" if earlier.state == OPEN_BATCH
+                        else "a submitted batch")
+                text += (f"\n\nThe current location has {kind} ({earlier.recordings:,} recordings):\n"
+                         f"{current}\n\nEvery batch uploads deployment.csv and recording.csv to the "
+                         "same place in S3. If the new batch is uploaded before SoundHub ingests the "
+                         "earlier batch, the new CSVs can replace the earlier batch's CSVs.")
+            text += "\n\nStaged data is not moved. Use this folder?"
+            answer = QMessageBox.warning(self, title, text,
+                                         QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer != QMessageBox.Yes:
+                return
+        if not self._save_soundhub_staging_root(chosen):
+            return
+        self.log(f"SoundHub staging location changed to {chosen}")
+        self._refresh_soundhub_resume()
+
+    def _save_soundhub_staging_root(self, root) -> bool:
+        try:
+            save_soundhub_staging_root(root, self.config_file)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "SoundHub Staging Location Not Saved", str(exc))
+            return False
+        return True
+
     def _soundhub_generation(self):
         path = self.current_deployment_folder / "audio_file_metadata.csv"
         try:
@@ -4834,6 +4965,7 @@ class FieldDataWizard(QMainWindow):
 
     def _set_soundhub_actions_enabled(self, enabled: bool):
         self.soundhub_stage_btn.setEnabled(enabled)
+        self.soundhub_location_btn.setEnabled(enabled)
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
             action.setEnabled(enabled and not self._box_operation_active)
 
@@ -4853,6 +4985,12 @@ class FieldDataWizard(QMainWindow):
             return
 
         staging_root = self._soundhub_staging_root()
+        try:
+            require_staging_root(staging_root)
+        except SoundHubStagingError as exc:
+            QMessageBox.warning(self, "SoundHub Staging Location Not Available", str(exc))
+            self._refresh_soundhub_resume()
+            return
         root = project_root(staging_root)
 
         def row_count(name):
@@ -5079,6 +5217,7 @@ class FieldDataWizard(QMainWindow):
     def on_soundhub_stage_complete(self, success, cancelled, message, result):
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
+        self._show_soundhub_location()
         self._soundhub_event_progress = None
         self.soundhub_history_label.hide()
         detail = ""
@@ -5117,6 +5256,7 @@ class FieldDataWizard(QMainWindow):
         self._record_soundhub_result("upload", "complete" if success else "cancelled" if cancelled else "failed", message)
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
+        self._show_soundhub_location()
         self.log(operation_message(message, success, warning=cancelled))
 
         if success:
@@ -5134,7 +5274,12 @@ class FieldDataWizard(QMainWindow):
     def open_soundhub_folder(self):
         """Reveal the local tree that mirrors the SoundHub bucket."""
         root = self._soundhub_staging_root()
-        root.mkdir(parents=True, exist_ok=True)
+        try:
+            require_staging_root(root)
+        except SoundHubStagingError as exc:
+            QMessageBox.warning(self, "SoundHub Staging Location Not Available", str(exc))
+            self._refresh_soundhub_resume()
+            return
         if platform.system() == 'Darwin':
             subprocess.run(['open', str(root)])
         elif platform.system() == 'Windows':

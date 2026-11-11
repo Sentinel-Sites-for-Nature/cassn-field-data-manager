@@ -56,11 +56,12 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
     monkeypatch.setattr(FieldDataWizard, "find_all_sessions", lambda self: [])
     window = FieldDataWizard(lookups=LookupTables(), box_config=hosted_config("uc"))
     monkeypatch.setattr(window, "_box_callback_is_current", lambda _: True)
+    (tmp_path / "audio").mkdir()
+    monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "audio")
     try:
         window.tabs.setCurrentIndex(2)
         window.workspace.set_zoom(zoom)
         window.current_deployment_folder = tmp_path
-        monkeypatch.setattr(window, "_soundhub_staging_root", lambda: tmp_path / "audio")
         window.upload_group.show()
         window.upload_progress_bar.show()  # The transfer worker has started.
         window.cancel_upload_btn.show()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import struct
 import subprocess
@@ -41,7 +42,8 @@ from cassn.soundhub.staging import (
     work_root,
 )
 from cassn.box.verification import is_orphan_on_box
-from cassn.soundhub.upload import project_prefix, staged_objects, upload_project
+from cassn.soundhub.submission import plan_soundhub_submission
+from cassn.soundhub.upload import SoundHubUploadError, project_prefix, staged_objects, upload_project
 
 needs_flac = pytest.mark.skipif(not flac_available(), reason="requires the flac encoder")
 
@@ -106,6 +108,13 @@ def audio_row(deployment_id: str, seq: str, **overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+@pytest.fixture(autouse=True)
+def staging_folders(tmp_path):
+    # The app never creates a missing staging folder, so the tests provide it.
+    for name in ("staging", "s"):
+        (tmp_path / name).mkdir()
 
 
 @pytest.fixture
@@ -487,6 +496,61 @@ def test_staging_validation_rejects_unlisted_stale_flac(deployment, tmp_path):
 
     with pytest.raises(SoundHubStagingError, match="unlisted FLAC"):
         validate_staging_manifests(staging)
+
+
+def test_staging_validation_ignores_macos_partner_files(deployment, tmp_path):
+    # ExFAT drives get a hidden ._ file beside every file and folder.
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    write_deployment_fragments(staging, rows)
+    for fragment in list(fragments_root(staging).iterdir()):
+        (fragment.parent / f"._{fragment.name}").write_bytes(b"\x00\x05\x16\x07")
+    refresh_project_csvs(staging)
+    for recording in build_recording_rows(rows):
+        media = project_root(staging) / recording["deployment_id"] / Path(recording["path"]).name
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"test flac")
+        (media.parent / f"._{media.name}").write_bytes(b"\x00\x05\x16\x07")
+        (media.parent.parent / f"._{media.parent.name}").write_bytes(b"\x00\x05\x16\x07")
+
+    assert refresh_project_csvs(staging)["recording_count"] == 3
+    assert validate_staging_manifests(staging) == {
+        "deployment_count": 2,
+        "recording_count": 3,
+        "fragment_count": 2,
+    }
+
+
+def test_missing_staging_folder_is_not_available_and_never_created(deployment, tmp_path):
+    missing = tmp_path / "Volumes" / "Expansion" / "s3_upload_staging"
+    rows = read_bd_audio_rows(deployment)
+    settings = {
+        "bucket": "casoundhub",
+        "upload_prefix": "upload",
+        "project_short_name": SOUNDHUB_PROJECT_SHORT_NAME,
+    }
+    message = re.escape(f"SoundHub staging location is not available: {missing}. Connect the drive")
+
+    with pytest.raises(SoundHubStagingError, match=message):
+        stage_deployment(deployment, rows, missing)
+    with pytest.raises(SoundHubStagingError, match=message):
+        recover_staging(missing)
+    with pytest.raises(SoundHubUploadError, match=message):
+        staged_objects(missing, settings)
+    with pytest.raises(SoundHubStagingError, match=message):
+        plan_soundhub_submission(missing, settings=settings)
+    assert not (tmp_path / "Volumes").exists()
+
+
+@needs_flac
+def test_default_staging_folder_is_created_on_first_stage(deployment, tmp_path, monkeypatch):
+    from cassn.soundhub import staging as staging_module
+
+    default = tmp_path / "home" / "cassn" / "soundhub" / "s3_upload_staging"
+    monkeypatch.setattr(staging_module, "SOUNDHUB_STAGING_DEFAULT", default)
+    result = stage_deployment(deployment, read_bd_audio_rows(deployment), default)
+    assert result["validation"]["recording_count"] == 3
+    assert default.is_dir()
 
 
 def test_deployment_copy_lands_in_the_deployment_folder(deployment):

@@ -31,6 +31,7 @@ from cassn.config import (
     FLAC_COMPRESSION_LEVEL,
     SOUNDHUB_DEVICE_TYPE,
     SOUNDHUB_PROJECT_SHORT_NAME,
+    SOUNDHUB_STAGING_DEFAULT,
 )
 from cassn.core import hashing
 
@@ -62,6 +63,26 @@ def flac_executable() -> str | None:
 def flac_available() -> bool:
     """True when the encoder is on PATH or in a standard macOS Homebrew location."""
     return flac_executable() is not None
+
+
+def is_default_staging_root(staging_root) -> bool:
+    """True for the default laptop folder, the only staging folder the app may create."""
+    default = Path(SOUNDHUB_STAGING_DEFAULT).expanduser()
+    return os.path.abspath(Path(staging_root).expanduser()) == os.path.abspath(default)
+
+
+def require_staging_root(staging_root) -> Path:
+    """Raise when the staging folder is missing; only the default laptop folder is created."""
+    root = Path(staging_root).expanduser()
+    if root.is_dir():
+        return root
+    if not root.exists() and is_default_staging_root(root):
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+    raise SoundHubStagingError(
+        f"SoundHub staging location is not available: {root}. "
+        "Connect the drive or choose another location."
+    )
 
 
 def project_root(staging_root) -> Path:
@@ -118,6 +139,7 @@ def recover_staging(staging_root) -> dict | None:
         refresh_project_csvs, validate_staging_manifests, write_deployment_fragments,
     )
 
+    require_staging_root(staging_root)
     work = work_root(staging_root)
     marker = work / "pending.json"
     if not marker.exists():
@@ -136,7 +158,7 @@ def recover_staging(staging_root) -> dict | None:
             if Path(deployment_id).name != deployment_id:
                 raise ValueError("invalid deployment folder")
         root = project_root(staging_root)
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(exist_ok=True)
         for deployment_id, group in groups.items():
             source = work / deployment_id
             destination = root / deployment_id
@@ -429,7 +451,7 @@ def stage_deployment(
             if not any((base / deployment_ids[key] / name).is_file()
                        for base in (work_root(staging_root), project_root(staging_root))):
                 remaining_sizes.append(_source_wav(deployment_folder, row, wav_index).stat().st_size)
-    work_root(staging_root).mkdir(parents=True, exist_ok=True)
+    work_root(staging_root).mkdir(exist_ok=True)
     required = sum(remaining_sizes) + 2 * max(remaining_sizes, default=0)
     available = shutil.disk_usage(work_root(staging_root)).free
     if available < required:
@@ -448,7 +470,7 @@ def stage_deployment(
     for key, rows in groups.items():
         deployment_id = deployment_ids[key]
         out_dir = work_root(staging_root) / deployment_id
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(exist_ok=True)
 
         for row in rows:
             if is_cancelled is not None and is_cancelled():

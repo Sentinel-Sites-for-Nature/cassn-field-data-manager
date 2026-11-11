@@ -443,6 +443,7 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     import cassn.gui.wizard as wizard_module
     window = manager.new_window()
     window.current_deployment_folder = tmp_path / "deployment"
+    (tmp_path / "soundhub").mkdir()
     window._box_operation_active = True
     worker = MagicMock()
     worker.isRunning.return_value = False
