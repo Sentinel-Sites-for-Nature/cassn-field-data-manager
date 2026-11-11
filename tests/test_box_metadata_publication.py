@@ -417,6 +417,7 @@ def test_real_threads_keep_prior_batch_and_verify_complete_event(tmp_path, monke
     api.objects["event"]["parent"] = "reserve"
     old = row("old.wav", deployment="old", notes="retained", is_uploaded_to_box="True",
               box_uploader="Earlier", box_upload_datetime="2026-01-01")
+    old.update(file_type="audio", device_type="BD")
     api.add("audio_file_metadata.csv", payload([old]))
     api.add("deployment_event_record.json", json.dumps(event("old")).encode())
     storage = BoxStorage(api)
@@ -427,12 +428,12 @@ def test_real_threads_keep_prior_batch_and_verify_complete_event(tmp_path, monke
     raw_file = folder / "raw_data/new/new.wav"
     raw_file.parent.mkdir(parents=True)
     raw_file.write_bytes(b"recording")
-    newer = row("new.wav", deployment="new")
+    newer = row("new.wav", deployment="new", file_type="audio", device_type="BD")
     csv_path = folder / "audio_file_metadata.csv"
     csv_path.write_bytes(payload([newer]))
     (folder / "deployment_event_record.json").write_text(json.dumps(event("new")))
     metadata = event("new")["deployment_info"]
-    inventory = [{"new_filename": "new.wav", "device_label": "new", "file_size_bytes": len(b"recording"),
+    inventory = [{"new_filename": "new.wav", "device_label": "new", "file_type": "audio", "file_size_bytes": len(b"recording"),
                   "file_hash_sha1": newer["file_hash_sha1"], "file_hash_sha256": newer["file_hash_sha256"]}]
     config = NS(field_data_folder_id="root")
     monkeypatch.setattr(threads, "get_box_client", lambda config: api)

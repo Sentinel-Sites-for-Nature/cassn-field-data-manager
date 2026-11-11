@@ -44,6 +44,7 @@ from cassn.gui.appearance import set_platform_status, style_cancel_button, Platf
 from cassn.config import QC_SUBFOLDER
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
+    verified_row_update, camera_inventory,
     all_requests_verified, checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
     superseded, validate_scopes,
 )
@@ -81,6 +82,7 @@ class WildlifeInsightsControl(QObject):
         self.unavailable = set()
         self.process = None
         self.delivery_keys = set()
+        self.legacy_refreshed = set()
         self.menu_waiting = False
         self.closed = False
         self.panel_error = False
@@ -156,6 +158,7 @@ class WildlifeInsightsControl(QObject):
             self.panel_error = False
             self.notice.clear()
             self.delivery_keys.clear()
+            self.legacy_refreshed.clear()
             self.menu_waiting = False
             try:
                 self.jobs = read_requests(folder) if folder else {}
@@ -258,7 +261,7 @@ class WildlifeInsightsControl(QObject):
         self.tree.fit_rows()
         set_platform_status(self.verified_summary, "complete" if complete_selection else "")
         self._refresh_action()
-        if any(not complete(j, sources) for j in self.jobs.values()):
+        if any(not complete(j, sources) or self._legacy_refresh(key, j) for key, j in self.jobs.items()):
             interval = ACTIVE_POLL_MS if states["uploading"] or states["verifying"] else QUEUE_POLL_MS
             if self.timer.interval() != interval:
                 self.timer.setInterval(interval)
@@ -457,13 +460,8 @@ class WildlifeInsightsControl(QObject):
             item = self.window._device_item(label)
             if code in {"ML", "SA"} and item and item.text(2) == "Complete":
                 labels.add(label)
-        counts = Counter()
-        for row in self.window.file_inventory:
-            if row.get("file_type") == "image" and row.get("device_label") in labels:
-                name = row.get("deployment_id")
-                if not name:
-                    raise ValueError("A selected image has no deployment ID.")
-                counts[name] += 1
+        counts = {name: len(pairs) for name, pairs in
+                  camera_inventory(self.window.file_inventory, labels).items()}
         sources = replacement_sources(self.jobs)
         eligible = self.retryable()
         for job in self.jobs.values():
@@ -630,6 +628,8 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The uploader request identity changed.")
             if old.get("manifest_sha256") and old["manifest_sha256"] != row.get("manifest_sha256"):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
+            if old.get("stage") == "verified" and not verified_row_update(old, row):
+                raise ValueError("The saved verification receipt changed.")
             if old.get("manifest_sha256"):
                 row["confirmed"] = max(row["confirmed"], old["confirmed"])
             if row["stage"] == "verifying":
@@ -639,9 +639,6 @@ class WildlifeInsightsControl(QObject):
                     row["verified_count"] = min(totals[row["deployment"]], max(known))
                 else:
                     row.pop("verified_count", None)
-            if old.get("stage") == "verified" and (
-                    row["stage"] != "verified" or old.get("integrity") != row.get("integrity")):
-                raise ValueError("The saved verification receipt changed.")
         jobs = dict(self.jobs)
         jobs[key] = dict(job, rows=rows)
         redraw = jobs != self.jobs or key in self.unavailable or bool(self.notice.text())
@@ -658,12 +655,19 @@ class WildlifeInsightsControl(QObject):
         if redraw:
             self.render()
 
+    def _legacy_refresh(self, key, job):
+        return key not in self.legacy_refreshed and any(
+            row["stage"] == "verified" and isinstance(row.get("integrity"), dict)
+            and not row["integrity"].get("originals_sha256")
+            for row in job.get("rows", []))
+
     def poll(self):
         self.refresh()
-        if self.closed or self.process or self.read_error:
+        if self.closed or self.process or self.read_error or getattr(getattr(self.window, "cleanup_panel", None), "worker", None):
             return
         sources = replacement_sources(self.jobs)
-        self.poll_remaining = [key for key, job in self.jobs.items() if not complete(job, sources)]
+        self.poll_remaining = [key for key, job in self.jobs.items()
+                               if not complete(job, sources) or self._legacy_refresh(key, job)]
         self.poll_next()
 
     def poll_next(self):
@@ -673,6 +677,7 @@ class WildlifeInsightsControl(QObject):
             self.check_status(self.poll_remaining.pop(0))
 
     def check_status(self, key):
+        self.legacy_refreshed.add(key)
         def received(result):
             if result.get("missing") is True:
                 if self.jobs[key].get("rows"):

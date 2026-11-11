@@ -300,6 +300,8 @@ be brought forward through the Python icon in the Dock or Mission Control.
 - At ingest completion, oversized camera folders are already prepared in Wildlife Insights batches of at most 15,000 images
 - In **Upload and Stage Data**, use the platform panels to start Box upload, local SoundHub staging, or Wildlife Insights camera selection when configured.
 - Expand the Box panel for manual file-list and hash checks. Box runs both checks after upload.
+- Open **Clear local staging** and select **Check** to review the event, folder, size, and blocking files.
+- After the checks pass, use **Hold to clear** to remove that event from this computer.
 - Use **File** to open a saved event or start a new one.
 
 Later uploads to the same Box event preserve accumulated metadata from earlier
@@ -623,9 +625,12 @@ checked against Box's returned checksum and size. No raw Box media is enumerated
 or downloaded. `--box-year-root DIR` explicitly selects the legacy local Drive
 workflow for maintenance or tests; it is not needed for normal submissions.
 
-Every live transfer attempt also gets a dated local archive beside the staging
-root: `~/cassn/soundhub/transfers/<UTC timestamp>_<attempt ID>/` with the default
-configuration. It keeps exact copies of `deployment.csv` and `recording.csv`,
+Each live transfer attempt gets a dated archive in the profile's fixed Mac folder.
+UC and the original app use `~/cassn/soundhub/uc/transfers/`. CSU has its own folder.
+On the first UC migration, FDM compares `~/cassn/soundhub/transfers` with `/Volumes/Expansion/transfers`.
+FDM copies matching records from the Mac archive and reports any differences for review.
+The upload history and repeated-upload check use the fixed folder when the staging drive changes.
+Each attempt keeps exact copies of `deployment.csv` and `recording.csv`,
 the AWS CLI's `upload.log`, and an atomically updated `transfer.json` containing
 the planned objects, counts, manifest hashes, destination, phase, verification
 result, and any error. Successful runs also save `submission_report.md` there.

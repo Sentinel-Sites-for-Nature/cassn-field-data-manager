@@ -16,6 +16,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cassn.soundhub.receipt_location import receipt_journals
 from cassn.config import SOUNDHUB_PROJECT_SHORT_NAME
 from cassn.soundhub.provenance import ProvenancePlan, plan_submission_provenance
 from cassn.soundhub.staging import (
@@ -48,7 +49,7 @@ def transfer_records_cover(staging_root, recording_paths, destination: str) -> b
     if not paths:
         return False
     verified: set[str] = set()
-    for journal in (Path(staging_root).parent / "transfers").glob("*/transfer.json"):
+    for journal in receipt_journals(staging_root):
         try:
             record = json.loads(journal.read_text(encoding="utf-8"))
         except (OSError, ValueError):

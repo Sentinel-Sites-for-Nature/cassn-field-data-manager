@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from cassn.soundhub.receipt_location import receipt_root
 from cassn.soundhub.staging import project_root
 
 
@@ -38,7 +39,7 @@ class TransferArchive:
 
     @classmethod
     def begin(cls, plan, submitter: str) -> "TransferArchive":
-        root = plan.staging_root.parent / "transfers"
+        root = receipt_root()
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%SZ")
         directory = root / f"{stamp}_{uuid4().hex[:8]}"
         directory.mkdir(parents=True, exist_ok=False)

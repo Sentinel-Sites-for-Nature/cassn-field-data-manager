@@ -71,6 +71,9 @@ def checked_status(scopes, rows):
                 raise ValueError("Missing admitted Wildlife Insights manifest.")
         if row["stage"] == "verified":
             proof = row.get("integrity")
+            if isinstance(proof, dict) and "originals_sha256" in proof and not re.fullmatch(
+                    r"[a-f0-9]{64}", str(proof["originals_sha256"])):
+                raise ValueError("Invalid Wildlife Insights originals hash.")
             if (not isinstance(proof, dict) or proof.get("kind") != "integrity_verified_image_batch"
                     or proof.get("manifest_sha256") != manifest
                     or type(proof.get("image_count")) is not int or proof["image_count"] != scope["images"]
@@ -156,3 +159,63 @@ def require_wi_complete(folder):
             raise ValueError("Retain staged originals until Wildlife Insights verification finishes.")
     except OSError as exc:
         raise ValueError("Cannot check the saved Wildlife Insights requests.") from exc
+
+def verified_row_update(old, new):
+    """An older verified row may acquire only its missing originals digest."""
+    if old == new:
+        return True
+    proof = dict(new.get("integrity") or {})
+    if "originals_sha256" in old.get("integrity", {}) or not proof.pop("originals_sha256", None):
+        return False
+    return dict(new, integrity=proof) == old
+
+
+def originals_digest(pairs):
+    """Canonical JSON array of filename/hash pairs sorted by exact filename."""
+    identities = sorted(pairs)
+    if len({name for name, _ in identities}) != len(identities):
+        raise ValueError("Duplicate camera filename within one deployment.")
+    if any(not name or not re.fullmatch(r"[a-f0-9]{64}", sha) for name, sha in identities):
+        raise ValueError("A camera original lacks its filename or source SHA-256.")
+    payload = json.dumps(identities, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def camera_inventory(inventory, labels):
+    deployments = {}
+    for row in inventory:
+        if row.get("device_label") in labels and row.get("file_type") == "image":
+            deployment = row.get("deployment_id")
+            if not deployment:
+                raise ValueError("A selected image has no deployment ID.")
+            deployments.setdefault(deployment, []).append(
+                (row.get("new_filename") or "", row.get("file_hash_sha256") or ""))
+    return deployments
+
+
+def camera_clearance(folder, expected):
+    jobs = read_requests(folder)
+    if not all_requests_verified(jobs):
+        raise ValueError("Retain staged originals until Wildlife Insights verification finishes.")
+    proofs = {}
+    for job in jobs.values():
+        for row in job.get("rows", []):
+            if row["stage"] == "verified":
+                name = row["deployment"]
+                proof = row["integrity"]
+                if name in proofs and proofs[name] != proof:
+                    raise ValueError(f"Conflicting verified Wildlife Insights receipts for {name}.")
+                proofs[name] = proof
+    if proofs.keys() - expected.keys():
+        raise ValueError("Saved Wildlife Insights deployments differ from the event inventory.")
+    results = {}
+    for name, pairs in expected.items():
+        proof = proofs.get(name)
+        if not proof:
+            raise ValueError(f"{name}: no verified Wildlife Insights request. Retain the event.")
+        if not proof.get("originals_sha256"):
+            raise ValueError(f"{name}: refresh the saved request with the updated Wildlife Insights helper.")
+        if proof["image_count"] != len(pairs) or proof["originals_sha256"] != originals_digest(pairs):
+            raise ValueError(f"{name}: the verified Wildlife Insights originals differ from the inventory.")
+        results[name] = {"images": len(pairs), "receipt_sha256": proof["receipt_sha256"]}
+    return results

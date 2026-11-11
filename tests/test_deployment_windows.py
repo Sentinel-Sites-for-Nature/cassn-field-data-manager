@@ -597,3 +597,48 @@ def test_reconnect_waits_for_finished_upload_and_retries_once(manager, monkeypat
     window._release_idle_cloud()
     assert auth.call_count == int(accept)
     assert retry.call_count == int(accept and authenticated)
+
+
+def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, monkeypatch):
+    import time
+    from PySide6.QtTest import QTest
+    from test_staging_cleanup import _build_event
+    from cassn.gui import cleanup_panel
+    from cassn.core import staging_cleanup
+    staging, event, box = _build_event(tmp_path)
+    monkeypatch.setattr(cleanup_panel, "get_box_client", lambda config: box)
+    monkeypatch.setattr(cleanup_panel, "BoxStorage", lambda fake: fake)
+    monkeypatch.setattr(staging_cleanup, "LOCK_DIR", manager.lock_directory)
+    w = manager.new_window(open_sessions=False)
+    w.staging_root = staging
+    w.config_file = tmp_path / "profile/config.json"
+    w.box_config = BoxConfig(field_data_folder_id="field-root")
+    w.current_deployment_folder = event
+    assert w._claim_deployment(event, event.name)
+    panel = w.cleanup_panel
+    w.tabs.setCurrentIndex(2)
+    panel.refresh()
+    panel.toggle.setChecked(True)
+    panel.check.click()
+    for _ in range(250):
+        QApplication.processEvents()
+        time.sleep(.01)
+        if not panel.worker:
+            break
+    assert panel.hold.isEnabled(), panel.message.text()
+    with pytest.raises(staging_cleanup.StagingCleanupError):
+        staging_cleanup.clear_verified_deployment(panel.plan)
+    panel.hold.duration_ms = 150
+    QTest.keyPress(panel.hold, Qt.Key_Space)
+    QTest.keyRelease(panel.hold, Qt.Key_Space)
+    assert event.is_dir() and panel.worker is None
+    QTest.keyPress(panel.hold, Qt.Key_Space)
+    for _ in range(400):
+        QApplication.processEvents()
+        time.sleep(.01)
+        if w not in manager.windows:
+            break
+    assert w not in manager.windows
+    assert not event.exists()
+    report, = (tmp_path / "profile/cleanup-reports").glob("*.json")
+    assert json.loads(report.read_text())["outcome"] == "cleared"

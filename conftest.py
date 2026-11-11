@@ -30,3 +30,12 @@ def pytest_configure(config):
 @pytest.fixture(scope='session')
 def test_session_root():
     return TEST_SESSION_ROOT
+
+
+@pytest.fixture(autouse=True)
+def isolated_soundhub_locations(tmp_path, monkeypatch):
+    """Keep the fixed Mac archive and default batch private to each test."""
+    from cassn.soundhub import receipt_location, upload
+    monkeypatch.setattr(receipt_location, "RECEIPT_BASE", tmp_path / "mac-soundhub")
+    monkeypatch.setattr(receipt_location, "LEGACY_DRIVE_RECEIPTS", tmp_path / "removable/transfers")
+    monkeypatch.setattr(upload, "SOUNDHUB_STAGING_DEFAULT", tmp_path / "mac-batch")

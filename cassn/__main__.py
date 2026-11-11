@@ -124,6 +124,14 @@ def main(*, application=None) -> None:
     if bootstrap.warning:
         QMessageBox.warning(None, "Using Offline Lookup Cache", bootstrap.warning)
 
+    if PROFILE != "csu":
+        from cassn.soundhub.receipt_location import prepare_receipts
+        from cassn.soundhub.upload import load_soundhub_config
+        try:
+            prepare_receipts(load_soundhub_config()["staging_root"], PROFILE)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(None, "SoundHub Transfer Records", str(exc))
+
     windows = DeploymentWindows(lookups=lookups, box_config=box_config, lock_directory=lock_directory)
     if hosted_connected is not None:
         windows.box_authenticated = hosted_connected

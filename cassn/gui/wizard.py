@@ -452,7 +452,7 @@ class FieldDataWizard(QMainWindow):
 
     def save_session(self):
         """Persist current app state to session.json in the deployment folder."""
-        if self.current_deployment_folder is None:
+        if self.current_deployment_folder is None or getattr(getattr(self, "cleanup_panel", None), "applying", False):
             return
 
         device_statuses = {}
@@ -764,6 +764,8 @@ class FieldDataWizard(QMainWindow):
     def _refresh_workspace_context(self, *_args) -> None:
         if not hasattr(self, "workspace") or not hasattr(self, "device_tree"):
             return
+        if getattr(self, "cleanup_panel", None):
+            self.cleanup_panel.refresh()
         if getattr(self, "wi_control", None):
             self.wi_control.refresh()
         complete = sum(
@@ -1430,6 +1432,11 @@ class FieldDataWizard(QMainWindow):
             from cassn.gui.wi_upload import WildlifeInsightsControl
             self.wi_control = WildlifeInsightsControl(self, self.wi_upload_helper, layout)
 
+        if hasattr(self, "manager"):
+            from cassn.gui.cleanup_panel import CleanupPanel
+            self.cleanup_panel = CleanupPanel(self)
+            layout.addWidget(self.cleanup_panel)
+            self.cleanup_panel.refresh()
         # Keep unused viewport height below the last platform panel.
         layout.addStretch()
 

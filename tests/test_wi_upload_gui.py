@@ -268,12 +268,12 @@ def test_cleanup_and_submission_exclude_each_other(work, tmp_path, monkeypatch):
     empty = tmp_path / "other-event"
     empty.mkdir()
     removing = inspect_deployment_for_cleanup(empty, tmp_path, None, "", force=True)
-    remove = staging_cleanup.shutil.rmtree
-    def during_removal(path):
+    remove = staging_cleanup._remove_unchanged_deployment
+    def during_removal(checked, path):
         with pytest.raises(ValueError, match="busy"):
             wi_requests.save_requests(path, jobs)
-        remove(path)
-    monkeypatch.setattr(staging_cleanup.shutil, "rmtree", during_removal)
+        return remove(checked, path)
+    monkeypatch.setattr(staging_cleanup, "_remove_unchanged_deployment", during_removal)
     staging_cleanup.clear_verified_deployment(removing)
     with pytest.raises(ValueError, match="unavailable"):
         wi_requests.save_requests(empty, jobs)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,9 +47,21 @@ def _build_event(tmp_path: Path):
     raw_file.write_bytes(b"captured image")
 
     image_csv = event / "image_file_metadata.csv"
-    image_csv.write_text(
-        "filename,is_uploaded_to_box\nimage.jpg,True\n", encoding="utf-8"
-    )
+    digest = hashlib.sha256(raw_file.read_bytes()).hexdigest()
+    camera = dict(filename="image.jpg", is_uploaded_to_box="True", deployment_id="camera",
+                  file_size_bytes=str(raw_file.stat().st_size), file_hash_sha256=digest,
+                  file_type="image", device_type="ML")
+    with image_csv.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(camera))
+        writer.writeheader()
+        writer.writerow(camera)
+    from cassn.core.wi_requests import originals_digest, save_requests, scope_key
+    scope = dict(deployment="camera", images=1, selection_sha256="f"*64)
+    row = dict(deployment="camera", stage="verified", confirmed=1, selection_sha256="f"*64,
+               manifest_sha256="1"*64, integrity=dict(kind="integrity_verified_image_batch",
+               manifest_sha256="1"*64, image_count=1, receipt_sha256="2"*64,
+               originals_sha256=originals_digest([("image.jpg", digest)])))
+    save_requests(event, {scope_key(event.name, [scope]): {"scopes": [scope], "rows": [row]}})
     event_record = event / "deployment_event_record.json"
     event_record.write_text('{"event":"UC_TestSite_20260424"}', encoding="utf-8")
     qc = event / "qc"
@@ -78,7 +92,8 @@ def _build_event(tmp_path: Path):
                 "device_label": "p1_ML",
                 "new_filename": "image.jpg",
                 "storage_relpath": "raw_data/p1_ML/image.jpg",
-                "file_hash_sha1": sha1(raw_file),
+                "file_hash_sha1": sha1(raw_file), "file_hash_sha256": digest,
+                "file_type": "image", "deployment_id": "camera", "device_type": "ML",
                 "file_size_bytes": raw_file.stat().st_size,
             }
         ],
@@ -246,7 +261,7 @@ def test_unstamped_metadata_blocks_before_box_calls(tmp_path):
     assert any("not stamped" in reason for reason in plan.reasons)
 
 
-def test_apply_deletes_only_preflighted_event_without_creating_receipt(tmp_path):
+def test_apply_deletes_only_preflighted_event_and_saves_receipt(tmp_path):
     staging, event, storage = _build_event(tmp_path)
     plan = inspect_deployment_for_cleanup(
         event, staging, storage, "field-root"
@@ -256,7 +271,7 @@ def test_apply_deletes_only_preflighted_event_without_creating_receipt(tmp_path)
     assert not event.exists()
     assert staging.exists()
     assert result.file_count == 1
-    assert not (tmp_path / "receipts").exists()
+    assert json.loads(result.report_path.read_text())["outcome"] == "cleared"
 
 
 @pytest.mark.parametrize("force", [False, True])
@@ -323,6 +338,21 @@ def test_normal_cleanup_only_accepts_forward_soundhub_updates(tmp_path, monkeypa
     fields = ['filename', 'deployment_id', 'is_uploaded_to_box', 'notes',
               'is_submitted_to_soundhub', 'soundhub_submitter', 'soundhub_submission_datetime']
     before = dict(zip(fields, ['audio.wav', 'deployment', 'True', 'original', 'False', '', '']))
+    raw = event / 'raw_data/p1_BT/audio.wav'
+    raw.parent.mkdir()
+    raw.write_bytes(b'recording')
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    before.update(file_type='audio', device_type='BT', file_size_bytes=str(raw.stat().st_size), file_hash_sha256=digest)
+    fields = list(before)
+    session = json.loads((event/'session.json').read_text())
+    session['devices'].append([1, "One", "BT", "p1_BT"])
+    session['device_statuses']['p1_BT'] = {"status": "Complete"}
+    session['file_inventory'].append(dict(device_label="p1_BT", new_filename="audio.wav", storage_relpath="raw_data/p1_BT/audio.wav",
+                                         deployment_id="deployment", file_type="audio", file_hash_sha1=sha1(raw),
+                                         file_hash_sha256=digest, file_size_bytes=raw.stat().st_size))
+    (event/'session.json').write_text(json.dumps(session))
+    storage.tree['raw'].append(_folder('p1_BT','bat'))
+    storage.tree['bat'] = [_file('audio.wav', sha1(raw))]
     after = dict(before, is_submitted_to_soundhub='True', soundhub_submitter='Imperato, John',
                  soundhub_submission_datetime='2026-10-22T20:28:23+00:00')
     if change == 'filename':
@@ -365,7 +395,7 @@ def test_new_evidence_keeps_existing_cleanup_checks_and_rejects_stale_batch(tmp_
     from cassn.core.verification_evidence import verification_context, write_result
     staging, event, storage = _build_event(tmp_path)
     session = json.loads((event / 'session.json').read_text())
-    config = SimpleNamespace(field_data_folder_id='field-root', profile='uc')
+    config = SimpleNamespace(field_data_folder_id='field-root', profile='legacy')
     context = verification_context(event, session['file_inventory'], session['metadata'], config)
     for kind in ('box', 'hash'):
         write_result(event, kind, context, ok=True, summary='Synthetic check passed')
@@ -391,3 +421,135 @@ def test_malformed_new_proof_does_not_fall_back_to_legacy_cleanup(tmp_path, chan
              'destination': []}
     (event / 'qc/box_upload_verification.json').write_text(json.dumps(proof))
     assert not inspect_deployment_for_cleanup(event, staging, storage, 'field-root').clearable
+
+
+def test_unknown_local_files_and_hidden_notes_prevent_clearance(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    note = event / ".notes.txt"
+    note.write_text("Field observation")
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+    assert not plan.clearable and any("Move .notes.txt outside" in r for r in plan.reasons)
+    note.rename(event / "notes.txt")
+    storage.tree["event"].append(_file("notes.txt", "0" * 40))
+    assert not inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+    storage.tree["event"][-1] = _file("notes.txt", sha1(event / "notes.txt"))
+    assert inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+
+
+@pytest.mark.parametrize("change", ["no requests", "legacy receipt", "different bytes"])
+def test_camera_clearance_requires_matching_local_proof(tmp_path, change):
+    from cassn.core.wi_requests import STATE_FILE
+    staging, event, storage = _build_event(tmp_path)
+    path = event / STATE_FILE
+    if change == "no requests":
+        path.unlink()
+    else:
+        requests = json.loads(path.read_text())
+        proof = next(iter(requests["requests"].values()))["rows"][0]["integrity"]
+        if change == "legacy receipt":
+            del proof["originals_sha256"]
+        else:
+            proof["originals_sha256"] = "8" * 64
+        path.write_text(json.dumps(requests))
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+    assert not plan.clearable and plan.checks["Wildlife Insights"]["status"] == "blocked"
+
+
+def test_preview_does_not_authorize_changed_box_or_cli_race(tmp_path):
+    from cassn.config import LOCK_DIR
+    from cassn.core.event_lock import ResourceLease, deployment_keys
+    staging, event, storage = _build_event(tmp_path)
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+    with ResourceLease(LOCK_DIR, deployment_keys(event, event.name, "field-root")):
+        with pytest.raises(StagingCleanupError):
+            clear_verified_deployment(plan)
+    storage.tree["device"] = []
+    with pytest.raises(StagingCleanupError, match="missing from Box"):
+        clear_verified_deployment(plan)
+    assert (event / "session.json").is_file()
+
+
+def test_partial_removal_keeps_session_and_report(tmp_path, monkeypatch):
+    from cassn.core import staging_cleanup
+    staging, event, storage = _build_event(tmp_path)
+    config = tmp_path / "profile/config.json"
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root", config_path=config)
+    unlink = staging_cleanup.os.unlink
+    def fail_on_image(name, *args, **kwargs):
+        if name == "image.jpg":
+            raise OSError("volume unavailable")
+        return unlink(name, *args, **kwargs)
+    monkeypatch.setattr(staging_cleanup.os, "unlink", fail_on_image)
+    with pytest.raises(StagingCleanupError, match="volume unavailable"):
+        clear_verified_deployment(plan)
+    assert event in discover_staged_deployments(staging)
+    report, = (config.parent / "cleanup-reports").glob("*.json")
+    assert json.loads(report.read_text())["outcome"] == "removal incomplete"
+
+
+def test_legacy_receipt_allows_only_the_new_digest(tmp_path):
+    from cassn.core.wi_requests import read_requests, verified_row_update
+    _, event, _ = _build_event(tmp_path)
+    current = next(iter(read_requests(event).values()))["rows"][0]
+    old = dict(current, integrity={k:v for k,v in current["integrity"].items() if k != "originals_sha256"})
+    assert verified_row_update(old, current)
+    assert verified_row_update(current, current)
+    assert not verified_row_update(current, old)
+    assert not verified_row_update(old, dict(current, confirmed=0))
+    assert not verified_row_update(old, dict(current, integrity=dict(current["integrity"], receipt_sha256="e"*64)))
+    assert not verified_row_update(current, dict(current, integrity=dict(current["integrity"], originals_sha256="e"*64)))
+
+
+def test_wi_hash_matches_helper_wire_format():
+    from cassn.core.wi_requests import originals_digest
+    pairs = [("é.jpg", "2"*64), ("A.jpg", "1"*64)]
+    expected = "771e6d45c01e81e3730961ba1b84e44e5a182acf8c4397f910c1797dc7f17f72"
+    assert originals_digest(pairs) == originals_digest(reversed(pairs)) == expected
+    with pytest.raises(ValueError, match="Duplicate"):
+        originals_digest([pairs[0], pairs[0]])
+
+
+def test_protected_soundhub_folder_survives_a_config_change(tmp_path, monkeypatch):
+    from cassn.soundhub import upload
+    staging, event, storage = _build_event(tmp_path)
+    config = tmp_path / "profile/config.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"soundhub": {"staging_root": str(tmp_path / "alternate")}}))
+    monkeypatch.setattr(upload, "SOUNDHUB_STAGING_DEFAULT", event)
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "", config_path=config, force=True)
+    assert not plan.clearable and any("overlaps" in r for r in plan.reasons)
+
+
+def test_generated_summary_and_user_edits(tmp_path):
+    from cassn.core.inventory import generate_session_summary
+    staging, event, storage = _build_event(tmp_path)
+    session = json.loads((event / "session.json").read_bytes())
+    summary = generate_session_summary(event, session["metadata"], session["file_inventory"], session["devices"])
+    storage.tree["qc"].append(_file(summary.name, "0" * 40))
+    assert inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+    with summary.open("a") as stream:
+        stream.write("Field note added after upload\n")
+    assert not inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+
+
+def test_malformed_private_upload_record_blocks_with_a_reason(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    path = event / "qc/box_upload_sessions/metrics.json"
+    path.parent.mkdir()
+    path.write_text("incomplete")
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+    assert not plan.clearable and any("qc/box_upload_sessions/metrics.json" in reason for reason in plan.reasons)
+
+
+def test_legacy_manifest_requires_exact_inventory(tmp_path):
+    from cassn.core.inventory import refresh_legacy_device_manifest
+    staging, event, storage = _build_event(tmp_path)
+    device = event / "raw_data/p1_ML"
+    manifest = device / "p1_ML_manifest.json"
+    manifest.touch()
+    rows = json.loads((event / "session.json").read_bytes())["file_inventory"]
+    assert refresh_legacy_device_manifest(device.name, device, rows)
+    assert inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+    record = json.loads(manifest.read_bytes())
+    manifest.write_text(json.dumps(dict(record, notes="Field note")))
+    assert not inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable

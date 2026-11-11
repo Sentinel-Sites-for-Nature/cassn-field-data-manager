@@ -2,27 +2,22 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
-from PySide6.QtCore import QIODevice, QLockFile, QSaveFile, QTimer, Qt, Signal
+from PySide6.QtCore import QIODevice, QSaveFile, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QDialog
 
+from cassn.core.event_lock import ResourceBusy, ResourceLease, deployment_keys
 from cassn.config import CONFIG_JSON, LOCK_DIR, APP_TITLE
 from cassn.profile import HOSTED
 from cassn.gui.wizard import FieldDataWizard
 from cassn.gui.dialogs import WindowMessageBox as QMessageBox
 from cassn.lookups import normalize_deployment_event_metadata
-
-
-class ResourceBusy(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -32,41 +27,6 @@ class QueuedStage:
     deployments: frozenset[str]
     volume_anchor: Path
     device: int
-
-
-class ResourceLease:
-    """Crash-recoverable locks outside deployment folders, also honored by other processes."""
-
-    def __init__(self, directory: Path, keys):
-        self.keys = tuple(sorted(set(keys)))
-        self._locks = []
-        directory.mkdir(parents=True, exist_ok=True)
-        try:
-            for key in self.keys:
-                name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".lock"
-                lock = QLockFile(str(directory / name))
-                # A long upload is not stale. Qt can still recover dead-process locks.
-                lock.setStaleLockTime(0)
-                if not lock.tryLock(0):
-                    if lock.error() != QLockFile.LockFailedError:
-                        raise OSError(f"Cannot create an application lock in {directory}")
-                    raise ResourceBusy(key)
-                self._locks.append(lock)
-        except Exception:
-            self.release()
-            raise
-
-    def release(self):
-        for lock in reversed(self._locks):
-            lock.unlock()
-        self._locks.clear()
-
-
-def deployment_keys(folder: Path, event_id: str, box_root: str | None):
-    return (
-        "deployment-path:" + os.path.normcase(str(folder.resolve())),
-        f"deployment-event:{box_root or 'default'}:{event_id}",
-    )
 
 
 def _guard_callback(handler):
@@ -349,7 +309,8 @@ class DeploymentWindow(FieldDataWizard):
 
     def _work_running(self):
         return bool(
-            self.card_ingest_threads or self._retiring_card_threads or self._card_disk_threads
+            getattr(getattr(self, "cleanup_panel", None), "worker", None)
+            or self.card_ingest_threads or self._retiring_card_threads or self._card_disk_threads
             or self._box_operation_active or self._soundhub_pending or self._starting_cloud
             or self._staging_pending or self in self.manager.staging_queue
             or self._workers_running() or self._callback_depth

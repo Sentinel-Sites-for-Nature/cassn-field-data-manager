@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from cassn.soundhub.receipt_location import receipt_root
 from cassn.soundhub.export import build_recording_rows
 from cassn.soundhub.stage_display import batch_bytes, event_preview, manifest_changes, manifest_rows
 from cassn.soundhub.staging import project_root
@@ -49,7 +50,7 @@ def test_verified_event_receipt_excludes_staged_only_paths_and_other_projects(tm
         flac.parent.mkdir(exist_ok=True)
         flac.write_bytes(b"local FLAC")
     assert batch_bytes(staging) == sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
-    transfer = tmp_path / "transfers/first"
+    transfer = receipt_root() / "first"
     save_rows(transfer / "recording.csv", expected)
     digest = hashlib.sha256((transfer / "recording.csv").read_bytes()).hexdigest()
     config = {"bucket": "test", "upload_prefix": "upload", "project_short_name": "project"}

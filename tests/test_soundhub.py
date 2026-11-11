@@ -1259,3 +1259,54 @@ def test_flac_lookup_respects_existing_path(monkeypatch):
     from cassn.soundhub import staging
     monkeypatch.setattr(staging.shutil, "which", lambda name: "/custom/flac" if name == "flac" else None)
     assert staging.flac_executable() == "/custom/flac"
+
+
+@needs_flac
+def test_cleanup_mixed_receipts_and_staging_and_unrelated_damage(deployment, tmp_path):
+    import hashlib
+    import json
+    from cassn.core.cleanup_evidence import soundhub_clearance
+    from cassn.soundhub.receipt_location import receipt_root
+    from cassn.soundhub.upload import load_soundhub_config
+    rows = read_bd_audio_rows(deployment)
+    stage = tmp_path / "staging"
+    settings = dict(load_soundhub_config(), staging_root=str(stage))
+    stage_deployment(deployment, rows, stage)
+    write_deployment_copy(deployment, rows)
+    expected = build_recording_rows(rows)
+    birds = {(r["deployment_id"], r["filename"]): "a"*64 for r in rows}
+    remote = [dict(row, file_hash_sha256="a"*64, is_submitted_to_soundhub="True", soundhub_submitter="Observer",
+                   soundhub_submission_datetime="2026-11-01T12:00:00+00:00") for row in rows]
+    # Submit one whole deployment; its recordings should survive drive disconnection.
+    submitted = [r for r in expected if r["deployment_id"] == expected[0]["deployment_id"]]
+    receipt = receipt_root("uc") / "attempt"
+    receipt.mkdir(parents=True)
+    manifest = receipt / "recording.csv"
+    with manifest.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=SOUNDHUB_RECORDING_FIELDS)
+        writer.writeheader()
+        writer.writerows(submitted)
+    prefix = project_prefix(settings)
+    transfer = dict(status="failed", destination=f"s3://{settings['bucket']}/{prefix}/",
+        verification={"ok": True}, planned={"events":[deployment.name], "objects":[
+            dict(key=f"{prefix}/{r['path']}", relative=r["path"]) for r in submitted]},
+        manifests={"recording.csv":{"sha256":hashlib.sha256(manifest.read_bytes()).hexdigest()}})
+    (receipt / "transfer.json").write_text(json.dumps(transfer))
+    # Remove that deployment from independent staging, leaving the other as disk proof.
+    ident = submitted[0]["deployment_id"]
+    shutil.rmtree(project_root(stage) / ident)
+    shutil.rmtree(fragments_root(stage) / ident)
+    refresh_project_csvs(stage)
+    (fragments_root(stage) / "unrelated").mkdir()
+    details = {}
+    files, warnings = soundhub_clearance(deployment, settings, "uc", birds, lambda: remote, details)
+    assert warnings and len(files) == len(rows) - len(submitted)
+    assert details["deployments"][ident]["submitted"] == len(submitted)
+    assert all(c["missing"] == 0 for c in details["deployments"].values())
+    remote[0]["soundhub_submission_datetime"] = ""
+    with pytest.raises(ValueError, match="Missing independent"):
+        soundhub_clearance(deployment, settings, "uc", birds, lambda: remote, {})
+    remote[0]["soundhub_submission_datetime"] = "2026-11-01T12:00:00+00:00"
+    files[0].write_bytes(b"bad header")
+    with pytest.raises(ValueError, match="STREAMINFO"):
+        soundhub_clearance(deployment, settings, "uc", birds, lambda: remote, {})

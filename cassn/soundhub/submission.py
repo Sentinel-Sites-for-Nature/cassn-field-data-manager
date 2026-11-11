@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 
+from cassn.soundhub.receipt_location import prepare_receipts, receipt_journals
 from cassn.soundhub.export import validate_staging_manifests
 
 from cassn.soundhub.provenance import (
@@ -150,7 +151,8 @@ def execute_soundhub_submission(
     try:
         # A verified transfer must be repaired, never sent again just because
         # its Box flags could not be saved. The S3 landing zone may be drained.
-        for journal in (plan.staging_root.parent / "transfers").glob("*/transfer.json"):
+        prepare_receipts(plan.staging_root)
+        for journal in receipt_journals(plan.staging_root):
             try:
                 prior = json.loads(journal.read_text())
             except (OSError, ValueError) as exc:
@@ -169,7 +171,7 @@ def execute_soundhub_submission(
                     f"This batch already passed S3 verification. Repair the Box record "
                     f"instead of uploading again: {journal.parent}", phase="preflight")
         archive = TransferArchive.begin(plan, submitter)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise SoundHubSubmissionError(
             f"Could not save the local transfer record; upload not started: {exc}",
             phase="local_record",

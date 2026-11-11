@@ -17,7 +17,7 @@ from cassn.config import CONFIG_JSON  # noqa: E402
 from cassn.core.staging_cleanup import (  # noqa: E402
     StagingCleanupError,
     clear_verified_deployment,
-    configured_staging_root,
+    configured_staging_root, save_cleanup_report,
     discover_staged_deployments,
     inspect_deployment_for_cleanup,
 )
@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FOLDER_NAME",
         help="inspect only this direct child event folder (repeatable)",
     )
+    parser.add_argument("--save-report", action="store_true",
+                        help="save each check as JSON in the active profile's cleanup-reports folder")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -126,13 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: could not load Box configuration: {exc}", file=sys.stderr)
             return 2
         client = get_box_client(box_config)
-        if client is None:
-            print(
-                "ERROR: could not authenticate with Box; no local folders were changed.",
-                file=sys.stderr,
-            )
-            return 2
-        storage = BoxStorage(client)
+        if client is not None:
+            storage = BoxStorage(client)
         field_data_folder_id = str(box_config.field_data_folder_id or "")
 
     cleared = 0
@@ -145,8 +142,13 @@ def main(argv: list[str] | None = None) -> int:
             staging_root,
             storage,
             field_data_folder_id,
-            force=args.force,
+            force=args.force, config_path=args.config,
+            **({"profile": box_config.profile} if not args.force else {}),
         )
+        if args.save_report:
+            print(f"  Check report: {save_cleanup_report(plan)}")
+        for line in [*plan.summary_lines(), *plan.warnings] if not args.force else []:
+            print(f"  {line}")
         if not plan.clearable:
             blocked += 1
             print("  BLOCKED")
@@ -170,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         cleared += 1
         cleared_bytes += result.bytes_cleared
-        print(f"  CLEARED: {result.deployment_folder}")
+        print(f"  CLEARED: {result.deployment_folder}\n  Report: {result.report_path}")
 
     safe = len(deployments) - blocked
     if args.apply:
