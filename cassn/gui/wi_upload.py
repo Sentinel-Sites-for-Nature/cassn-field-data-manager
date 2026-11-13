@@ -677,7 +677,6 @@ class WildlifeInsightsControl(QObject):
             self.check_status(self.poll_remaining.pop(0))
 
     def check_status(self, key):
-        self.legacy_refreshed.add(key)
         def received(result):
             if result.get("missing") is True:
                 if self.jobs[key].get("rows"):
@@ -688,6 +687,7 @@ class WildlifeInsightsControl(QObject):
                 self.message("Choose Upload to Wildlife Insights to resume the saved selection.")
             else:
                 self.accept_status(key, result)
+                self.legacy_refreshed.add(key)
 
         self.call("status", {"request_id": key, "scopes": self.jobs[key]["scopes"]}, received)
 

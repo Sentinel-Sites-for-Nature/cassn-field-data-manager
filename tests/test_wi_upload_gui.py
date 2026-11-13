@@ -46,6 +46,7 @@ else:
                      retry_of=sha,stage='held',confirmed=0,hold_reason='Added deployment held: expected one exact camera 08021607; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
+            if (root/'upgraded').exists(): row['integrity']['originals_sha256']='d'*64
         if stage=='verifying':
             row['verified_count']=int((root/'verified-count').read_text()) if (root/'verified-count').exists() else 1
         if stage=='delivery':
@@ -585,3 +586,26 @@ def test_wi_upload_button_disables_while_helper_has_active_cameras(work, tmp_pat
     window.file_inventory.append(dict(device_label="p2_ML", file_type="image", deployment_id="new-camera"))
     ctrl.refresh_new_cameras()
     assert ctrl.panel_button.isEnabled()
+
+
+def test_old_verified_session_retries_status_after_failure(work, tmp_path):
+    window = work()
+    prepare(window)
+    (tmp_path / "stage").write_text("verified")
+    control = window.wi_control
+    start(control, QDialogButtonBox.Ok)
+    key, old_job = next(iter(read_requests(control.folder).items()))
+    (tmp_path / "stale").touch()
+    control.poll()
+    wait_for(lambda: control.process is None)
+    assert key in control.unavailable
+    assert control.timer.isActive()
+    (tmp_path / "stale").unlink()
+    (tmp_path / "upgraded").touch()
+    control.poll()
+    wait_for(lambda: control.process is None)
+    new_job = read_requests(control.folder)[key]
+    for row in new_job["rows"]:
+        assert row["integrity"].pop("originals_sha256") == "d"*64
+    assert new_job == old_job
+    assert (tmp_path / "calls").read_text().splitlines().count("submit") == 1

@@ -84,6 +84,10 @@ def prepare_receipts(staging_root, profile=None):
     return target
 
 
+class ReceiptHistoryUnavailable(ValueError):
+    """The existing archive is unavailable for verification."""
+
+
 def receipt_journals(staging_root, profile=None):
     """Read only the fixed directory. An unmigrated archive is never an empty history."""
     target = receipt_root(profile)
@@ -92,7 +96,7 @@ def receipt_journals(staging_root, profile=None):
     if not target.exists():
         if (profile or PROFILE) != "csu" and any(p.exists() for p in
                 (target.parents[1] / "transfers", LEGACY_DRIVE_RECEIPTS, Path(staging_root).parent / "transfers")):
-            raise ValueError("SoundHub receipt migration is pending. Open FDM with the staging drive connected.")
+            raise ReceiptHistoryUnavailable("SoundHub receipt migration is pending. Open FDM with the staging drive connected.")
         return
     for attempt in sorted(target.iterdir()):
         if not attempt.name.startswith(".") and attempt.is_dir():

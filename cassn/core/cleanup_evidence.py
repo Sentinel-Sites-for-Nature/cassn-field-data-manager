@@ -97,7 +97,7 @@ def soundhub_clearance(event, settings, profile, birds, read_box_audio, details)
         if (not ident or Path(ident).name != ident or ident in {".", ".."}
                 or Path(key).parts != (ident, Path(key).name)):
             raise ValueError(f"Unsafe SoundHub recording path: {key}")
-    counts = {d: dict(expected=n, submitted=0, staged=0, missing=n)
+    counts = {d: dict(expected=n, submitted=0, staged=0, missing=0, unchecked=n)
               for d, n in Counter(r["deployment_id"] for r in expected.values()).items()}
     details.update(deployments=counts, receipts=[])
     receipts = verified_recordings(settings["staging_root"], event.name, expected, settings, profile)
@@ -133,16 +133,20 @@ def soundhub_clearance(event, settings, profile, birds, read_box_audio, details)
         for relative in submitted:
             count = counts[expected[relative]["deployment_id"]]
             count["submitted"] += 1
-            count["missing"] -= 1
+            count["unchecked"] -= 1
     needed = expected.keys() - submitted
     files = []
     warnings = []
     if needed:
         staging = Path(settings["staging_root"]).expanduser()
         if not staging.is_dir():
-            raise ValueError(f"SoundHub receipt or Box stamp is missing. Connect the staging drive: {staging}")
+            raise OSError(f"Connect the staging drive to check recordings: {staging}")
         matched = event_staging_summary(event, staging).matched_paths
         missing = needed - matched
+        for relative in missing:
+            count = counts[expected[relative]["deployment_id"]]
+            count["missing"] += 1
+            count["unchecked"] -= 1
         candidates = needed & matched
         ids = {expected[p]["deployment_id"] for p in candidates}
         if ids:
@@ -161,7 +165,7 @@ def soundhub_clearance(event, settings, profile, birds, read_box_audio, details)
                 raise ValueError(f"Missing regular SoundHub file: {path}")
             _flac_header(path, expected[relative]["sample_rate"])
             counts[expected[relative]["deployment_id"]]["staged"] += 1
-            counts[expected[relative]["deployment_id"]]["missing"] -= 1
+            counts[expected[relative]["deployment_id"]]["unchecked"] -= 1
             files.append(path)
         if missing:
             raise ValueError(f"Missing independent SoundHub evidence for {len(missing)} recording(s): {min(missing)}")

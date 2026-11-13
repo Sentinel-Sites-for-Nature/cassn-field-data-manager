@@ -553,3 +553,62 @@ def test_legacy_manifest_requires_exact_inventory(tmp_path):
     record = json.loads(manifest.read_bytes())
     manifest.write_text(json.dumps(dict(record, notes="Field note")))
     assert not inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+
+
+@pytest.mark.parametrize("change", ["timestamp", "copy", "extra", "bad time", "duplicate", "field"])
+def test_lookup_snapshot_comparison(tmp_path, monkeypatch, change):
+    from cassn.core.staging_cleanup import _LOOKUP_MANIFEST, _check_lookup_manifest
+    path = tmp_path / _LOOKUP_MANIFEST
+    path.parent.mkdir(parents=True)
+    copy = path.with_name("sites.csv")
+    copy.write_bytes(b"abc")
+    row = dict(filename=copy.name, relative_path=copy.relative_to(tmp_path).as_posix(),
+               size_bytes=3, sha256=hashlib.sha256(b"abc").hexdigest(), snapshotted_at="2026-11-13T00:00:00+00:00")
+    record = dict(files=[row], file_count=1, source_directory="/lookups", generated=row["snapshotted_at"])
+    remote = json.dumps(record).encode()
+    row["snapshotted_at"] = record["generated"] = "2026-11-13T02:00:00+00:00"
+    if change == "copy":
+        copy.write_bytes(b"abd")
+    if change == "extra":
+        path.with_name("notes").touch()
+    if change == "bad time":
+        record["generated"] = "yesterday"
+    if change == "duplicate":
+        record["files"].append(dict(row))
+        record["file_count"] = 2
+    if change == "field":
+        record["notes"] = "field note"
+    path.write_text(json.dumps(record))
+    sha = hashlib.sha1(remote).hexdigest()
+    ref = SimpleNamespace(sha1=sha, parent_id="folder", name=path.name)
+    store = SimpleNamespace(snapshot=lambda _: ref, read=lambda _: remote, assert_unchanged=lambda _: None)
+    monkeypatch.setattr("cassn.core.staging_cleanup.BoxFileStore", lambda _: store)
+    storage = SimpleNamespace(client=None, find_child_folder=lambda *_: "folder",
+                              folder_file_map=lambda _: {path.name: "file"})
+    args = (tmp_path, _LOOKUP_MANIFEST, sha, storage, "root")
+    if change == "timestamp":
+        _check_lookup_manifest(*args)
+    else:
+        with pytest.raises(ValueError):
+            _check_lookup_manifest(*args)
+
+
+def test_box_lookup_extra_blocks_even_when_manifest_hash_matches(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    folder = event / "qc/lookup_snapshot"
+    folder.mkdir()
+    copy = folder / "sites.csv"
+    copy.write_text("site\n")
+    stamp = "2026-11-13T00:00:00+00:00"
+    manifest = folder / "lookup_snapshot_manifest.json"
+    manifest.write_text(json.dumps(dict(generated=stamp, source_directory="/lookups", file_count=1,
+        files=[dict(filename=copy.name, relative_path=copy.relative_to(event).as_posix(),
+                    size_bytes=copy.stat().st_size, sha256=hashlib.sha256(copy.read_bytes()).hexdigest(),
+                    snapshotted_at=stamp)])))
+    storage.tree["qc"].append(_folder(folder.name, "lookup"))
+    storage.tree["lookup"] = [_file(p.name, sha1(p)) for p in folder.iterdir()]
+    assert inspect_deployment_for_cleanup(event, staging, storage, "field-root").clearable
+    storage.tree["lookup"].append(_file("notes.csv", "a"*40))
+    plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
+    assert not plan.clearable
+    assert any("folder contents differ" in r for r in plan.reasons)

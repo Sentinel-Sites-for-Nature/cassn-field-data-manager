@@ -43,7 +43,8 @@ from cassn.soundhub import receipt_location
 from cassn.soundhub import upload as soundhub_upload
 from cassn.soundhub.upload import load_soundhub_config
 from cassn.core.classification import sanitize_box_folder_name
-from cassn.core.hashing import sha1 as compute_file_sha1
+from cassn.core.hashing import sha1 as compute_file_sha1, sha256
+from cassn.lookups import BOX_MANAGED_FILENAMES
 from cassn.core.inventory import (
     SESSION_SCHEMA_VERSION,
     index_inventory_by_storage_relpath,
@@ -120,6 +121,8 @@ class StagingCleanupPlan:
         lines = []
         for name, result in self.checks.items():
             lines.append(f"{name}: {result['status']}")
+            if result.get("historical_staging"):
+                lines.append("  Saved staging result: previously completed.")
             for deployment, counts in result.get("deployments", {}).items():
                 numbers = ", ".join(f"{key} {value}" for key, value in counts.items() if isinstance(value, int))
                 lines.append(f"  {deployment}: {numbers}")
@@ -282,6 +285,62 @@ def _resolve_box_deployment(
     return str(event_id), box_path
 
 
+_LOOKUP_MANIFEST = Path("qc/lookup_snapshot/lookup_snapshot_manifest.json")
+
+
+def _lookup_content(payload):
+    record = read_object(payload)
+
+    def remove_timestamp(item, key):
+        value = item.pop(key)
+        if not isinstance(value, str) or datetime.fromisoformat(value).utcoffset() is None:
+            raise ValueError(f"Invalid lookup timestamp: {key}")
+
+    remove_timestamp(record, "generated")
+    rows = record["files"]
+    if (not isinstance(rows, list) or not rows or type(record["file_count"]) is not int
+            or record["file_count"] != len(rows) or not isinstance(record["source_directory"], str)):
+        raise ValueError("Invalid lookup manifest header")
+    names = set()
+    for row in rows:
+        remove_timestamp(row, "snapshotted_at")
+        name = row["filename"]
+        if (name not in BOX_MANAGED_FILENAMES or name in names or "error" in row
+                or row["relative_path"] != (_LOOKUP_MANIFEST.parent / name).as_posix()
+                or type(row["size_bytes"]) is not int or row["size_bytes"] < 0
+                or not re.fullmatch("[0-9a-f]{64}", row["sha256"])):
+            raise ValueError("Invalid or repeated lookup file")
+        names.add(name)
+    return record
+
+
+def _check_lookup_manifest(event, remote, box_hash, storage, folder_id):
+    path = event / _LOOKUP_MANIFEST
+    local = path.read_bytes()
+    record = _lookup_content(local)
+    names = {r["filename"] for r in record["files"]}
+    if {p.name for p in path.parent.iterdir() if p != path} != names:
+        raise ValueError("Lookup folder membership differs from its manifest")
+    for row in record["files"]:
+        copy = event / row["relative_path"]
+        if copy.is_symlink() or copy.stat().st_size != row["size_bytes"] or sha256(copy) != row["sha256"]:
+            raise ValueError(f"Lookup copy differs from its manifest: {copy.name}")
+    if hashlib.sha1(local).hexdigest() == box_hash:
+        return
+    for parent in remote.parts[:-1]:
+        folder_id = storage.find_child_folder(folder_id, parent)
+        if not folder_id:
+            raise ValueError("Box lookup folder missing")
+    store = BoxFileStore(storage.client)
+    ref = store.snapshot(storage.folder_file_map(folder_id)[remote.name])
+    if ref.sha1 != box_hash or ref.parent_id != folder_id or ref.name != remote.name:
+        raise ValueError("Box lookup manifest changed during comparison")
+    # Serialize to preserve JSON type distinctions such as true versus 1.
+    if json.dumps(record, sort_keys=True) != json.dumps(_lookup_content(store.read(ref)), sort_keys=True):
+        raise ValueError("Box lookup manifest differs beyond its timestamps")
+    store.assert_unchanged(ref)
+
+
 def _soundhub_submission_updates_only(local_bytes: bytes, box_bytes: bytes) -> bool:
     """Accept only forward submission bookkeeping changes on identical CSV rows."""
     import io
@@ -427,6 +486,10 @@ def _inspect_event(plan, staging_root, progress):
     if session.get("schema_version") != SESSION_SCHEMA_VERSION:
         plan.reasons.append("session.json has an unsupported schema version")
 
+    history = session.get("soundhub_display")
+    if (isinstance(history, dict) and history.get("folder") == str(deployment)
+            and history.get("operation") == "staging" and history.get("state") == "complete"):
+        plan.checks["SoundHub"]["historical_staging"] = "Previously completed"
     marker = session.get("box_project")
     if marker is not None and marker != {"profile": profile, "data_folder": field_data_folder_id}:
         plan.reasons.append("The session belongs to a different Box project.")
@@ -674,6 +737,18 @@ def _inspect_event(plan, staging_root, progress):
         if not box_hash:
             plan.reasons.append(f"Box SHA-1 is unavailable: {relative}")
             continue
+        if relative == _LOOKUP_MANIFEST.as_posix():
+            try:
+                remote = Path(remote_path(relative))
+                prefix = remote.parent.as_posix() + "/"
+                remote_names = {key[len(prefix):] for key in box_hashes if key.startswith(prefix)}
+                local_names = {p.name for p in (deployment / _LOOKUP_MANIFEST.parent).iterdir()}
+                if remote_names != local_names:
+                    raise ValueError("Local and Box lookup folder contents differ")
+                _check_lookup_manifest(deployment, remote, box_hash, storage, plan.box_folder_id)
+            except Exception as exc:
+                plan.reasons.append(f"Cannot verify lookup snapshot: {exc}")
+            continue
         local_hash = compute_file_sha1(deployment.joinpath(*relative.split("/")))
         if box_hash != local_hash:
             if relative == "qc/deployment_summary.txt":
@@ -748,7 +823,7 @@ def _inspect_event(plan, staging_root, progress):
                 details["status"] = "passed"
             except Exception as exc:
                 plan.reasons.append(f"SoundHub: {exc}")
-                details.update(status="incomplete", reason=str(exc))
+                details.update(status="Not checked" if isinstance(exc, (OSError, receipt_location.ReceiptHistoryUnavailable)) else "incomplete", reason=str(exc))
     return plan
 
 

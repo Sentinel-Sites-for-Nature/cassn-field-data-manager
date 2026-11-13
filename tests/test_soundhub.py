@@ -1310,3 +1310,16 @@ def test_cleanup_mixed_receipts_and_staging_and_unrelated_damage(deployment, tmp
     files[0].write_bytes(b"bad header")
     with pytest.raises(ValueError, match="STREAMINFO"):
         soundhub_clearance(deployment, settings, "uc", birds, lambda: remote, {})
+
+
+def test_offline_clearance_does_not_count_unchecked_recordings_as_missing(deployment, tmp_path):
+    from cassn.core.cleanup_evidence import soundhub_clearance
+    from cassn.soundhub.upload import load_soundhub_config
+    settings = dict(load_soundhub_config(), staging_root=str(tmp_path / "offline"))
+    birds = {(row["deployment_id"], row["filename"]): "a"*64 for row in read_bd_audio_rows(deployment)}
+    details = {}
+    with pytest.raises(OSError, match="Connect the staging drive"):
+        soundhub_clearance(deployment, settings, "uc", birds, lambda: [], details)
+    for counts in details["deployments"].values():
+        assert counts["expected"] == counts["unchecked"]
+        assert counts["missing"] == 0
