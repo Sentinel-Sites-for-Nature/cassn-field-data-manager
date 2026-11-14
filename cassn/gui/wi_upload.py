@@ -24,12 +24,11 @@ pre-admission hold, preview and status return retry_of (its inbox SHA).
 The confirmed replacement includes retry_of in its scopes and request_id.
 An ordinary lost-reply replay keeps its existing request_id.
 
-Optional wi_session_v1 capability adds a read-only session action and an
-authentication object to preview/status. Its state is ready, refresh_needed,
+Optional wi_session_v1 capability adds an authentication object to
+preview/status. Its state is ready, refresh_needed,
 sign_in_required or unavailable. Legacy helpers omit this capability.
-wi_auth_recovery_v1 permits an explicit recover_auth command with the original
-request_id and full scopes. Only fresh eligible pre-admission held rows may
-offer auth_recovery_available. Recovery never creates a new upload identity.
+The uploader owns safe recovery after sign-in is restored. FDM displays
+sign-in guidance and continues its ordinary status checks.
 A submit response with submission_blocked=true creates no remote request.
 """
 
@@ -40,7 +39,7 @@ from collections import Counter
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton,
+    QDialog, QDialogButtonBox, QFrame, QHeaderView, QLabel, QMenu, QPushButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
@@ -100,7 +99,6 @@ class WildlifeInsightsControl(QObject):
         self.has_selection = False
         self.transfer_active = False
         self.authentication = {}
-        self.auth_capabilities = set()
         self.group = PlatformPanel("wildlife_insights")
         box = self.group.body
         self.verified_summary = workspace_label("", "contextTitle", wrap=True)
@@ -123,14 +121,6 @@ class WildlifeInsightsControl(QObject):
         self.auth_notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.auth_notice.hide()
         box.addWidget(self.auth_notice)
-        self.session_button = QPushButton("Check sign-in")
-        self.session_button.clicked.connect(self.check_session)
-        self.group.add_footer_button(self.session_button)
-        self.session_button.hide()
-        self.recovery_button = QPushButton("Resume blocked request")
-        self.recovery_button.clicked.connect(self.recover_auth)
-        self.group.add_footer_button(self.recovery_button)
-        self.recovery_button.hide()
         layout.addWidget(self.group)
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
@@ -152,7 +142,6 @@ class WildlifeInsightsControl(QObject):
         if (not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities)
                 or not isinstance(auth, dict)):
             raise ValueError("Invalid Wildlife Insights sign-in status.")
-        self.auth_capabilities = set(capabilities)
         self.authentication = auth if "wi_session_v1" in capabilities else {}
         state = self.authentication.get("state")
         if state is not None and state not in {"ready", "refresh_needed", "sign_in_required", "unavailable"}:
@@ -163,51 +152,9 @@ class WildlifeInsightsControl(QObject):
         if state == "sign_in_required":
             message += ("\nSign in privately in Terminal with:\n"
                         "/Users/johnimperato/cassn/git/cassn-data-tracker/.venv/bin/cassn-data-tracker wi-login"
-                        "\nThen choose Check sign-in here. Keep your password out of chat.")
+                        "\nExisting requests will be checked again by the uploader after sign-in.")
         self.auth_notice.setText(message)
         self.auth_notice.setVisible(bool(message))
-        self.session_button.setVisible("wi_session_v1" in self.auth_capabilities)
-        self._refresh_auth_actions()
-
-    def _auth_recovery_key(self):
-        if ("wi_auth_recovery_v1" not in self.auth_capabilities
-                or self.authentication.get("state") not in {"ready", "refresh_needed"}):
-            return None
-        for key, job in self.jobs.items():
-            if key in self.unavailable:
-                continue
-            for row in job.get("rows", []):
-                if (row.get("auth_recovery_available") is True and row.get("stage") == "held"
-                        and row.get("request_sha") and not row.get("manifest_sha256")
-                        and not row.get("confirmed")):
-                    return key
-        return None
-
-    def _refresh_auth_actions(self):
-        self.session_button.setEnabled(bool(self.folder and not self.process))
-        key = self._auth_recovery_key()
-        self.recovery_button.setVisible(key is not None)
-        self.recovery_button.setEnabled(key is not None and not self.process)
-
-    def check_session(self):
-        self.call("session", {}, lambda result: None)
-
-    def recover_auth(self):
-        key = self._auth_recovery_key()
-        if self.process or key is None:
-            return
-        answer = QMessageBox.question(
-            self.window, "Resume blocked Wildlife Insights request",
-            "Ask the uploader to recheck this saved request and resume eligible cameras? "
-            "The uploader will check for earlier upload work before resuming.",
-            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
-        if answer != QMessageBox.Yes:
-            return
-        def received(result):
-            self.accept_status(key, result)
-            if result.get("recovery_requested") is True:
-                self.message("Recovery requested. Waiting for the uploader to check and resume the saved request.")
-        self.call("recover_auth", {"request_id": key, "scopes": self.jobs[key]["scopes"]}, received)
 
     def _open_website(self):
         # Only these projects have a known organization in the UC integration.
@@ -258,7 +205,6 @@ class WildlifeInsightsControl(QObject):
         self._refresh_action()
 
     def _refresh_action(self):
-        self._refresh_auth_actions()
         self.action.setEnabled(bool(self.folder and not self.read_error and not self.transfer_active and (not self.process or self.process.property("operation") == "status")
                                     and not self.window.card_ingest_threads))
         self.panel_button.setEnabled(self.has_selection and self.action.isEnabled() and not self.selection_complete())
@@ -488,7 +434,7 @@ class WildlifeInsightsControl(QObject):
                 if operation == "submit" and result.get("submission_blocked") is True:
                     self.group.disclosure.setChecked(True)
                     return
-                if operation in {"status", "submit", "recover_auth"} and result.get("fresh") is not True:
+                if operation in {"status", "submit"} and result.get("fresh") is not True:
                     raise ValueError("The helper has no current service status.")
                 receive(result)
                 succeeded = True
@@ -499,7 +445,6 @@ class WildlifeInsightsControl(QObject):
                     self.delivery_keys.discard(key)
                     self.render()
                 self.authentication = {}
-                self._refresh_auth_actions()
                 self.message(f"Wildlife Insights status unknown. {exc}")
             finally:
                 process.deleteLater()

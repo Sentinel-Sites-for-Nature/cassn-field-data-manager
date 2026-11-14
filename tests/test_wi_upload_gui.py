@@ -611,35 +611,23 @@ def test_old_verified_session_retries_status_after_failure(work, tmp_path):
     assert (tmp_path / "calls").read_text().splitlines().count("submit") == 1
 
 
-def test_authentication_banner_and_recovery_keep_original_request(work, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+def test_authentication_guidance_uses_normal_controls(work):
+    from PySide6.QtWidgets import QPushButton
     w = work()
     prepare(w)
     control = w.wi_control
     control.timer.stop()
     control.refresh()
-    control.jobs = {"original-id": {"scopes": [{"deployment": "camera", "images": 2,
-        "selection_sha256": "a" * 64}], "rows": [{"stage": "held", "confirmed": 0,
-        "request_sha": "b" * 64, "auth_recovery_available": True}]}}
-    control.unavailable.clear()
-    control.update_authentication({"capabilities": ["wi_session_v1", "wi_auth_recovery_v1"],
+    control.update_authentication({"capabilities": ["wi_session_v1"],
         "authentication": {"state": "sign_in_required", "message": "Your sign-in expired."}})
     assert "wi-login" in control.auth_notice.text()
-    assert control._auth_recovery_key() is None
-    control.update_authentication({"capabilities": ["wi_session_v1", "wi_auth_recovery_v1"],
-        "authentication": {"state": "refresh_needed", "message": "Access renewal is due."}})
-    assert control._auth_recovery_key() == "original-id"
-    calls = []
-    monkeypatch.setattr(control, "call", lambda op, payload, receive: calls.append((op, payload)))
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Cancel)
-    control.recover_auth()
-    assert not calls
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
-    control.recover_auth()
-    assert calls == [("recover_auth", {"request_id": "original-id",
-                                      "scopes": control.jobs["original-id"]["scopes"]})]
-    control.jobs["original-id"]["rows"][0]["manifest_sha256"] = "c" * 64
-    assert control._auth_recovery_key() is None
+    assert "Existing requests will be checked again" in control.auth_notice.text()
+    buttons = {button.text() for button in control.group.findChildren(QPushButton)}
+    assert "Check sign-in" not in buttons
+    assert "Resume blocked request" not in buttons
+    # Expired sign-in is handled before an upload selection dialog opens.
+    control.confirm({}, {})
+    assert QApplication.activeModalWidget() is None
     control.update_authentication({})
-    assert control.session_button.isHidden()
-    assert control.recovery_button.isHidden()
+    assert control.auth_notice.isHidden()
+    assert control.authentication == {}
