@@ -1,5 +1,6 @@
 """Review and remove the open deployment after a fresh shared clearance check."""
 from html import escape
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
@@ -83,6 +84,12 @@ class CleanupPanel(QGroupBox):
         actions = QVBoxLayout(self.body)
         actions.setContentsMargins(18, 16, 18, 16)
         actions.setSpacing(12)
+        actions.setAlignment(Qt.AlignTop)
+        self.explanation = QLabel()
+        self.explanation.setTextFormat(Qt.RichText)
+        self.explanation.setWordWrap(True)
+        self.explanation.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        actions.addWidget(self.explanation)
         self.progress_label = QLabel()
         self.progress_label.setTextFormat(Qt.PlainText)
         self.progress_label.setWordWrap(True)
@@ -99,6 +106,15 @@ class CleanupPanel(QGroupBox):
         self.message.setWordWrap(True)
         self.message.setTextInteractionFlags(Qt.TextSelectableByMouse)
         actions.addWidget(self.message)
+        self.clear_guidance = QLabel(
+            "Hold to clear stays gray and unavailable until every required check passes. "
+            "Then press and hold it to clear this event. FDM repeats the checks before removal.\n\n"
+            "Clearing permanently removes this event’s local folder, including its original files and local metadata. "
+            "Box files, Wildlife Insights uploads, and the separate SoundHub staging folder remain in place."
+        )
+        self.clear_guidance.setWordWrap(True)
+        self.clear_guidance.setTextFormat(Qt.PlainText)
+        actions.addWidget(self.clear_guidance)
         self.check = QPushButton("Check")
         self.check.clicked.connect(self.preview)
         buttons = QHBoxLayout()
@@ -131,6 +147,30 @@ class CleanupPanel(QGroupBox):
             self.message.clear()
             self.status("Check required")
         self.setVisible(bool(folder))
+        if folder:
+            prefix, _, date = folder.name.rpartition("_")
+            try:
+                date = datetime.strptime(date, "%Y%m%d").strftime("%Y-%m-%d")
+                name = f"{prefix.replace('_', ' ')} {date}"
+            except ValueError:
+                name = folder.name.replace("_", " ")
+            purpose = f"Check that {name} can be safely removed from local staging."
+            self.check.setToolTip(purpose)
+            self.check.setAccessibleDescription(purpose)
+            self.explanation.setText(
+                f"<p><b>{escape(purpose)}</b></p>"
+                "<p>Check reviews this event without uploading or deleting files. It checks:</p>"
+                "<ol>"
+                "<li><b>Box:</b> All event files are uploaded, file lists and hashes match, and metadata publication is complete.</li>"
+                "<li><b>Wildlife Insights:</b> All eligible photos are uploaded and verified against this event’s original files.</li>"
+                "<li><b>SoundHub:</b> All eligible bird recordings are verified in the selected staging location, "
+                "or covered by verified submission receipts.</li>"
+                "<li><b>Local event:</b> The folder and inventory agree, required records are available, "
+                "and no active work prevents clearance.</li>"
+                "</ol>"
+                "<p>A check that does not apply to this event does not block clearance. "
+                "Missing evidence, failed checks, and checks that cannot finish keep clearance blocked.</p>"
+            )
 
     def preview(self):
         if self.worker:
