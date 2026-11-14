@@ -48,6 +48,7 @@ class ClearanceWorker(QThread):
 class CleanupPanel(QGroupBox):
     def __init__(self, window):
         super().__init__()
+        self.setProperty("role", "platformPanel")
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.window = window
         self.folder = self.plan = self.worker = None
@@ -68,6 +69,11 @@ class CleanupPanel(QGroupBox):
         self.state_label.setStyleSheet("color: #762b30;")
         heading.addWidget(self.state_label)
         self.toggle = QToolButton()
+        self.toggle.setObjectName("progressDisclosure")
+        self.toggle.setStyleSheet(
+            "QToolButton { padding: 5px; border: none; background: transparent; color: #762b30; }"
+            "QToolButton:hover, QToolButton:focus { background: #edcccc; }"
+        )
         self.toggle.setCheckable(True)
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.toggle.setAccessibleName("Expand or collapse Clear Local Staging")

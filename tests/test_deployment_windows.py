@@ -642,3 +642,21 @@ def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, 
     assert not event.exists()
     report, = (tmp_path / "profile/cleanup-reports").glob("*.json")
     assert json.loads(report.read_text())["outcome"] == "cleared"
+
+
+def test_collapsed_cleanup_header_fills_panel(manager):
+    from PySide6.QtWidgets import QFrame
+    from cassn.gui.appearance import workspace_stylesheet
+    w = manager.new_window(open_sessions=False)
+    from cassn.gui.cleanup_panel import CleanupPanel
+    panel = CleanupPanel(w)
+    panel.setStyleSheet(workspace_stylesheet(panel.palette(), 100))
+    panel.toggle.setChecked(False)
+    panel.show()
+    panel.resize(1000, panel.sizeHint().height())
+    QApplication.processEvents()
+    header = panel.findChild(QFrame)
+    assert header.x() <= 1
+    assert header.y() <= 1
+    assert panel.sizeHint().height() - header.sizeHint().height() <= 2
+    panel.close()
