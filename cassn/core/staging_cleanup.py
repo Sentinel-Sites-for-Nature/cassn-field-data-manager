@@ -675,7 +675,7 @@ def _inspect_event(plan, staging_root, progress):
             site_name=site_name,
             event_name=deployment.name,
         )
-        box_hashes = collect_box_file_hashes(storage, plan.box_folder_id)
+        box_hashes = collect_box_file_hashes(storage, plan.box_folder_id, progress=progress)
     except Exception as exc:
         plan.reasons.append(_report_reason(str(exc)))
         return plan
@@ -718,7 +718,9 @@ def _inspect_event(plan, staging_root, progress):
             f"{_path_examples(unexpected_box_raw)}"
         )
 
-    for relative, expected_hash in stored_hashes.items():
+    for index, (relative, expected_hash) in enumerate(stored_hashes.items(), 1):
+        if index % 100 == 0 or index == len(stored_hashes):
+            progress(f"Comparing Box hashes — {index:,} of {len(stored_hashes):,} files")
         box_hash = box_hashes.get(relative)
         if box_hash is None:
             continue
@@ -731,6 +733,7 @@ def _inspect_event(plan, staging_root, progress):
     # User documents and ordinary generated files must match current Box bytes.
     compare = expected_on_box - expected_raw - {"qc/qc_report.json"}
     for relative in sorted(compare):
+        progress(f"Checking published metadata — {relative}")
         box_hash = box_hashes.get(remote_path(relative))
         if box_hash is None:
             continue

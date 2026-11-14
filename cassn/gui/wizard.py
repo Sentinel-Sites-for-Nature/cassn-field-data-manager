@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHeaderView,
@@ -1434,6 +1435,11 @@ class FieldDataWizard(QMainWindow):
 
         if hasattr(self, "manager"):
             from cassn.gui.cleanup_panel import CleanupPanel
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setStyleSheet("background: #aeb8bf;")
+            separator.setFixedHeight(2)
+            layout.addWidget(separator)
             self.cleanup_panel = CleanupPanel(self)
             layout.addWidget(self.cleanup_panel)
             self.cleanup_panel.refresh()

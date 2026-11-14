@@ -36,6 +36,7 @@ def collect_box_file_hashes(
     folder_id: str,
     *,
     is_cancelled=None,
+    progress=None,
 ) -> dict[str, str]:
     """Return every file below ``folder_id`` as ``relative_path -> SHA-1``.
 
@@ -61,10 +62,14 @@ def collect_box_file_hashes(
                 )
                 relative_path = PurePosixPath(*prefix, item.name).as_posix()
                 hashes[relative_path] = str(digest).lower()
+                if progress and len(hashes) % 100 == 0:
+                    progress(f"Reading Box file list — {len(hashes):,} files found")
             elif item.type == "folder":
                 _walk(item.id, (*prefix, item.name))
 
     _walk(folder_id, ())
+    if progress:
+        progress(f"Box file list read — {len(hashes):,} files found")
     return hashes
 
 

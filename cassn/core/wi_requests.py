@@ -214,7 +214,7 @@ def camera_clearance(folder, expected):
         if not proof:
             raise ValueError(f"{name}: no verified Wildlife Insights request. Retain the event.")
         if not proof.get("originals_sha256"):
-            raise ValueError(f"{name}: refresh the saved request with the updated Wildlife Insights helper.")
+            raise ValueError(f"{name}: The upload was verified, but its saved record lacks the source-file hashes needed for safe removal. Keep the local files. The Wildlife Insights verification record needs an update before you run Check again.")
         if proof["image_count"] != len(pairs) or proof["originals_sha256"] != originals_digest(pairs):
             raise ValueError(f"{name}: the verified Wildlife Insights originals differ from the inventory.")
         results[name] = {"images": len(pairs), "receipt_sha256": proof["receipt_sha256"]}

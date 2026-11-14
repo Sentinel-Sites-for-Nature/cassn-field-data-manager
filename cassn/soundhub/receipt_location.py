@@ -96,7 +96,7 @@ def receipt_journals(staging_root, profile=None):
     if not target.exists():
         if (profile or PROFILE) != "csu" and any(p.exists() for p in
                 (target.parents[1] / "transfers", LEGACY_DRIVE_RECEIPTS, Path(staging_root).parent / "transfers")):
-            raise ReceiptHistoryUnavailable("SoundHub receipt migration is pending. Open FDM with the staging drive connected.")
+            raise ReceiptHistoryUnavailable("FDM found older SoundHub transfer records that it cannot yet use for this check. Connect the SoundHub staging drive and reopen FDM so it can move those records to its current record folder. Then run Check again.")
         return
     for attempt in sorted(target.iterdir()):
         if not attempt.name.startswith(".") and attempt.is_dir():

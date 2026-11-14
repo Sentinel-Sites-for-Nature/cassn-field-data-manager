@@ -1,6 +1,8 @@
 """Review and remove the open deployment after a fresh shared clearance check."""
+from html import escape
+
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtWidgets import QGroupBox, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from cassn.box.auth import get_box_client
 from cassn.box.client import BoxStorage
@@ -46,29 +48,62 @@ class ClearanceWorker(QThread):
 class CleanupPanel(QGroupBox):
     def __init__(self, window):
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.window = window
         self.folder = self.plan = self.worker = None
         self.applying = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QFrame()
+        header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        header.setStyleSheet("QFrame { background: #f6e2e2; border: none; border-radius: 8px; }")
+        heading = QHBoxLayout(header)
+        heading.setContentsMargins(18, 14, 18, 14)
+        title = QLabel("Clear Local Staging")
+        title.setStyleSheet("color: #762b30; font-size: 18px; font-weight: 700;")
+        heading.addWidget(title, 1)
+        self.state_label = QLabel()
+        self.state_label.setTextFormat(Qt.PlainText)
+        self.state_label.setStyleSheet("color: #762b30;")
+        heading.addWidget(self.state_label)
         self.toggle = QToolButton()
         self.toggle.setCheckable(True)
         self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        layout.addWidget(self.toggle)
+        self.toggle.setAccessibleName("Expand or collapse Clear Local Staging")
+        heading.addWidget(self.toggle)
+        layout.addWidget(header)
         self.body = QWidget()
         actions = QVBoxLayout(self.body)
+        actions.setContentsMargins(18, 16, 18, 16)
+        actions.setSpacing(12)
+        self.progress_label = QLabel()
+        self.progress_label.setTextFormat(Qt.PlainText)
+        self.progress_label.setWordWrap(True)
+        actions.addWidget(self.progress_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setTextVisible(False)
+        actions.addWidget(self.progress_bar)
+        self.progress_label.hide()
+        self.progress_bar.hide()
         self.message = QLabel()
-        self.message.setTextFormat(Qt.PlainText)
+        self.message.setTextFormat(Qt.RichText)
         self.message.setWordWrap(True)
         self.message.setTextInteractionFlags(Qt.TextSelectableByMouse)
         actions.addWidget(self.message)
         self.check = QPushButton("Check")
         self.check.clicked.connect(self.preview)
-        actions.addWidget(self.check, alignment=Qt.AlignLeft)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.check)
         self.hold = HoldToClear()
         self.hold.setAccessibleName("Hold to clear local staging")
         self.hold.setEnabled(False)
         self.hold.held.connect(self.apply)
-        actions.addWidget(self.hold, alignment=Qt.AlignLeft)
+        buttons.addWidget(self.hold)
+        buttons.addStretch()
+        actions.addLayout(buttons)
         layout.addWidget(self.body)
         self.body.hide()
         self.toggle.toggled.connect(self.body.setVisible)
@@ -77,7 +112,7 @@ class CleanupPanel(QGroupBox):
         self.status("Check required")
 
     def status(self, status):
-        self.toggle.setText(f"Clear local staging · {status}")
+        self.state_label.setText(status)
 
     def refresh(self):
         folder = self.window.current_deployment_folder
@@ -119,6 +154,10 @@ class CleanupPanel(QGroupBox):
         self.applying = apply
         self.hold.setEnabled(False)
         self.status("Checking")
+        self.toggle.setChecked(True)
+        self.message.clear()
+        self.progress_label.show()
+        self.progress_bar.show()
         if wi:
             wi.timer.stop()
         if apply:
@@ -128,13 +167,62 @@ class CleanupPanel(QGroupBox):
             self.check.setText("Cancel check")
         self.worker = ClearanceWorker(self.folder, w.staging_root, w.box_config, w.config_file,
                                       self.plan if apply else None, w._deployment_lease)
-        self.worker.stage.connect(self.message.setText)
+        self.worker.stage.connect(self.show_stage)
         self.worker.finished.connect(self.done)
         self.worker.start()
+
+    def show_stage(self, text):
+        self.progress_label.setText(text)
+        self.state_label.setText(text)
+        self.progress_bar.setAccessibleName(text)
+
+    def render_result(self):
+        plan = self.plan
+        parts = [f"<p><b>{escape(self.folder.name)}</b><br>"
+                 f"{plan.local_bytes / 1e9:,.2f} GB in local files</p>"]
+        shown = set()
+        for name, details in plan.checks.items():
+            state = details.get("status", "Not checked")
+            color, symbol = "#202b33", "—"
+            if state.lower() == "passed":
+                color, symbol = "#18715b", "✓"
+            elif state.lower() in ("blocked", "incomplete"):
+                color, symbol = "#ac2737", "✕"
+            parts.append(f'<p><b>{escape(name)}</b><br>'
+                         f'<span style="color:{color}">{symbol} {escape(state.capitalize())}</span>')
+            reason = details.get("reason")
+            if reason:
+                shown.update((reason, f"{name}: {reason}"))
+                parts.append(f"<br>{escape(reason)}")
+            for deployment, counts in details.get("deployments", {}).items():
+                if "expected" not in counts:
+                    continue
+                parts.append(f"<br><br><b>{escape(deployment)}</b><br>"
+                             f'{counts["expected"]} recordings expected · '
+                             f'{counts.get("submitted", 0)} confirmed submitted · '
+                             f'{counts.get("staged", 0)} verified in staging')
+                if counts.get("missing"):
+                    parts.append(f'<br>{counts["missing"]} recordings missing.')
+                if counts.get("unchecked"):
+                    parts.append(f'<br>{counts["unchecked"]} recordings could not be checked. '
+                                 'Their location and contents have not been verified.')
+            parts.append("</p>")
+        remaining = [reason for reason in plan.reasons if reason not in shown]
+        if remaining:
+            parts.append("<p><b>Before you can clear this event</b></p><ul>")
+            parts.extend(f"<li>{escape(reason)}</li>" for reason in remaining)
+            parts.append("</ul>")
+        if plan.warnings:
+            parts.append("<p><b>Other findings</b></p><ul>")
+            parts.extend(f"<li>{escape(warning)}</li>" for warning in plan.warnings)
+            parts.append("</ul>")
+        self.message.setText("".join(parts))
 
     def done(self):
         worker = self.worker
         self.worker = None
+        self.progress_label.hide()
+        self.progress_bar.hide()
         worker.deleteLater()
         self.window.setEnabled(True)
         self.applying = False
@@ -148,7 +236,7 @@ class CleanupPanel(QGroupBox):
         if worker.error or worker.isInterruptionRequested():
             self.plan = None
             self.status("Check required")
-            self.message.setText(worker.error or "Check cancelled.")
+            self.message.setText(escape(worker.error or "Check cancelled."))
         elif worker.preview:
             self.window.current_deployment_folder = None
             next_window = self.window.manager.new_window(open_sessions=True)
@@ -157,6 +245,5 @@ class CleanupPanel(QGroupBox):
         else:
             self.plan = worker.result
             self.status("Ready to clear" if self.plan.clearable else "Keep local files")
-            self.message.setText("\n".join([str(self.folder), f"{self.plan.local_bytes / 1e9:,.2f} GB in local files",
-                *self.plan.summary_lines(), *self.plan.reasons, *self.plan.warnings]))
+            self.render_result()
             self.hold.setEnabled(self.plan.clearable)
