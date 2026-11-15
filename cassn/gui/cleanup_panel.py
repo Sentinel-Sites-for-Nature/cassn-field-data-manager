@@ -90,6 +90,9 @@ class CleanupPanel(QGroupBox):
         self.explanation.setWordWrap(True)
         self.explanation.setTextInteractionFlags(Qt.TextSelectableByMouse)
         actions.addWidget(self.explanation)
+        self.check = QPushButton("Click here to check")
+        self.check.clicked.connect(self.preview)
+        actions.addWidget(self.check, 0, Qt.AlignLeft)
         self.progress_label = QLabel()
         self.progress_label.setTextFormat(Qt.PlainText)
         self.progress_label.setWordWrap(True)
@@ -107,19 +110,20 @@ class CleanupPanel(QGroupBox):
         self.message.setTextInteractionFlags(Qt.TextSelectableByMouse)
         actions.addWidget(self.message)
         self.clear_guidance = QLabel(
-            "Hold to clear stays gray and unavailable until every required check passes. "
-            "Then press and hold it to clear this event. FDM repeats the checks before removal.\n\n"
+            "Once every required check passes, press and hold the button to clear this event.\n\n"
             "Clearing permanently removes this event’s local folder, including its original files and local metadata. "
             "Box files, Wildlife Insights uploads, and the separate SoundHub staging folder remain in place."
         )
         self.clear_guidance.setWordWrap(True)
         self.clear_guidance.setTextFormat(Qt.PlainText)
         actions.addWidget(self.clear_guidance)
-        self.check = QPushButton("Check")
-        self.check.clicked.connect(self.preview)
         buttons = QHBoxLayout()
-        buttons.addWidget(self.check)
         self.hold = HoldToClear()
+        self.hold.setStyleSheet(
+            "QPushButton { background: #ac2737; color: white; border: 1px solid #ac2737; }"
+            "QPushButton:hover { background: #922130; }"
+            "QPushButton:disabled { background: #f6e2e2; color: #95666b; border: 1px solid #edcccc; }"
+        )
         self.hold.setAccessibleName("Hold to clear local staging")
         self.hold.setEnabled(False)
         self.hold.held.connect(self.apply)
@@ -272,7 +276,7 @@ class CleanupPanel(QGroupBox):
         worker.deleteLater()
         self.window.setEnabled(True)
         self.applying = False
-        self.check.setText("Check")
+        self.check.setText("Click here to check")
         wi = getattr(self.window, "wi_control", None)
         if wi:
             wi.render()

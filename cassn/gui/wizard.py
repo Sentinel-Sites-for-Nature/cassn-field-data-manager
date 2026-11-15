@@ -3490,6 +3490,9 @@ class FieldDataWizard(QMainWindow):
 
     def _show_saved_box_result(self, verified):
         self.box_upload_complete = verified
+        folder = self.current_deployment_folder
+        started = bool(folder and ((folder / STATE_PATH).is_file() or has_box_upload_history(folder)))
+        self.box_panel_button.setText("Continue Box Upload" if started or verified else "Upload to Box")
         if verified:
             self.upload_group.show_progress(1, 1, "Event files verified against Box", complete=True)
         else:
@@ -3564,7 +3567,7 @@ class FieldDataWizard(QMainWindow):
                     "Ready to continue with the new cards.")
                 self.upload_status_label.setToolTip("The previous version stopped before sending new files. " + reason)
             else:
-                self.upload_status_label.setText(f"{reason}\nChoose Upload to Box when ready to retry.")
+                self.upload_status_label.setText(f"{reason}\nChoose Continue Box Upload when ready to retry.")
             return True
         return False
 
@@ -3885,6 +3888,7 @@ class FieldDataWizard(QMainWindow):
 
     def _start_box_upload_thread(self):
         """Launch the existing uploader after preparation has cleared its gate."""
+        self.box_panel_button.setText("Continue Box Upload")
         self._box_operation_active = True
         self._update_copy_action()
         try:
@@ -4319,7 +4323,7 @@ class FieldDataWizard(QMainWindow):
             self.upload_group.hide_progress()
             FieldDataWizard._set_box_controls_busy(self, False)
             self._show_saved_box_result(False)
-            self.upload_status_label.setText("Box could not save the verification receipt. Select Upload to Box to retry.")
+            self.upload_status_label.setText("Box could not save the verification receipt. Select Continue Box Upload to retry.")
             self.upload_metrics_label.setText(message)
             set_platform_status(self.upload_status_label, "error")
             self.log(f"Box verification receipt: {message}")
