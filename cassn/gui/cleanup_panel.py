@@ -231,21 +231,31 @@ class CleanupPanel(QGroupBox):
         parts = [f"<p><b>{escape(self.folder.name)}</b><br>"
                  f"{plan.local_bytes / 1e9:,.2f} GB in local files</p>"]
         shown = set()
-        for name, details in plan.checks.items():
+        confirmations = {
+            "Box": "All event files are uploaded and verified. File lists and hashes match, and metadata publication is complete.",
+            "Wildlife Insights": "All eligible photos are uploaded and verified against this event’s original files.",
+            "SoundHub": "All eligible bird recordings are verified in the selected staging location or covered by verified submission receipts.",
+            "Local staging": "The folder and inventory agree. Required local records are available.",
+        }
+        for name, confirmation in confirmations.items():
+            details = plan.checks.get(name, {})
             state = details.get("status", "Not checked")
             color, symbol = "#202b33", "—"
+            description = state.capitalize()
             if state.lower() == "passed":
                 color, symbol = "#18715b", "✓"
+                description = confirmation
             elif state.lower() in ("blocked", "incomplete"):
                 color, symbol = "#ac2737", "✕"
             parts.append(f'<p><b>{escape(name)}</b><br>'
-                         f'<span style="color:{color}">{symbol} {escape(state.capitalize())}</span>')
+                         f'<span style="color:{color}">{symbol} {escape(description)}</span>')
             reason = details.get("reason")
             if reason:
                 shown.update((reason, f"{name}: {reason}"))
                 parts.append(f"<br>{escape(reason)}")
             for deployment, counts in details.get("deployments", {}).items():
-                if "expected" not in counts:
+                if (state.lower() == "passed" or "expected" not in counts
+                        or not (counts.get("missing") or counts.get("unchecked"))):
                     continue
                 parts.append(f"<br><br><b>{escape(deployment)}</b><br>"
                              f'{counts["expected"]} recordings expected · '
