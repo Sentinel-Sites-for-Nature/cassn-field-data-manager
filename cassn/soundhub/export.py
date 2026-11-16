@@ -401,7 +401,16 @@ def event_staging_summary(event_folder, staging_root) -> EventStagingSummary:
     event_deployments = _read_csv(Path(event_folder) / "soundhub" / DEPLOYMENT_CSV)
     staged_deployments = [r for r in _read_csv(root / DEPLOYMENT_CSV) if r["deployment_id"] in ids]
     by_path = {r["path"]: r for r in staged}
-    matching_ids = {r["deployment_id"] for r in event_deployments if r in staged_deployments}
+    expected_by_path = {r["path"]: r for r in expected}
+    matching_ids = set()
+    for ident in ids:
+        local = [r for r in event_deployments if r["deployment_id"] == ident]
+        cumulative = [r for r in staged_deployments if r["deployment_id"] == ident]
+        recordings = [r for r in staged if r["deployment_id"] == ident]
+        if (len(local) == 1 and local == cumulative
+                and len({r["path"] for r in recordings}) == len(recordings)
+                and all(r == expected_by_path.get(r["path"]) for r in recordings)):
+            matching_ids.add(ident)
     matched = set()
     ready = 0
     for row in expected:
@@ -493,12 +502,24 @@ def _parse_time(value: str, *, path: Path, row_number: int, field: str) -> None:
     )
 
 
-def validate_staging_manifests(staging_root) -> dict:
+def _recording_sidecar(path: Path, recording_keys: set[tuple[str, str]]) -> bool:
+    # macOS stores Finder metadata beside each recording on some removable disks.
+    if not path.name.startswith("._") or (path.parent.name, path.name[2:]) not in recording_keys:
+        return False
+    with path.open("rb") as stream:
+        return stream.read(8) == bytes.fromhex("00051607 00020000")  # AppleDouble v2
+
+
+def validate_staging_manifests(staging_root, *, deployment_ids=None) -> dict:
     """Prove cumulative manifests are complete and exactly match fragments."""
     staging_root = Path(staging_root).expanduser().resolve()
     fragments = fragments_root(staging_root)
     fragment_dirs = sorted(path for path in fragments.glob("*")
                            if path.is_dir() and not path.name.startswith("."))
+    if deployment_ids is not None:
+        fragment_dirs = [path for path in fragment_dirs if path.name in deployment_ids]
+        if {path.name for path in fragment_dirs} != set(deployment_ids):
+            raise SoundHubStagingError("Missing SoundHub fragment for a selected deployment")
     if not fragment_dirs:
         raise SoundHubStagingError(f"No SoundHub deployment fragments found in {fragments}")
 
@@ -532,6 +553,10 @@ def validate_staging_manifests(staging_root) -> dict:
     root = project_root(staging_root)
     deployments = _require_header(root / DEPLOYMENT_CSV, SOUNDHUB_DEPLOYMENT_FIELDS)
     recordings = _require_header(root / RECORDING_CSV, SOUNDHUB_RECORDING_FIELDS)
+    if deployment_ids is not None:
+        deployments = [row for row in deployments if row["deployment_id"] in deployment_ids]
+        recordings = [row for row in recordings if row["deployment_id"] in deployment_ids
+                      or str(row["path"]).split("/")[0] in deployment_ids]
     if deployments != expected_deployments:
         raise SoundHubStagingError(
             f"{root / DEPLOYMENT_CSV}: cumulative rows differ from deployment fragments; "
@@ -543,14 +568,14 @@ def validate_staging_manifests(staging_root) -> dict:
             "restage or rebuild the batch"
         )
 
-    deployment_ids: set[str] = set()
+    known_deployments: set[str] = set()
     for number, row in enumerate(deployments, start=2):
         deployment_id = str(row.get("deployment_id") or "").strip()
-        if deployment_id in deployment_ids:
+        if deployment_id in known_deployments:
             raise SoundHubStagingError(
                 f"{root / DEPLOYMENT_CSV}: duplicate deployment_id {deployment_id!r}"
             )
-        deployment_ids.add(deployment_id)
+        known_deployments.add(deployment_id)
         missing = [
             field for field in REQUIRED_DEPLOYMENT_FIELDS
             if not str(row.get(field) or "").strip()
@@ -594,7 +619,7 @@ def validate_staging_manifests(staging_root) -> dict:
                 f"{root / RECORDING_CSV} row {number}: blank or duplicate recording key"
             )
         recording_keys.add(key)
-        if key[0] not in deployment_ids:
+        if key[0] not in known_deployments:
             raise SoundHubStagingError(
                 f"{root / RECORDING_CSV} row {number}: deployment_id is absent from "
                 "deployment.csv"
@@ -631,11 +656,11 @@ def validate_staging_manifests(staging_root) -> dict:
                 f"{root / RECORDING_CSV} row {number}: staged FLAC is missing: {media}"
             )
 
-    # Hidden names include the ._ files macOS writes on ExFAT drives.
     actual_media = {
         (path.parent.name, path.name)
         for path in root.glob("*/*.flac")
-        if path.is_file() and not path.name.startswith(".")
+        if (deployment_ids is None or path.parent.name in deployment_ids)
+        and path.is_file() and not _recording_sidecar(path, recording_keys)
     }
     if actual_media != recording_keys:
         extra = sorted(actual_media - recording_keys)

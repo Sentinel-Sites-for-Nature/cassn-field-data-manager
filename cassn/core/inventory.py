@@ -483,9 +483,20 @@ def refresh_legacy_device_manifest(
     if not manifest_path.exists():
         return False
 
-    manifest = {
+    manifest = legacy_device_manifest(device_label, entries, datetime.now().isoformat())
+    try:
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+        return True
+    except Exception as exc:
+        print(f"Warning: could not refresh legacy manifest for {device_label}: {exc}")
+        return False
+
+
+def legacy_device_manifest(device_label, entries, generated):
+    return {
         "device_label": device_label,
-        "generated": datetime.now().isoformat(),
+        "generated": generated,
         "file_count": len(entries),
         "files": [
             {
@@ -497,13 +508,6 @@ def refresh_legacy_device_manifest(
             for e in entries
         ],
     }
-    try:
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-        return True
-    except Exception as exc:
-        print(f"Warning: could not refresh legacy manifest for {device_label}: {exc}")
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -586,12 +590,20 @@ def generate_session_summary(
     devices: list,
 ) -> Path:
     """Write ``deployment_summary.txt`` (a human-readable digest) and return its path."""
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+    text = session_summary_text(deployment_folder, metadata, file_inventory, devices, generated_at)
+    summary_path = qc_path_for(deployment_folder, "deployment_summary.txt")
+    summary_path.write_text(text, encoding="utf-8")
+    return summary_path
+
+
+def session_summary_text(deployment_folder, metadata, file_inventory, devices, generated_at):
     metadata = normalize_deployment_event_metadata(metadata)
     lines = []
     lines.append("=" * 60)
     lines.append("CA-SSN DEPLOYMENT SUMMARY")
     lines.append("=" * 60)
-    lines.append(f"Generated:        {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"Generated:        {generated_at}")
     lines.append(f"Site name:        {metadata.get('site_name', '?')}")
     lines.append(f"Site short name:  {metadata.get('site_short_name', '?')}")
     lines.append(f"Site code:        {metadata.get('site_code', '?')}")
@@ -664,10 +676,7 @@ def generate_session_summary(
     lines.append("")
     lines.append("=" * 60)
 
-    summary_path = qc_path_for(deployment_folder, "deployment_summary.txt")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    return summary_path
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
-from PySide6.QtCore import QIODevice, QLockFile, QSaveFile, QTimer, Qt, Signal
+from PySide6.QtCore import QIODevice, QSaveFile, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
+from cassn.core.event_lock import ResourceBusy, ResourceLease, deployment_keys
 from cassn.config import CONFIG_JSON, LOCK_DIR, APP_TITLE
 from cassn.profile import HOSTED
 from cassn.gui.wizard import FieldDataWizard
@@ -20,43 +20,13 @@ from cassn.gui.dialogs import WindowMessageBox as QMessageBox
 from cassn.lookups import normalize_deployment_event_metadata
 
 
-class ResourceBusy(RuntimeError):
-    pass
-
-
-class ResourceLease:
-    """Crash-recoverable locks outside deployment folders, also honored by other processes."""
-
-    def __init__(self, directory: Path, keys):
-        self.keys = tuple(sorted(set(keys)))
-        self._locks = []
-        directory.mkdir(parents=True, exist_ok=True)
-        try:
-            for key in self.keys:
-                name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".lock"
-                lock = QLockFile(str(directory / name))
-                # A long upload is not stale. Qt can still recover dead-process locks.
-                lock.setStaleLockTime(0)
-                if not lock.tryLock(0):
-                    if lock.error() != QLockFile.LockFailedError:
-                        raise OSError(f"Cannot create an application lock in {directory}")
-                    raise ResourceBusy(key)
-                self._locks.append(lock)
-        except Exception:
-            self.release()
-            raise
-
-    def release(self):
-        for lock in reversed(self._locks):
-            lock.unlock()
-        self._locks.clear()
-
-
-def deployment_keys(folder: Path, event_id: str, box_root: str | None):
-    return (
-        "deployment-path:" + os.path.normcase(str(folder.resolve())),
-        f"deployment-event:{box_root or 'default'}:{event_id}",
-    )
+@dataclass(frozen=True)
+class QueuedStage:
+    folder: Path
+    root: Path
+    deployments: frozenset[str]
+    volume_anchor: Path
+    device: int
 
 
 def _guard_callback(handler):
@@ -80,6 +50,7 @@ class DeploymentWindows:
         self.box_config = box_config
         self.lock_directory = Path(lock_directory or (LOCK_DIR if HOSTED else CONFIG_JSON.parent / "window-locks"))
         self.windows = []
+        self.staging_queue = {}  # Window -> request, in confirmation order.
         self.box_authenticated = None
 
     def new_window(self, *, open_sessions=True):
@@ -131,6 +102,7 @@ class DeploymentWindow(FieldDataWizard):
         self._staging_pending = False
         self._staging_lease = None
         self._closed = False
+        self._cleared_event = None
         self._callback_depth = 0
         self._pending_box_reconnect = None
         self._initializing = True
@@ -156,6 +128,9 @@ class DeploymentWindow(FieldDataWizard):
         self._lease_timer.setInterval(250)
         self._lease_timer.timeout.connect(self._release_idle_cloud)
         self._lease_timer.start()
+        self._queue_timer = QTimer(self)
+        self._queue_timer.setInterval(1500)
+        self._queue_timer.timeout.connect(self._try_queued_stage)
 
     def check_box_auth(self):
         # New windows reuse the initial connection result instead of touching
@@ -195,6 +170,9 @@ class DeploymentWindow(FieldDataWizard):
             self.offer_resume_session(sessions)
 
     def _refresh_workspace_context(self, *_args):
+        if self._cleared_event:
+            self.setWindowTitle(f"{self._cleared_event.name} — Local staging cleared — {APP_TITLE}")
+            return
         super()._refresh_workspace_context()
         event = self.metadata.get("deployment_event_id") if self.current_deployment_folder else None
         self.setWindowTitle(f"{event or 'New deployment'} — {APP_TITLE}")
@@ -207,7 +185,7 @@ class DeploymentWindow(FieldDataWizard):
         super()._navigate_workspace(index)
 
     def validate_and_next_collection(self):
-        if self._cloud_lease or self._staging_lease or self._starting_cloud or self._soundhub_pending:
+        if self in self.manager.staging_queue or self._cloud_lease or self._staging_lease or self._starting_cloud or self._soundhub_pending:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s cloud operation to finish before regenerating deployment files.")
             return
         super().validate_and_next_collection()
@@ -266,6 +244,60 @@ class DeploymentWindow(FieldDataWizard):
             self._deployment_lease.release()
             self._deployment_lease = None
 
+    def show_cleared_event(self, folder, report_path):
+        """Keep a completed window visible without retaining a writable session."""
+        self._cleared_event = folder
+        self.clearance_report_path = report_path
+        self.current_deployment_folder = None
+        self._release_deployment()
+        self._release_idle_cloud()
+        for name in ("_session_picker_timer", "_card_ejection_timer", "_queue_timer", "_hosted_timer", "_lease_timer"):
+            timer = getattr(self, name, None)
+            if timer:
+                timer.stop()
+        if getattr(self, "wi_control", None):
+            self.wi_control.close()
+
+        # Retain the old widgets for normal close handling, but remove every
+        # route back to editing or saving the deleted event.
+        workspace = self.takeCentralWidget()
+        workspace.setEnabled(False)
+        pages = QStackedWidget(self)
+        pages.addWidget(workspace)
+        confirmation = QWidget()
+        layout = QVBoxLayout(confirmation)
+        layout.setContentsMargins(36, 32, 36, 32)
+        layout.setSpacing(18)
+        heading = QLabel("✓ Local staging is cleared.")
+        heading.setStyleSheet("color: #18715b; font-size: 24px; font-weight: 700;")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        self.clearance_confirmation = QLabel(
+            f"All files in {folder.name}’s local staging folder were deleted.\n\n"
+            "Box files, Wildlife Insights uploads, and the separate SoundHub staging folder remain in place.\n\n"
+            "You can now quit the app."
+        )
+        self.clearance_confirmation.setTextFormat(Qt.PlainText)
+        self.clearance_confirmation.setWordWrap(True)
+        self.clearance_confirmation.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.clearance_confirmation)
+        self.clearance_quit_btn = QPushButton("Quit app")
+        self.clearance_quit_btn.clicked.connect(self.manager.close_all)
+        layout.addWidget(self.clearance_quit_btn, 0, Qt.AlignLeft)
+        layout.addStretch()
+        pages.addWidget(confirmation)
+        self.setCentralWidget(pages)
+        pages.setCurrentWidget(confirmation)
+        for action in self.file_menu.actions():
+            if action not in (self.exit_btn, self.new_window_action) and action.menuRole() != QAction.QuitRole:
+                action.setEnabled(False)
+        for action in self.menuBar().actions():
+            if action.menu() and action.menu() is not self.file_menu:
+                action.setEnabled(False)
+        self.statusBar().clearMessage()
+        self._refresh_workspace_context()
+        self.clearance_quit_btn.setFocus()
+
     def open_different_deployment(self):
         self.manager.new_window(open_sessions=True)
 
@@ -305,7 +337,7 @@ class DeploymentWindow(FieldDataWizard):
         return reserve
 
     def copy_sd_card_data(self):
-        if self._cloud_lease or self._staging_lease:
+        if self._cloud_lease or self._staging_lease or self in self.manager.staging_queue:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s cloud operation to finish before copying cards.")
             return
         try:
@@ -335,9 +367,10 @@ class DeploymentWindow(FieldDataWizard):
 
     def _work_running(self):
         return bool(
-            self.card_ingest_threads or self._retiring_card_threads or self._card_disk_threads
+            getattr(getattr(self, "cleanup_panel", None), "worker", None)
+            or self.card_ingest_threads or self._retiring_card_threads or self._card_disk_threads
             or self._box_operation_active or self._soundhub_pending or self._starting_cloud
-            or self._staging_pending
+            or self._staging_pending or self in self.manager.staging_queue
             or self._workers_running() or self._callback_depth
         )
 
@@ -382,6 +415,9 @@ class DeploymentWindow(FieldDataWizard):
         return f"soundhub-batch:{self._soundhub_staging_root().resolve()}"
 
     def _run_cloud_operation(self, handler, *, soundhub=False, soundhub_batch=False):
+        if (soundhub or soundhub_batch) and self in self.manager.staging_queue:
+            QMessageBox.information(self, "Staging Queued", "Finish or cancel queued staging before using this SoundHub batch.")
+            return
         if self._cloud_work_running() or self._cloud_lease:
             QMessageBox.information(self, "Operation Running", "Wait for this window’s active jobs to finish before starting another cloud operation.")
             return
@@ -430,18 +466,100 @@ class DeploymentWindow(FieldDataWizard):
         self._run_cloud_operation(super().run_fixity_check)
 
     def stage_for_soundhub(self):
-        self._run_staging_operation(super().stage_for_soundhub)
+        if self in self.manager.staging_queue:
+            return
 
-    def _run_staging_operation(self, handler):
-        if self._staging_pending or self._soundhub_pending or self._soundhub_busy() or self.card_ingest_threads or self._retiring_card_threads:
-            QMessageBox.information(self, "Operation Running", "Wait for card ingest or the current SoundHub operation to finish before staging.")
+        def offer_queue():
+            super(DeploymentWindow, self).stage_for_soundhub(queue_selection=self._queue_stage)
+
+        self._run_staging_operation(super().stage_for_soundhub, on_busy=offer_queue)
+
+    def _refresh_soundhub_resume(self, *, staging_finished=False):
+        if self in self.manager.staging_queue:
+            return
+        super()._refresh_soundhub_resume(staging_finished=staging_finished)
+
+    def _queue_stage(self, root, selected):
+        root = root.resolve()
+        try:
+            anchor = next(path for path in (root, *root.parents) if path.exists())
+            device = anchor.stat().st_dev
+        except OSError as exc:
+            QMessageBox.warning(self, "Staging drive unavailable", str(exc))
+            return
+        if root.is_relative_to("/Volumes") and len(anchor.parts) < 3:
+            QMessageBox.warning(self, "Staging drive unavailable", f"Reconnect the drive for {root}.")
+            return
+        self.manager.staging_queue[self] = QueuedStage(
+            self.current_deployment_folder, root, frozenset(selected), anchor, device)
+        self._set_soundhub_actions_enabled(False)
+        self.soundhub_stage_btn.setText("Queued…")
+        self.soundhub_group.disclosure.setChecked(True)
+        self.soundhub_status_label.setText(
+            "Queued — waiting for another operation to finish with this SoundHub staging folder. "
+            f"Staging will start automatically: {', '.join(sorted(selected))}")
+        self.soundhub_group.show_progress(0, 0, "Queued for SoundHub staging")
+        self.cancel_soundhub_btn.setText("Cancel queued staging")
+        self.cancel_soundhub_btn.setEnabled(True)
+        self.cancel_soundhub_btn.show()
+        self._queue_timer.start()
+
+    def cancel_soundhub(self):
+        if self not in self.manager.staging_queue:
+            return super().cancel_soundhub()
+        self._remove_queued_stage()
+        self.soundhub_status_label.setText("Queued staging cancelled.")
+
+    def _remove_queued_stage(self):
+        del self.manager.staging_queue[self]
+        self._queue_timer.stop()
+        self.soundhub_group.hide_progress()
+        self.cancel_soundhub_btn.hide()
+        self._set_soundhub_actions_enabled(True)
+
+    def _try_queued_stage(self):
+        queue = self.manager.staging_queue
+        request = queue.get(self)
+        if request is None:
+            return
+        first = next(window for window, job in queue.items() if job.root == request.root)
+        if first is not self:
             return
         try:
+            if (request.folder != self.current_deployment_folder or not request.folder.is_dir()
+                    or request.root != self._soundhub_staging_root().resolve()
+                    or request.volume_anchor.stat().st_dev != request.device):
+                raise ValueError("The event folder or staging drive changed.")
+        except (OSError, ValueError) as exc:
+            self._remove_queued_stage()
+            self.soundhub_status_label.setText(f"Queued staging stopped: {exc}")
+            return
+
+        def start():
+            self._remove_queued_stage()
+            self._start_soundhub_stage(request.root, request.deployments)
+
+        self._run_staging_operation(start, queued=True)
+
+    def _run_staging_operation(self, handler, *, on_busy=None, queued=False):
+        if self._staging_pending or self._soundhub_pending or self._soundhub_busy() or self.card_ingest_threads or self._retiring_card_threads:
+            if not queued:
+                QMessageBox.information(self, "Operation Running", "Wait for card ingest or the current SoundHub operation to finish before staging.")
+            return
+        try:
+            if on_busy and any(job.root == self._soundhub_staging_root().resolve() for job in self.manager.staging_queue.values()):
+                on_busy()
+                return
             self._staging_lease = ResourceLease(self.manager.lock_directory, [self._soundhub_batch_key()])
         except ResourceBusy:
-            QMessageBox.information(self, "SoundHub Batch in Use", "Another operation is staging or submitting this SoundHub batch. Wait for it to finish.")
+            if on_busy:
+                on_busy()
+            elif not queued:
+                QMessageBox.information(self, "SoundHub Batch in Use", "Another operation is staging or submitting this SoundHub batch.")
             return
         except OSError as exc:
+            if queued:
+                self._remove_queued_stage()
             QMessageBox.warning(self, "Cannot Reserve SoundHub Staging", str(exc))
             return
         prior = self.soundhub_stage_thread
@@ -451,6 +569,7 @@ class DeploymentWindow(FieldDataWizard):
         except Exception as exc:
             if self.soundhub_stage_thread is None or not self.soundhub_stage_thread.isRunning():
                 self._staging_pending = False
+                self.soundhub_group.hide_progress()
                 self._set_soundhub_actions_enabled(True)
                 self.cancel_soundhub_btn.hide()
             QMessageBox.critical(self, "SoundHub Staging Could Not Start", str(exc))

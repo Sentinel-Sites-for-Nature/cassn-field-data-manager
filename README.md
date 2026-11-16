@@ -300,6 +300,8 @@ be brought forward through the Python icon in the Dock or Mission Control.
 - At ingest completion, oversized camera folders are already prepared in Wildlife Insights batches of at most 15,000 images
 - In **Upload and Stage Data**, use the platform panels to start Box upload, local SoundHub staging, or Wildlife Insights camera selection when configured.
 - Expand the Box panel for manual file-list and hash checks. Box runs both checks after upload.
+- Open **Clear local staging** and select **Check** to review the event, folder, size, and blocking files.
+- After the checks pass, use **Hold to clear** to remove that event from this computer.
 - Use **File** to open a saved event or start a new one.
 
 Later uploads to the same Box event preserve accumulated metadata from earlier
@@ -575,6 +577,13 @@ changed rows in each project CSV, and totals for the entire batch. **Open Stagin
 After cancellation or failure, reopen the event and choose
 **Stage Bird Audio** in the panel. The app shows completed and remaining recording counts.
 It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
+After each verified conversion, the app saves the recording's size and SHA-256 checksum in `.cassn_work/.checksums/`.
+On restart, it reads every byte and compares the checksum with that saved value.
+A matching checksum replaces the separate FLAC decoding check; file size and modification time alone never permit reuse.
+A mismatch stops staging and preserves the saved checksum.
+Older recordings, missing checksums, and incomplete checksum records require a full FLAC decoding check before saving a checksum.
+Checksum records stay outside the upload folder and use an atomic write with a filesystem flush.
+Recovery also checks recordings after an interruption during folder moves or CSV updates.
 Staging checks available disk space before conversion, including space for temporary files.
 If disk space runs out, free space and continue the same event.
 The app moves each completed recorder folder with one rename.
@@ -627,9 +636,12 @@ checked against Box's returned checksum and size. No raw Box media is enumerated
 or downloaded. `--box-year-root DIR` explicitly selects the legacy local Drive
 workflow for maintenance or tests; it is not needed for normal submissions.
 
-Every live transfer attempt also gets a dated local archive beside the staging
-root: `~/cassn/soundhub/transfers/<UTC timestamp>_<attempt ID>/` with the default
-configuration. It keeps exact copies of `deployment.csv` and `recording.csv`,
+Each live transfer attempt gets a dated archive in the profile's fixed Mac folder.
+UC and the original app use `~/cassn/soundhub/uc/transfers/`. CSU has its own folder.
+On the first UC migration, FDM compares `~/cassn/soundhub/transfers` with `/Volumes/Expansion/transfers`.
+FDM copies matching records from the Mac archive and reports any differences for review.
+The upload history and repeated-upload check use the fixed folder when the staging drive changes.
+Each attempt keeps exact copies of `deployment.csv` and `recording.csv`,
 the AWS CLI's `upload.log`, and an atomically updated `transfer.json` containing
 the planned objects, counts, manifest hashes, destination, phase, verification
 result, and any error. Successful runs also save `submission_report.md` there.
@@ -1015,6 +1027,7 @@ the card and local copy. Cancellation is checked during these verification reads
 - **Session compatibility.** Unsupported session versions remain visible in Open Deployment with an explanation; FDM does not open or overwrite them. Interrupted temporary files are preserved unless created and owned by the current copy attempt. Plain filename counters recover all emitted widths, including values above 99,999.
 - **Resume WI preparation.** Each image move is atomic. If preparation is cancelled, completed moves remain in place and their exact nested paths are saved in `session.json`; retrying the card ingest finishes the remaining moves. After a crash, actual image locations are recovered before copying resumes. Older sessions can also resume preparation through the first-upload fallback. Ingest completion and Box upload require successful preparation and saved inventory paths.
 - **Box upload retry.** Each file gets up to 3 upload attempts before being recorded as a per-file failure. Single-file failures no longer abort the whole batch — re-running the upload skips already-uploaded files and retries only the failures.
+- **Publication recovery records and clearance.** FDM records each metadata draft's name, size, and SHA-256 before writing it. Cancelled publication drafts do not require a successful upload receipt to establish their identity. Changed or unknown drafts still block clearance. Older drafts qualify only through exact reconstruction from retained first-publication inputs or a matching verified publication of the same metadata path to the same event folder. This does not mark a cancelled attempt successful. Before approved removal, FDM copies recognized publication records to a verified archive beside the cleanup report, outside the event. Archive failure prevents removal. A local blocker leaves the remaining checks marked **Not checked**, with the reason shown.
 - **Filename collision safety.** File reconciliation and fixity checks key by the complete deployment-relative storage path, not filename alone. This distinguishes both devices and numbered WI split folders. CONFIG sidecars include `plotN` in their filename (`UC_QuailRidge_plot1_BD_<DATE>_CONFIG_01.txt`) so each plot's config is uniquely identifiable.
 - **Migration of legacy reports.** When a `qc_report.json` from before the `current_state`/`history` schema is opened, it's migrated automatically — old entries become `history`, and `current_state` is computed fresh.
 

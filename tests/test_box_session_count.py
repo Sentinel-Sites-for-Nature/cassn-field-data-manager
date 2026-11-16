@@ -68,12 +68,20 @@ def test_reopen_counts_partial_upload_without_publishing_or_verifying(monkeypatc
         pending[1].signals.result.emit(pending[1], None, "Could not read the event folder on Box.")
         app.processEvents()
         assert window.upload_progress_bar.isHidden()
+        assert window.upload_group.activity.isHidden()
         assert not window.box_count_retry.isHidden()
         window.box_count_retry.click()
         pending[2].signals.result.emit(pending[2], present, "")
         app.processEvents()
         assert window.upload_progress_bar.text() == "2 of 3 event files on Box · 66%"
         assert window.box_history_label.text() == window.upload_progress_bar.text()
+        assert not window.upload_group.activity.isHidden()
+        assert window.upload_group.activity_percent.text() == "66%"
+        assert window.upload_group.activity_check.isHidden()
+        for expanded in (True, False):
+            window.upload_group.disclosure.setChecked(expanded)
+            assert not window.upload_group.activity.isHidden()
+            assert window.upload_group.activity_percent.text() == "66%"
         assert not window.box_upload_complete
         assert EventProgress.from_box_paths(inventory, window._box_present_paths).remaining == {"raw_data/p1_ML/next.jpg"}
         assert not (second / "qc/box_upload_verification.json").exists()
@@ -82,16 +90,25 @@ def test_reopen_counts_partial_upload_without_publishing_or_verifying(monkeypatc
             "hash_verification": {"summary": "3 hashes matched"},
         }))
         window._box_present_paths = present | {"raw_data/p1_ML/next.jpg"}
+        window._show_saved_box_result(False)
+        assert window.upload_group.activity_percent.text() == "100%"
+        assert window.upload_group.activity_check.isHidden()
+        assert not window.box_upload_complete
         window._show_saved_box_result(True)
+        assert window.upload_group.activity_percent.text() == "100%"
+        assert not window.upload_group.activity_check.isHidden()
         assert window.upload_metrics_label.text() == "• Files checked: 3\n• Box file list: Passed\n• File hashes: Passed"
         assert window.upload_metrics_label.toolTip() == "Box file list: 3 names matched\nFile hashes: 3 hashes matched"
         window._box_present_paths = present
         window._show_saved_box_result(True)
         assert not window.box_upload_complete
+        assert window.upload_group.activity_percent.text() == "66%"
+        assert window.upload_group.activity_check.isHidden()
         assert not window.upload_metrics_label.text()
         window.set_box_connection_state(False)
         assert "Connect to Box" in window.box_history_label.text()
         assert window.upload_progress_bar.isHidden()
+        assert window.upload_group.activity.isHidden()
     finally:
         window.current_deployment_folder = None
         window.close()

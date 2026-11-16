@@ -56,9 +56,8 @@ deletion but never deletes them.
 
 ## `clear_box_verified_staging.py`
 
-Normally clears local deployment-event folders only after each event passes
-a fresh, metadata-only Box verification. An explicit `--force` bypasses data
-verification. The command compares the SHA-1 values
+Normal clearance uses the same local, Box, Wildlife Insights, and SoundHub checks as the app.
+An explicit `--force` bypasses data verification. The Box check compares the SHA-1 values
 recorded at ingest with Box's server-side SHA-1 values. It does not download
 Box media or re-hash local images and recordings.
 
@@ -104,13 +103,15 @@ cassn-clear-staging --force          # Preview
 cassn-clear-staging --force --apply  # Delete only unblocked events, without Box/data verification
 ```
 
-Without `--force`, an event is blocked unless device collection is complete, all metadata rows are
-stamped as uploaded to Box, the normal post-upload verification artifact
-passed, every local raw file is represented in `session.json`, and a live Box
-listing contains matching paths and server-side hashes. Box is never modified,
-and no cleanup receipt or other persistent record is created. Normal cleanup
-accepts forward SoundHub submission updates in Box audio metadata when all
-recordings and other fields match; unrelated changes still block cleanup.
+Normal clearance checks device completion, the session inventory, Box upload stamps, and the saved verification result.
+Each camera deployment needs a verified Wildlife Insights request with a matching hash of its original photos.
+Each eligible bird recording needs a verified transfer receipt or independent staged audio.
+After a failed Box update, all affected recordings must have valid submission stamps on Box.
+Move any unexpected dotfile outside the event and run the check again.
+
+Add `--save-report` to save a preview in the active profile's `cleanup-reports/` folder.
+During removal, the utility repeats the checks under the event lock and saves the outcome there.
+Each report names the event and Box folder and gives the evidence for each applicable platform.
 
 Force deletes the entire event folder, including remaining SA media and local
 metadata. Default discovery selects event folders containing `session.json`;

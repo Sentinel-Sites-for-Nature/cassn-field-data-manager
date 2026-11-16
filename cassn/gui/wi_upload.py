@@ -23,6 +23,13 @@ Held rows may include a hold_reason and request_sha. For an eligible
 pre-admission hold, preview and status return retry_of (its inbox SHA).
 The confirmed replacement includes retry_of in its scopes and request_id.
 An ordinary lost-reply replay keeps its existing request_id.
+
+Optional wi_session_v1 capability adds an authentication object to
+preview/status. Its state is ready, refresh_needed,
+sign_in_required or unavailable. Legacy helpers omit this capability.
+The uploader owns safe recovery after sign-in is restored. FDM displays
+sign-in guidance and continues its ordinary status checks.
+A submit response with submission_blocked=true creates no remote request.
 """
 
 import csv
@@ -44,6 +51,7 @@ from cassn.gui.appearance import set_platform_status, style_cancel_button, Platf
 from cassn.config import QC_SUBFOLDER
 from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.core.wi_requests import (
+    verified_row_update, camera_inventory,
     all_requests_verified, checked_status, complete, read_requests, replacement_sources, save_requests, scope_key,
     superseded, validate_scopes,
 )
@@ -81,6 +89,7 @@ class WildlifeInsightsControl(QObject):
         self.unavailable = set()
         self.process = None
         self.delivery_keys = set()
+        self.legacy_refreshed = set()
         self.menu_waiting = False
         self.closed = False
         self.panel_error = False
@@ -89,6 +98,7 @@ class WildlifeInsightsControl(QObject):
         self._unproven_verified = False
         self.has_selection = False
         self.transfer_active = False
+        self.authentication = {}
         self.group = PlatformPanel("wildlife_insights")
         box = self.group.body
         self.verified_summary = workspace_label("", "contextTitle", wrap=True)
@@ -105,6 +115,12 @@ class WildlifeInsightsControl(QObject):
         self.notice.setWordWrap(True)
         self.notice.hide()
         box.addWidget(self.notice)
+        self.auth_notice = QLabel()
+        self.auth_notice.setTextFormat(Qt.PlainText)
+        self.auth_notice.setWordWrap(True)
+        self.auth_notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.auth_notice.hide()
+        box.addWidget(self.auth_notice)
         layout.addWidget(self.group)
         self.action = window._menu_action("Upload images to Wildlife Insights", self.preview,
                                           "Review the selected local camera deployments.")
@@ -119,6 +135,26 @@ class WildlifeInsightsControl(QObject):
         self.timer.setInterval(QUEUE_POLL_MS)
         self.timer.timeout.connect(self.poll)
         self.action.setEnabled(False)
+
+    def update_authentication(self, result):
+        capabilities = result.get("capabilities", [])
+        auth = result.get("authentication", {})
+        if (not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities)
+                or not isinstance(auth, dict)):
+            raise ValueError("Invalid Wildlife Insights sign-in status.")
+        self.authentication = auth if "wi_session_v1" in capabilities else {}
+        state = self.authentication.get("state")
+        if state is not None and state not in {"ready", "refresh_needed", "sign_in_required", "unavailable"}:
+            raise ValueError("Unknown Wildlife Insights sign-in state.")
+        message = self.authentication.get("message", "")
+        if not isinstance(message, str) or len(message) > 4096:
+            raise ValueError("Invalid Wildlife Insights sign-in message.")
+        if state == "sign_in_required":
+            message += ("\nSign in privately in Terminal with:\n"
+                        "/Users/johnimperato/cassn/git/cassn-data-tracker/.venv/bin/cassn-data-tracker wi-login"
+                        "\nExisting requests will be checked again by the uploader after sign-in.")
+        self.auth_notice.setText(message)
+        self.auth_notice.setVisible(bool(message))
 
     def _open_website(self):
         # Only these projects have a known organization in the UC integration.
@@ -149,6 +185,7 @@ class WildlifeInsightsControl(QObject):
         folder = self.window.current_deployment_folder
         if folder != self.folder:
             self.folder = folder
+            self.update_authentication({})
             self.poll_remaining.clear()
             self.group.disclosure.setChecked(False)
             self.jobs = {}
@@ -156,6 +193,7 @@ class WildlifeInsightsControl(QObject):
             self.panel_error = False
             self.notice.clear()
             self.delivery_keys.clear()
+            self.legacy_refreshed.clear()
             self.menu_waiting = False
             try:
                 self.jobs = read_requests(folder) if folder else {}
@@ -178,6 +216,9 @@ class WildlifeInsightsControl(QObject):
         self.notice.setVisible(bool(self.notice.text()))
         verified = {}
         states = Counter()
+        phase_totals = Counter()
+        phase_done = Counter()
+        counts_known = True
         sources = replacement_sources(self.jobs)
         new, eligibility_error = self._new_selections()
         projects = _exported_projects(self.folder, display_only=True) if self.folder else {}
@@ -206,10 +247,36 @@ class WildlifeInsightsControl(QObject):
                         verified[name] = scope["images"]
                 if stage != "verified":
                     states[stage] += 1
+                if stage in {"uploading", "verifying"}:
+                    phase_totals[stage] += scope["images"]
+                    count = row.get("confirmed" if stage == "uploading" else "verified_count")
+                    if type(count) is int:
+                        phase_done[stage] += count
+                    elif stage == "verifying":
+                        counts_known = False
                 self._add_camera(scope, row, stage, key in self.unavailable, projects.get(name))
         for name, photos in new.items():
             self._add_camera({"deployment": name, "images": photos}, {}, "staged", False, projects.get(name))
 
+        self.new_cameras.setVisible(bool(new or eligibility_error))
+        complete_selection = self.selection_complete()
+        if phase_totals["uploading"]:
+            self.group.show_progress(phase_done["uploading"], phase_totals["uploading"], "Uploading photos to Wildlife Insights")
+        elif phase_totals["verifying"]:
+            self.group.show_progress(phase_done["verifying"], phase_totals["verifying"] if counts_known else 0,
+                                     "Verifying photos in Wildlife Insights")
+        elif states["cleaning"]:
+            self.group.show_progress(0, 0, "Finishing Wildlife Insights checks")
+        elif complete_selection:
+            self.group.show_progress(1, 1, "Camera uploads verified in Wildlife Insights", complete=True)
+        elif self.process and self.process.property("operation") in {"preview", "submit"}:
+            self.group.show_progress(0, 0, "Preparing Wildlife Insights upload")
+        elif states["queued"] or states["transferred_or_waiting"]:
+            self.group.show_progress(0, 0, "Waiting for Wildlife Insights")
+        elif states["unknown"] and self.transfer_active:
+            self.group.show_progress(0, 0, "Checking Wildlife Insights status; upload progress is not yet available")
+        else:
+            self.group.hide_progress()
         self.verified_summary.setVisible(bool(verified))
         cameras = "camera" if len(verified) == 1 else "cameras"
         self.verified_summary.setText(f"{len(verified)} {cameras} verified · {sum(verified.values()):,} photos")
@@ -224,7 +291,6 @@ class WildlifeInsightsControl(QObject):
         idle = not (self.has_selection or self.notice.text())
         self.active_summary.setText("No camera images are ready to upload." if idle else " · ".join(summary))
         self.active_summary.setVisible(bool(summary) or idle)
-        self.new_cameras.setVisible(bool(new or eligibility_error))
         if eligibility_error:
             self.new_cameras.setText(f"Cannot check newly staged cameras. {eligibility_error}")
         if new:
@@ -234,9 +300,9 @@ class WildlifeInsightsControl(QObject):
             self.new_cameras.setText(f"{len(new)} new {cameras} in staging · {total:,} {unit}")
         self.tree.setVisible(bool(self.tree.topLevelItemCount()))
         self.tree.fit_rows()
-        set_platform_status(self.verified_summary, "complete" if self.selection_complete() else "")
+        set_platform_status(self.verified_summary, "complete" if complete_selection else "")
         self._refresh_action()
-        if any(not complete(j, sources) for j in self.jobs.values()):
+        if any(not complete(j, sources) or self._legacy_refresh(key, j) for key, j in self.jobs.items()):
             interval = ACTIVE_POLL_MS if states["uploading"] or states["verifying"] else QUEUE_POLL_MS
             if self.timer.interval() != interval:
                 self.timer.setInterval(interval)
@@ -321,9 +387,7 @@ class WildlifeInsightsControl(QObject):
     def message(self, text, *, error=True):
         self.panel_error = error
         self.notice.setText(text)
-        self.notice.setVisible(bool(text))
-        set_platform_status(self.verified_summary, "complete" if self.selection_complete() else "")
-        self._refresh_action()
+        self.render()
         self.group.show()
 
     def selection_complete(self):
@@ -339,6 +403,7 @@ class WildlifeInsightsControl(QObject):
         process.setProperty("operation", operation)
         self.process = process
         self.refresh()
+        self.render()
         process.setProgram(self.helper)
         process.setArguments([operation])
         output = bytearray()
@@ -372,6 +437,10 @@ class WildlifeInsightsControl(QObject):
                         or result.get("event") != body["event"]
                         or result.get("request_id") != body.get("request_id")):
                     raise ValueError("Wildlife Insights helper response did not match the request.")
+                self.update_authentication(result)
+                if operation == "submit" and result.get("submission_blocked") is True:
+                    self.group.disclosure.setChecked(True)
+                    return
                 if operation in {"status", "submit"} and result.get("fresh") is not True:
                     raise ValueError("The helper has no current service status.")
                 receive(result)
@@ -382,10 +451,12 @@ class WildlifeInsightsControl(QObject):
                     self.unavailable.add(key)
                     self.delivery_keys.discard(key)
                     self.render()
+                self.authentication = {}
                 self.message(f"Wildlife Insights status unknown. {exc}")
             finally:
                 process.deleteLater()
                 self.refresh()
+                self.render()
                 if self.menu_waiting and operation == "status":
                     self.menu_waiting = False
                     if succeeded and not self.closed and self.folder == folder:
@@ -437,13 +508,8 @@ class WildlifeInsightsControl(QObject):
             item = self.window._device_item(label)
             if code in {"ML", "SA"} and item and item.text(2) == "Complete":
                 labels.add(label)
-        counts = Counter()
-        for row in self.window.file_inventory:
-            if row.get("file_type") == "image" and row.get("device_label") in labels:
-                name = row.get("deployment_id")
-                if not name:
-                    raise ValueError("A selected image has no deployment ID.")
-                counts[name] += 1
+        counts = {name: len(pairs) for name, pairs in
+                  camera_inventory(self.window.file_inventory, labels).items()}
         sources = replacement_sources(self.jobs)
         eligible = self.retryable()
         for job in self.jobs.values():
@@ -491,6 +557,9 @@ class WildlifeInsightsControl(QObject):
         self.call("preview", {"deployments": specs}, lambda result: self.confirm(result, counts))
 
     def confirm(self, result, counts, *, delivery_key=None):
+        if self.authentication.get("state") in {"sign_in_required", "unavailable"}:
+            self.group.disclosure.setChecked(True)
+            return
         scopes = result["scopes"]
         validate_scopes(scopes)
         if {s["deployment"]: s["images"] for s in scopes} != counts:
@@ -610,6 +679,8 @@ class WildlifeInsightsControl(QObject):
                 raise ValueError("The uploader request identity changed.")
             if old.get("manifest_sha256") and old["manifest_sha256"] != row.get("manifest_sha256"):
                 raise ValueError("The admitted Wildlife Insights manifest changed.")
+            if old.get("stage") == "verified" and not verified_row_update(old, row):
+                raise ValueError("The saved verification receipt changed.")
             if old.get("manifest_sha256"):
                 row["confirmed"] = max(row["confirmed"], old["confirmed"])
             if row["stage"] == "verifying":
@@ -619,9 +690,6 @@ class WildlifeInsightsControl(QObject):
                     row["verified_count"] = min(totals[row["deployment"]], max(known))
                 else:
                     row.pop("verified_count", None)
-            if old.get("stage") == "verified" and (
-                    row["stage"] != "verified" or old.get("integrity") != row.get("integrity")):
-                raise ValueError("The saved verification receipt changed.")
         jobs = dict(self.jobs)
         jobs[key] = dict(job, rows=rows)
         redraw = jobs != self.jobs or key in self.unavailable or bool(self.notice.text())
@@ -638,12 +706,19 @@ class WildlifeInsightsControl(QObject):
         if redraw:
             self.render()
 
+    def _legacy_refresh(self, key, job):
+        return key not in self.legacy_refreshed and any(
+            row["stage"] == "verified" and isinstance(row.get("integrity"), dict)
+            and not row["integrity"].get("originals_sha256")
+            for row in job.get("rows", []))
+
     def poll(self):
         self.refresh()
-        if self.closed or self.process or self.read_error:
+        if self.closed or self.process or self.read_error or getattr(getattr(self.window, "cleanup_panel", None), "worker", None):
             return
         sources = replacement_sources(self.jobs)
-        self.poll_remaining = [key for key, job in self.jobs.items() if not complete(job, sources)]
+        self.poll_remaining = [key for key, job in self.jobs.items()
+                               if not complete(job, sources) or self._legacy_refresh(key, job)]
         self.poll_next()
 
     def poll_next(self):
@@ -663,6 +738,7 @@ class WildlifeInsightsControl(QObject):
                 self.message("Choose Upload to Wildlife Insights to resume the saved selection.")
             else:
                 self.accept_status(key, result)
+                self.legacy_refreshed.add(key)
 
         self.call("status", {"request_id": key, "scopes": self.jobs[key]["scopes"]}, received)
 

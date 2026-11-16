@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from cassn.soundhub.receipt_location import receipt_root
 from cassn.config import SOUNDHUB_DEPLOYMENT_FIELDS, SOUNDHUB_RECORDING_FIELDS
 from cassn.soundhub.export import write_deployment_fragments
 from cassn.soundhub.provenance import (
@@ -509,7 +510,7 @@ def test_transfer_archive_preserves_manifests_logs_and_report_after_cleanup(tmp_
     result = execute_soundhub_submission(plan)
     directory = result["transfer_directory"]
     record = json.loads((directory / "transfer.json").read_text())
-    assert directory.parent == plan.staging_root.parent / "transfers"
+    assert directory.parent == receipt_root()
     assert record["status"] == "complete"
     assert record["verification"]["ok"] is True
     assert record["provenance"]["changed_rows"] == 2
@@ -551,7 +552,7 @@ def test_keyboard_interrupt_is_retained_without_claiming_s3_success(tmp_path, mo
     monkeypatch.setattr("cassn.soundhub.submission.upload_project", interrupt)
     with pytest.raises(KeyboardInterrupt):
         execute_soundhub_submission(plan)
-    path, = (plan.staging_root.parent / "transfers").glob('*/transfer.json')
+    path, = (receipt_root()).glob('*/transfer.json')
     record = json.loads(path.read_text())
     assert record["status"] == "interrupted"
     assert record["verification"] is None
@@ -559,7 +560,8 @@ def test_keyboard_interrupt_is_retained_without_claiming_s3_success(tmp_path, mo
 
 def test_archive_write_failure_prevents_network_upload(tmp_path, monkeypatch):
     plan = _archive_test_plan(tmp_path)
-    (plan.staging_root.parent / "transfers").write_text("not a directory")
+    receipt_root().parent.mkdir(parents=True, exist_ok=True)
+    receipt_root().write_text("not a directory")
     def should_not_upload(*args, **kwargs):
         raise AssertionError("upload must not start without durable records")
     monkeypatch.setattr("cassn.soundhub.submission.upload_project", should_not_upload)

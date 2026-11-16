@@ -420,6 +420,54 @@ def test_staging_keeps_batch_owned_until_completion_and_blocks_submission(manage
     attempted.assert_called_once()
 
 
+def test_busy_batch_queues_selected_recorders_in_order(manager, tmp_path, monkeypatch):
+    from cassn.gui import wizard
+
+    (tmp_path / "soundhub").mkdir()  # Staging refuses a missing folder.
+    owner, second, third = [manager.new_window() for _ in range(3)]
+    worker = MagicMock()
+    worker.isRunning.return_value = False
+    owner._run_staging_operation(lambda: setattr(owner, "soundhub_stage_thread", worker))
+    monkeypatch.setattr(wizard, "flac_available", lambda: True)
+
+    def choose(dialog):
+        assert dialog.checks.keys() == {"p1", "p2"}
+        dialog.checks["p1"].setChecked(False)
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(wizard.SoundHubStageDialog, "exec", choose)
+    start = MagicMock()
+    for index, window in enumerate((second, third)):
+        event = tmp_path / f"event{index}"
+        event.mkdir()
+        (event / "audio_file_metadata.csv").write_text(
+            "deployment_id,filename,device_type,file_type\np1,a.wav,BD,audio\np2,b.wav,BD,audio\n"
+        )
+        window.current_deployment_folder = event
+        monkeypatch.setattr(window, "_start_soundhub_stage", start)
+        window.stage_for_soundhub()
+        assert window._work_running()
+        assert manager.staging_queue[window].deployments == {"p2"}
+        assert window.soundhub_panel_button.text() == "Queued…"
+        assert not window.soundhub_panel_button.isEnabled()
+        window._refresh_soundhub_resume()
+        assert window.soundhub_panel_button.text() == "Queued…"
+        window._try_queued_stage()
+    start.assert_not_called()
+    owner._staging_pending = False
+    owner._release_idle_cloud()
+    third._try_queued_stage()
+    start.assert_not_called()
+    second._try_queued_stage()
+    start.assert_called_once_with(tmp_path / "soundhub", {"p2"})
+    third.cancel_soundhub()
+    assert third.soundhub_panel_button.text() == "Stage Bird Audio"
+    assert third.soundhub_panel_button.isEnabled()
+    third._try_queued_stage()
+    assert not manager.staging_queue
+    assert start.call_count == 1
+
+
 def test_declined_or_failed_staging_does_not_release_box_ownership(manager):
     window = manager.new_window()
     window._run_cloud_operation(lambda: setattr(window, "_box_operation_active", True))
@@ -449,12 +497,15 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     worker.isRunning.return_value = False
     worker.start.side_effect = lambda: setattr(worker.isRunning, "return_value", True)
     monkeypatch.setattr(wizard_module, "flac_available", lambda: True)
-    monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args: worker)
+    monkeypatch.setattr(wizard_module, "read_bd_audio_rows", lambda *_: [{"deployment_id": "first"}])
+    monkeypatch.setattr(wizard_module, "SoundHubStageThread", lambda *args, **kwargs: worker)
     monkeypatch.setattr(wizard_module.SoundHubStageDialog, "exec", lambda self: self.DialogCode.Accepted)
     title = window.soundhub_group.title()
     window.stage_for_soundhub()
     assert window.soundhub_group.title() == title == "Prepare and Stage Bird Audio Data for SoundHub Upload"
     assert window._staging_pending
+    assert window.soundhub_panel_button.text() == "Staging…"
+    assert not window.soundhub_panel_button.isEnabled()
     FieldDataWizard._set_box_controls_busy(window, False)
     assert not window.exit_btn.isEnabled()
     assert not window.new_btn.isEnabled()
@@ -554,3 +605,85 @@ def test_reconnect_waits_for_finished_upload_and_retries_once(manager, monkeypat
     window._release_idle_cloud()
     assert auth.call_count == int(accept)
     assert retry.call_count == int(accept and authenticated)
+
+
+def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, monkeypatch):
+    import time
+    from PySide6.QtTest import QTest
+    from test_staging_cleanup import _build_event
+    from cassn.gui import cleanup_panel
+    from cassn.core import staging_cleanup
+    staging, event, box = _build_event(tmp_path)
+    monkeypatch.setattr(cleanup_panel, "get_box_client", lambda config: box)
+    monkeypatch.setattr(cleanup_panel, "BoxStorage", lambda fake: fake)
+    monkeypatch.setattr(staging_cleanup, "LOCK_DIR", manager.lock_directory)
+    w = manager.new_window(open_sessions=False)
+    w.staging_root = staging
+    w.config_file = tmp_path / "profile/config.json"
+    w.box_config = BoxConfig(field_data_folder_id="field-root")
+    w.current_deployment_folder = event
+    assert w._claim_deployment(event, event.name)
+    panel = w.cleanup_panel
+    w.tabs.setCurrentIndex(2)
+    panel.refresh()
+    panel.toggle.setChecked(True)
+    panel.check.click()
+    for _ in range(250):
+        QApplication.processEvents()
+        time.sleep(.01)
+        if not panel.worker:
+            break
+    assert panel.hold.isEnabled(), panel.message.text()
+    with pytest.raises(staging_cleanup.StagingCleanupError):
+        staging_cleanup.clear_verified_deployment(panel.plan)
+    panel.hold.duration_ms = 150
+    QTest.keyPress(panel.hold, Qt.Key_Space)
+    QTest.keyRelease(panel.hold, Qt.Key_Space)
+    assert event.is_dir() and panel.worker is None
+    QTest.keyPress(panel.hold, Qt.Key_Space)
+    for _ in range(400):
+        QApplication.processEvents()
+        time.sleep(.01)
+        if w._cleared_event:
+            break
+    assert manager.windows == [w]
+    assert w.isVisible()
+    assert w.current_deployment_folder is None
+    assert w._deployment_lease is None
+    assert not w.workspace.isEnabled()
+    assert not w.new_btn.isEnabled()
+    assert "All files in" in w.clearance_confirmation.text()
+    assert event.name in w.clearance_confirmation.text()
+    assert "You can now quit the app." in w.clearance_confirmation.text()
+    assert "Local staging cleared" in w.windowTitle()
+    assert not event.exists()
+    w.save_session()
+    assert not event.exists()
+    report, = (tmp_path / "profile/cleanup-reports").glob("*.json")
+    assert json.loads(report.read_text())["outcome"] == "cleared"
+    assert w.clearance_report_path == report
+    # Quitting from the confirmation still protects work in another window.
+    other = manager.new_window(open_sessions=False)
+    other._box_operation_active = True
+    w.clearance_quit_btn.click()
+    assert manager.windows == [other]
+    assert not event.exists()
+    other._box_operation_active = False
+
+
+def test_collapsed_cleanup_header_fills_panel(manager):
+    from PySide6.QtWidgets import QFrame
+    from cassn.gui.appearance import workspace_stylesheet
+    w = manager.new_window(open_sessions=False)
+    from cassn.gui.cleanup_panel import CleanupPanel
+    panel = CleanupPanel(w)
+    panel.setStyleSheet(workspace_stylesheet(panel.palette(), 100))
+    panel.toggle.setChecked(False)
+    panel.show()
+    panel.resize(1000, panel.sizeHint().height())
+    QApplication.processEvents()
+    header = panel.findChild(QFrame)
+    assert header.x() <= 1
+    assert header.y() <= 1
+    assert panel.sizeHint().height() - header.sizeHint().height() <= 2
+    panel.close()

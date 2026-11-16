@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cassn.soundhub.receipt_location import receipt_root
 from cassn.box.auth import BoxConfig, hosted_config
 from cassn.config import SOUNDHUB_PROJECT_SHORT_NAME
 from cassn.soundhub import staging as staging_module
@@ -39,7 +40,7 @@ def open_batch(root: Path) -> Path:
 
 
 def transfer_record(root: Path, paths, *, ok=True, destination=DESTINATION):
-    directory = root.parent / "transfers" / "2026-10-22_161016Z_5f0d9d89"
+    directory = receipt_root() / root.parent.name
     directory.mkdir(parents=True)
     (directory / "transfer.json").write_text(json.dumps({
         "destination": destination,
@@ -209,7 +210,7 @@ def saved_root(config):
 
 
 def location_text(window):
-    return window.soundhub_location_label.text().replace("​", "")
+    return window.soundhub_location_label.fullText() + "\n" + window.soundhub_location_detail.fullText()
 
 
 def test_change_row_shows_path_and_cancelled_new_batch_warning_keeps_setting(panel, tmp_path):
@@ -332,3 +333,30 @@ def test_other_window_using_the_batch_blocks_the_change(tmp_path, monkeypatch):
         assert saved_root(config) == str(tmp_path / "drive")
     finally:
         window.close()
+
+
+def test_mac_receipt_migration_is_exact_and_independent_of_staging(tmp_path):
+    from cassn.soundhub.receipt_location import RECEIPT_BASE, prepare_receipts, receipt_journals
+    import shutil
+    source = RECEIPT_BASE / "transfers/attempt"
+    source.mkdir(parents=True)
+    (source / "transfer.json").write_text('{"status": "failed"}')
+    drive = tmp_path / "removable"
+    shutil.copytree(source.parent, drive / "transfers")
+    (drive / "transfers/._attempt").write_bytes(b"Finder")
+    (drive / "transfers/attempt/transfer.json").write_text('{"status": "complete"}')
+    with pytest.raises(ValueError, match="differ"):
+        prepare_receipts(tmp_path / "new-staging", "uc")
+    assert not receipt_root("uc").exists()
+    shutil.copyfile(source / "transfer.json", drive / "transfers/attempt/transfer.json")
+    empty_attempt = drive / "transfers/extra-attempt"
+    empty_attempt.mkdir()
+    with pytest.raises(ValueError, match="differ"):
+        prepare_receipts(drive / "staging", "uc")
+    empty_attempt.rmdir()
+    archive = prepare_receipts(drive / "staging", "uc")
+    drive.rename(tmp_path / "disconnected")
+    assert prepare_receipts(tmp_path / "new-staging", "uc") == archive
+    assert list(receipt_journals(drive / "staging", "uc")) == [archive / "attempt/transfer.json"]
+    assert (archive / "attempt/transfer.json").read_bytes() == (source / "transfer.json").read_bytes()
+    assert not list(receipt_journals(drive / "staging", "csu"))

@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from cassn.config import (
@@ -128,7 +129,82 @@ def staging_progress(deployment_folder, staging_root) -> tuple[int, int] | None:
     return completed, len(rows)
 
 
-def recover_staging(staging_root) -> dict | None:
+def _checksum_path(staging_root, media: Path) -> Path:
+    # Keep checkpoints out of recorder folders, which move into the S3 mirror.
+    path = work_root(staging_root) / ".checksums" / media.parent.name / (media.name + ".json")
+    for candidate in (work_root(staging_root), path.parent.parent, path.parent, path):
+        if candidate.is_symlink():
+            raise SoundHubStagingError(f"Unsafe staging checksum path: {candidate}")
+    return path
+
+
+def _recording_signature(media: Path) -> tuple:
+    if media.is_symlink() or not media.is_file():
+        raise SoundHubStagingError(f"Unsafe staged recording: {media}")
+    info = media.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _check_recording(staging_root, media: Path, *, newly_converted=False) -> tuple[str, tuple]:
+    """Read every byte; reuse a saved digest only as the expected value.
+
+    Older files and interrupted checkpoint writes require the original decode
+    check before establishing a baseline. A valid baseline must never be
+    replaced after a mismatch, even if the modified file still decodes.
+    """
+    checkpoint = _checksum_path(staging_root, media)
+    expected = None
+    try:
+        saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if (isinstance(saved, dict) and saved.get("version") == 1
+                and saved.get("deployment_id") == media.parent.name
+                and saved.get("filename") == media.name
+                and type(saved.get("size_bytes")) is int and saved["size_bytes"] >= 0
+                and isinstance(saved.get("sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", saved["sha256"])):
+            expected = saved
+    except (FileNotFoundError, ValueError, UnicodeError):
+        pass
+
+    before = _recording_signature(media)
+    if expected is None and not newly_converted:
+        encoder = flac_executable()
+        if encoder is None:
+            raise SoundHubStagingError("Could not find the 'flac' encoder to check completed recordings.")
+        check = subprocess.run(
+            [encoder, "--test", "--silent", str(media)], capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            raise SoundHubStagingError(
+                f"Completed FLAC failed its integrity check: {media.name}: {check.stderr.strip()}"
+            )
+    digest = hashing.sha256(media)
+    after = _recording_signature(media)
+    if before != after:
+        raise SoundHubStagingError(f"Recording changed during its integrity check: {media}")
+    if expected is not None:
+        if expected["size_bytes"] != after[2] or expected["sha256"] != digest:
+            raise SoundHubStagingError(
+                f"Completed FLAC failed its checksum check: {media}. "
+                "The recording differs from its verified copy. Staging stopped; the saved checksum was kept."
+            )
+    else:
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".checksum-", suffix=".tmp", dir=checkpoint.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"version": 1, "deployment_id": media.parent.name,
+                           "filename": media.name, "size_bytes": after[2], "sha256": digest}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(checkpoint)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return digest, after
+
+
+def recover_staging(staging_root, *, _verified=None) -> dict | None:
     """Finish a recorded folder promotion and CSV rebuild, always going forward.
 
     Both normal completion and crash recovery use this sequence. A recorder
@@ -171,6 +247,13 @@ def recover_staging(staging_root) -> dict | None:
                 raise ValueError(f"completed recordings differ from the inventory: {media}")
             if any(path.is_symlink() or not path.is_file() for path in media.iterdir()):
                 raise ValueError(f"unsafe recording in {media}")
+            for name in sorted(expected):
+                recording = media / name
+                # Only the current staging call can supply these signatures.
+                # A restart always reads the full file, including after promotion.
+                signature = (_verified or {}).get((deployment_id, name))
+                if signature is None or signature != _recording_signature(recording):
+                    _check_recording(staging_root, recording)
             if source.exists():
                 if destination.exists():
                     if destination.is_symlink() or previous.exists():
@@ -404,6 +487,7 @@ def stage_deployment(
     progress=None,
     is_cancelled=None,
     recording_prepared=None,
+    event_rows=None,
 ) -> dict:
     """Convert a deployment event's BD WAVs into the SoundHub staging tree.
 
@@ -463,6 +547,7 @@ def stage_deployment(
         )
 
     staged: list[dict] = []
+    verified = {}
     converted = skipped = 0
     total = len(audio_rows)
     index = 0
@@ -509,20 +594,13 @@ def stage_deployment(
                     reused = True
                     skipped += 1
                 else:
+                    # A newly encoded file must not inherit an old baseline.
+                    _checksum_path(staging_root, dst).unlink(missing_ok=True)
                     convert_wav_to_flac(src, dst)
                     converted += 1
 
-            if dst.is_symlink() or not dst.is_file():
-                raise SoundHubStagingError(f"Unsafe staged recording: {dst}")
-            if reused:
-                check = subprocess.run(
-                    [flac_executable(), "--test", "--silent", str(dst)],
-                    capture_output=True, text=True,
-                )
-                if check.returncode != 0:
-                    raise SoundHubStagingError(
-                        f"Completed FLAC failed its integrity check: {dst.name}: {check.stderr.strip()}"
-                    )
+            digest, signature = _check_recording(staging_root, dst, newly_converted=not reused)
+            verified[(deployment_id, dst.name)] = signature
             dst.with_suffix(".flac.partial").unlink(missing_ok=True)
             (out_dir / f".{src.name}.padded").unlink(missing_ok=True)
 
@@ -531,15 +609,16 @@ def stage_deployment(
                     "filename": dst.name,
                     "source_filename": src.name,
                     "deployment_id": deployment_id,
-                    "size_bytes": dst.stat().st_size,
-                    "sha256": hashing.sha256(dst),
+                    "size_bytes": signature[2],
+                    "sha256": digest,
                 }
             )
 
             if recording_prepared is not None:
                 recording_prepared(deployment_id, src.name)
 
-    write_deployment_copy(deployment_folder, audio_rows)
+    # The event export includes every recorder, even when staging a subset.
+    write_deployment_copy(deployment_folder, audio_rows if event_rows is None else event_rows)
     marker = work_root(staging_root) / "pending.json"
     temporary = marker.with_suffix(".tmp")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -547,7 +626,7 @@ def stage_deployment(
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(marker)
-    completion = recover_staging(staging_root)
+    completion = recover_staging(staging_root, _verified=verified)
     return {
         "deployment_ids": sorted(deployment_ids.values()),
         "cancelled": False,

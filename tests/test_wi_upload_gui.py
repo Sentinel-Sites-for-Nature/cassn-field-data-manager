@@ -46,6 +46,7 @@ else:
                      retry_of=sha,stage='held',confirmed=0,hold_reason='Added deployment held: expected one exact camera 08021607; found 0')
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
+            if (root/'upgraded').exists(): row['integrity']['originals_sha256']='d'*64
         if stage=='verifying':
             row['verified_count']=int((root/'verified-count').read_text()) if (root/'verified-count').exists() else 1
         if stage=='delivery':
@@ -268,12 +269,12 @@ def test_cleanup_and_submission_exclude_each_other(work, tmp_path, monkeypatch):
     empty = tmp_path / "other-event"
     empty.mkdir()
     removing = inspect_deployment_for_cleanup(empty, tmp_path, None, "", force=True)
-    remove = staging_cleanup.shutil.rmtree
-    def during_removal(path):
+    remove = staging_cleanup._remove_unchanged_deployment
+    def during_removal(checked, path):
         with pytest.raises(ValueError, match="busy"):
             wi_requests.save_requests(path, jobs)
-        remove(path)
-    monkeypatch.setattr(staging_cleanup.shutil, "rmtree", during_removal)
+        return remove(checked, path)
+    monkeypatch.setattr(staging_cleanup, "_remove_unchanged_deployment", during_removal)
     staging_cleanup.clear_verified_deployment(removing)
     with pytest.raises(ValueError, match="unavailable"):
         wi_requests.save_requests(empty, jobs)
@@ -585,3 +586,77 @@ def test_wi_upload_button_disables_while_helper_has_active_cameras(work, tmp_pat
     window.file_inventory.append(dict(device_label="p2_ML", file_type="image", deployment_id="new-camera"))
     ctrl.refresh_new_cameras()
     assert ctrl.panel_button.isEnabled()
+
+
+def test_old_verified_session_retries_status_after_failure(work, tmp_path):
+    window = work()
+    prepare(window)
+    (tmp_path / "stage").write_text("verified")
+    control = window.wi_control
+    start(control, QDialogButtonBox.Ok)
+    key, old_job = next(iter(read_requests(control.folder).items()))
+    (tmp_path / "stale").touch()
+    control.poll()
+    wait_for(lambda: control.process is None)
+    assert key in control.unavailable
+    assert control.timer.isActive()
+    (tmp_path / "stale").unlink()
+    (tmp_path / "upgraded").touch()
+    control.poll()
+    wait_for(lambda: control.process is None)
+    new_job = read_requests(control.folder)[key]
+    for row in new_job["rows"]:
+        assert row["integrity"].pop("originals_sha256") == "d"*64
+    assert new_job == old_job
+    assert (tmp_path / "calls").read_text().splitlines().count("submit") == 1
+
+
+def test_authentication_guidance_uses_normal_controls(work):
+    from PySide6.QtWidgets import QPushButton
+    w = work()
+    prepare(w)
+    control = w.wi_control
+    control.timer.stop()
+    control.refresh()
+    control.update_authentication({"capabilities": ["wi_session_v1"],
+        "authentication": {"state": "sign_in_required", "message": "Your sign-in expired."}})
+    assert "wi-login" in control.auth_notice.text()
+    assert "Existing requests will be checked again" in control.auth_notice.text()
+    buttons = {button.text() for button in control.group.findChildren(QPushButton)}
+    assert "Check sign-in" not in buttons
+    assert "Resume blocked request" not in buttons
+    # Expired sign-in is handled before an upload selection dialog opens.
+    control.confirm({}, {})
+    assert QApplication.activeModalWidget() is None
+    control.update_authentication({})
+    assert control.auth_notice.isHidden()
+    assert control.authentication == {}
+
+
+def test_collapsed_wi_header_shows_waiting_then_confirmed_progress(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / 'stage').write_text('queued')
+    start(ctrl, QDialogButtonBox.Ok)
+    ctrl.group.disclosure.setChecked(False)
+    assert not ctrl.group.activity.isHidden()
+    assert ctrl.group.activity_bar.maximum() == 0
+    assert ctrl.group.activity_percent.text() == '…'
+    key = next(iter(ctrl.jobs))
+    ctrl.unavailable.add(key)
+    ctrl.render()
+    assert ctrl.group.activity_bar.maximum() == 0
+    assert 'Checking' in ctrl.group.activity.toolTip()
+    assert not ctrl.group.activity_check.isVisible()
+    ctrl.unavailable.clear()
+    for row in ctrl.jobs[key]['rows']:
+        row.update(stage='uploading', confirmed=1)
+    ctrl.render()
+    assert not ctrl.group.activity.isHidden()
+    assert ctrl.group.activity_bar.maximum() == 100
+    assert ctrl.group.activity_percent.text() == '50%'
+    for row in ctrl.jobs[key]['rows']:
+        row.update(stage='held', confirmed=0)
+    ctrl.render()
+    assert ctrl.group.activity.isHidden()
