@@ -773,7 +773,7 @@ def test_api_report_conflict_preserves_existing_record(tmp_path, monkeypatch):
 
 
 def test_cli_preflight_output_uses_operator_terms(tmp_path, capsys):
-    from utils.prep_soundhub import _print_preflight
+    from cassn.soundhub.cli import _print_preflight
 
     staging, box_year, _, _ = _fixture(tmp_path)
     settings = {
