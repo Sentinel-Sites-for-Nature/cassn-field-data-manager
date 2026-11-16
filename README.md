@@ -533,13 +533,17 @@ earlier in the pipeline to a convention whose date component is the deployment
 *retrieval* date — identical for every file in a deployment. The sidecar CSV
 resolves this.
 
+The exact header and two example rows are in
+[`templates/soundhub_recording_template.csv`](templates/soundhub_recording_template.csv).
+The columns, in file order:
+
 | Column | Source |
 |---|---|
-| `path` | `<deployment_id>/<staged filename>.flac`, relative to the project root |
-| `sample_rate` | Measured `sample_rate_hz`, in Hz; missing values block staging |
 | `deployment_id` | Straight from `audio_file_metadata.csv` |
+| `path` | `<deployment_id>/<staged filename>.flac`, relative to the project root |
 | `start` | Stored `recorded_datetime` — GUANO timestamp preferred, otherwise the original AudioMoth filename interpreted as local Pacific time |
 | `end` | `start` plus `recording_duration_sec` |
+| `sample_rate` | Measured `sample_rate_hz`, in Hz; missing values block staging |
 | `notes` | Blank, matching the supplied recording example |
 
 Legacy staging fragments must be regenerated from their source audio metadata
@@ -1169,7 +1173,7 @@ cassn-field-data-manager/
 ├── assets/                           # Application icons and welcome/workspace artwork
 ├── schemas/                          # Published machine-readable data contracts
 ├── screenshots/                      # Application screenshots for this README
-├── templates/                        # SoundHub reference workbook
+├── templates/                        # SoundHub reference workbook, recording.csv template
 ├── tests/                            # Regression tests and compatibility fixtures
 ├── NDP_SOURCE_VERSIONING.md          # Append-only OSDF source versioning rules
 ├── config.json.example               # Box config template → ~/.cassn_config/config.json
