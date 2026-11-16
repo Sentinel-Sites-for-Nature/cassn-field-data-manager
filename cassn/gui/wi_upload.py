@@ -16,7 +16,10 @@ manifest_sha256?}]. The helper resolves the manifest after private admission.
 A verified row must include integrity {kind, manifest_sha256, image_count,
 receipt_sha256}, checked against the exact admitted project/deployment. Status
 may include verified_count while verifying. This display count is not a receipt. Status
-may return fresh=true, missing=true only after reconciling a durable absence.
+may include cleanup_state (pending, running, complete, failed). Cleanup concerns
+the uploader's temporary copies, not original event files. It never establishes
+or revokes verified integrity. A verified row still requires the checked receipt.
+Status may return fresh=true, missing=true only after reconciling a durable absence.
 The helper must reject changed selections and preserve original-file claims
 on any replay. Return safe summaries only, never credentials or image lists.
 Held rows may include a hold_reason and request_sha. For an eligible
@@ -266,7 +269,7 @@ class WildlifeInsightsControl(QObject):
             self.group.show_progress(phase_done["verifying"], phase_totals["verifying"] if counts_known else 0,
                                      "Verifying photos in Wildlife Insights")
         elif states["cleaning"]:
-            self.group.show_progress(0, 0, "Finishing Wildlife Insights checks")
+            self.group.show_progress(0, 0, "Verifying Wildlife Insights receipt")
         elif complete_selection:
             self.group.show_progress(1, 1, "Camera uploads verified in Wildlife Insights", complete=True)
         elif self.process and self.process.property("operation") in {"preview", "submit"}:
@@ -282,7 +285,7 @@ class WildlifeInsightsControl(QObject):
         self.verified_summary.setText(f"{len(verified)} {cameras} verified · {sum(verified.values()):,} photos")
         descriptions = {"held": "held for review", "unknown": "with unknown status", "uploading": "uploading",
                         "verifying": "verifying", "queued": "queued", "waiting_retry": "waiting to retry",
-                        "cleaning": "finishing checks", "transferred_or_waiting": "waiting for verification"}
+                        "cleaning": "waiting for receipt verification", "transferred_or_waiting": "waiting for verification"}
         summary = []
         for stage, count in states.items():
             noun = "camera" if count == 1 else "cameras"
@@ -302,7 +305,7 @@ class WildlifeInsightsControl(QObject):
         self.tree.fit_rows()
         set_platform_status(self.verified_summary, "complete" if complete_selection else "")
         self._refresh_action()
-        if any(not complete(j, sources) or self._legacy_refresh(key, j) for key, j in self.jobs.items()):
+        if any(self._needs_poll(key, j, sources) for key, j in self.jobs.items()):
             interval = ACTIVE_POLL_MS if states["uploading"] or states["verifying"] else QUEUE_POLL_MS
             if self.timer.interval() != interval:
                 self.timer.setInterval(interval)
@@ -315,9 +318,9 @@ class WildlifeInsightsControl(QObject):
         name, total = scope["deployment"], scope["images"]
         confirmed = row.get("confirmed", 0)
         count = confirmed
-        labels = {"queued": "Queued · waiting for uploader preparation", "waiting_retry": "Waiting to retry", "cleaning": "Finishing checks",
+        labels = {"queued": "Queued · waiting for uploader preparation", "waiting_retry": "Waiting to retry", "cleaning": "Verifying receipt",
                   "transferred_or_waiting": "Waiting for verification", "unknown": "Status unknown",
-                  "verified": f"WI upload verified · {total:,} photos", "staged": f"Ready to upload · {total:,} photos",
+                  "verified": "Verified", "staged": f"Ready to upload · {total:,} photos",
                   "uploading": f"Uploading {confirmed:,} of {total:,} photos"}
         if stage == "verifying":
             value = row.get("verified_count")
@@ -336,6 +339,15 @@ class WildlifeInsightsControl(QObject):
                 count = 0
 
         project, source = self._project_label(scope, row, stage, exported_project)
+        cleanup = {
+            "pending": "Temporary-file cleanup queued.",
+            "running": "Removing the uploader’s temporary photo copies.",
+            "failed": "Temporary-file cleanup needs attention. The upload remains verified.",
+        }.get(row.get("cleanup_state"))
+        if cleanup and stage == "verified":
+            if unavailable:
+                cleanup = "Last reported: " + cleanup
+            project += "\n" + cleanup
         bar = UploadProgressBar()
         bar.setRange(0, total)
         bar.setValue(count)
@@ -712,13 +724,18 @@ class WildlifeInsightsControl(QObject):
             and not row["integrity"].get("originals_sha256")
             for row in job.get("rows", []))
 
+    def _needs_poll(self, key, job, sources):
+        return (not complete(job, sources) or self._legacy_refresh(key, job)
+                or any(row.get("cleanup_state") in {"pending", "running", "failed"}
+                       for row in job.get("rows", [])))
+
     def poll(self):
         self.refresh()
         if self.closed or self.process or self.read_error or getattr(getattr(self.window, "cleanup_panel", None), "worker", None):
             return
         sources = replacement_sources(self.jobs)
         self.poll_remaining = [key for key, job in self.jobs.items()
-                               if not complete(job, sources) or self._legacy_refresh(key, job)]
+                               if self._needs_poll(key, job, sources)]
         self.poll_next()
 
     def poll_next(self):

@@ -15,6 +15,7 @@ STAGES = {
     "queued", "uploading", "waiting_retry", "verifying", "cleaning", "held",
     "verified", "transferred_or_waiting", "unknown",
 }
+CLEANUP_STATES = {"pending", "running", "complete", "failed"}
 
 
 def scope_key(event, scopes):
@@ -54,6 +55,9 @@ def checked_status(scopes, rows):
                 or not 0 <= row["confirmed"] <= scope["images"]):
             raise ValueError("Wildlife Insights status differs from the approved selection.")
         manifest = row.get("manifest_sha256")
+        if "cleanup_state" in row and (
+                not isinstance(row["cleanup_state"], str) or row["cleanup_state"] not in CLEANUP_STATES):
+            raise ValueError("Invalid uploader temporary-file cleanup status.")
         if "request_sha" in row and not re.fullmatch(r"[a-f0-9]{64}", str(row["request_sha"])):
             raise ValueError("Invalid uploader request identity.")
         if scope.get("retry_of") and scope["retry_of"] == row.get("request_sha"):
@@ -161,7 +165,13 @@ def require_wi_complete(folder):
         raise ValueError("Cannot check the saved Wildlife Insights requests.") from exc
 
 def verified_row_update(old, new):
-    """An older verified row may acquire only its missing originals digest."""
+    """Keep verified evidence immutable while independent cleanup status changes."""
+    old, new = dict(old), dict(new)
+    for row in (old, new):
+        if "cleanup_state" in row and (
+                not isinstance(row["cleanup_state"], str) or row["cleanup_state"] not in CLEANUP_STATES):
+            return False
+        row.pop("cleanup_state", None)
     if old == new:
         return True
     proof = dict(new.get("integrity") or {})
