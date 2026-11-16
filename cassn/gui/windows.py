@@ -416,6 +416,11 @@ class DeploymentWindow(FieldDataWizard):
 
         self._run_staging_operation(super().stage_for_soundhub, on_busy=offer_queue)
 
+    def _refresh_soundhub_resume(self, *, staging_finished=False):
+        if self in self.manager.staging_queue:
+            return
+        super()._refresh_soundhub_resume(staging_finished=staging_finished)
+
     def _queue_stage(self, root, selected):
         root = root.resolve()
         try:
@@ -430,8 +435,12 @@ class DeploymentWindow(FieldDataWizard):
         self.manager.staging_queue[self] = QueuedStage(
             self.current_deployment_folder, root, frozenset(selected), anchor, device)
         self._set_soundhub_actions_enabled(False)
+        self.soundhub_stage_btn.setText("Queued…")
         self.soundhub_group.disclosure.setChecked(True)
-        self.soundhub_status_label.setText(f"Queued for staging: {', '.join(sorted(selected))}")
+        self.soundhub_status_label.setText(
+            "Queued — waiting for another operation to finish with this SoundHub staging folder. "
+            f"Staging will start automatically: {', '.join(sorted(selected))}")
+        self.soundhub_group.show_progress(0, 0, "Queued for SoundHub staging")
         self.cancel_soundhub_btn.setText("Cancel queued staging")
         self.cancel_soundhub_btn.setEnabled(True)
         self.cancel_soundhub_btn.show()
@@ -446,6 +455,7 @@ class DeploymentWindow(FieldDataWizard):
     def _remove_queued_stage(self):
         del self.manager.staging_queue[self]
         self._queue_timer.stop()
+        self.soundhub_group.hide_progress()
         self.cancel_soundhub_btn.hide()
         self._set_soundhub_actions_enabled(True)
 

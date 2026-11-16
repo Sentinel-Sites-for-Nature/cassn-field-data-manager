@@ -1428,6 +1428,9 @@ class FieldDataWizard(QMainWindow):
             self, box_web_url(self.current_deployment_folder, self.box_config.field_data_folder_id)))
         self.upload_group.add_footer_button(box_web)
         self.soundhub_panel_button = self.soundhub_group.add_action_button("Stage Bird Audio", self.soundhub_stage_btn, primary=True)
+        self.soundhub_stage_btn.changed.connect(lambda: self.soundhub_panel_button.setText(
+            "Stage Bird Audio" if self.soundhub_stage_btn.text() == "Prepare and stage bird audio for Wildlife Sound Hub"
+            else self.soundhub_stage_btn.text()))
         self.soundhub_group.add_action_button("Open Staging Folder", self.open_soundhub_btn)
         if self.wi_upload_helper:
             from cassn.gui.wi_upload import WildlifeInsightsControl
@@ -5011,6 +5014,8 @@ class FieldDataWizard(QMainWindow):
         self.soundhub_stage_btn.setEnabled(False)
 
     def _set_soundhub_actions_enabled(self, enabled: bool):
+        if enabled and self.soundhub_stage_btn.text() in {"Queued…", "Staging…"}:
+            self.soundhub_stage_btn.setText("Prepare and stage bird audio for Wildlife Sound Hub")
         self.soundhub_stage_btn.setEnabled(enabled)
         self.soundhub_location_btn.setEnabled(enabled)
         for action in (self.new_btn, self.switch_deployment_btn, self.exit_btn):
@@ -5092,7 +5097,7 @@ class FieldDataWizard(QMainWindow):
         self.cancel_soundhub_btn.show()
         self.soundhub_group.disclosure.setChecked(True)
         self._set_soundhub_actions_enabled(False)
-
+        self.soundhub_stage_btn.setText("Staging…")
         self.soundhub_group.show_progress(0, 0, "Preparing bird recordings")
         self.soundhub_stage_thread = SoundHubStageThread(
             self.current_deployment_folder, staging_root, self.lookups,

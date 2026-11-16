@@ -448,6 +448,10 @@ def test_busy_batch_queues_selected_recorders_in_order(manager, tmp_path, monkey
         window.stage_for_soundhub()
         assert window._work_running()
         assert manager.staging_queue[window].deployments == {"p2"}
+        assert window.soundhub_panel_button.text() == "Queued…"
+        assert not window.soundhub_panel_button.isEnabled()
+        window._refresh_soundhub_resume()
+        assert window.soundhub_panel_button.text() == "Queued…"
         window._try_queued_stage()
     start.assert_not_called()
     owner._staging_pending = False
@@ -457,6 +461,8 @@ def test_busy_batch_queues_selected_recorders_in_order(manager, tmp_path, monkey
     second._try_queued_stage()
     start.assert_called_once_with(tmp_path / "soundhub", {"p2"})
     third.cancel_soundhub()
+    assert third.soundhub_panel_button.text() == "Stage Bird Audio"
+    assert third.soundhub_panel_button.isEnabled()
     third._try_queued_stage()
     assert not manager.staging_queue
     assert start.call_count == 1
@@ -498,6 +504,8 @@ def test_stage_progress_title_and_box_finish_do_not_unlock_active_staging(manage
     window.stage_for_soundhub()
     assert window.soundhub_group.title() == title == "Prepare and Stage Bird Audio Data for SoundHub Upload"
     assert window._staging_pending
+    assert window.soundhub_panel_button.text() == "Staging…"
+    assert not window.soundhub_panel_button.isEnabled()
     FieldDataWizard._set_box_controls_busy(window, False)
     assert not window.exit_btn.isEnabled()
     assert not window.new_btn.isEnabled()
