@@ -631,3 +631,32 @@ def test_authentication_guidance_uses_normal_controls(work):
     control.update_authentication({})
     assert control.auth_notice.isHidden()
     assert control.authentication == {}
+
+
+def test_collapsed_wi_header_shows_waiting_then_confirmed_progress(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / 'stage').write_text('queued')
+    start(ctrl, QDialogButtonBox.Ok)
+    ctrl.group.disclosure.setChecked(False)
+    assert not ctrl.group.activity.isHidden()
+    assert ctrl.group.activity_bar.maximum() == 0
+    assert ctrl.group.activity_percent.text() == '…'
+    key = next(iter(ctrl.jobs))
+    ctrl.unavailable.add(key)
+    ctrl.render()
+    assert ctrl.group.activity_bar.maximum() == 0
+    assert 'Checking' in ctrl.group.activity.toolTip()
+    assert not ctrl.group.activity_check.isVisible()
+    ctrl.unavailable.clear()
+    for row in ctrl.jobs[key]['rows']:
+        row.update(stage='uploading', confirmed=1)
+    ctrl.render()
+    assert not ctrl.group.activity.isHidden()
+    assert ctrl.group.activity_bar.maximum() == 100
+    assert ctrl.group.activity_percent.text() == '50%'
+    for row in ctrl.jobs[key]['rows']:
+        row.update(stage='held', confirmed=0)
+    ctrl.render()
+    assert ctrl.group.activity.isHidden()

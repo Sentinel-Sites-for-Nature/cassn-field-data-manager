@@ -269,6 +269,12 @@ class WildlifeInsightsControl(QObject):
             self.group.show_progress(0, 0, "Finishing Wildlife Insights checks")
         elif complete_selection:
             self.group.show_progress(1, 1, "Camera uploads verified in Wildlife Insights", complete=True)
+        elif self.process and self.process.property("operation") in {"preview", "submit"}:
+            self.group.show_progress(0, 0, "Preparing Wildlife Insights upload")
+        elif states["queued"] or states["transferred_or_waiting"]:
+            self.group.show_progress(0, 0, "Waiting for Wildlife Insights")
+        elif states["unknown"] and self.transfer_active:
+            self.group.show_progress(0, 0, "Checking Wildlife Insights status; upload progress is not yet available")
         else:
             self.group.hide_progress()
         self.verified_summary.setVisible(bool(verified))
@@ -397,6 +403,7 @@ class WildlifeInsightsControl(QObject):
         process.setProperty("operation", operation)
         self.process = process
         self.refresh()
+        self.render()
         process.setProgram(self.helper)
         process.setArguments([operation])
         output = bytearray()
@@ -449,6 +456,7 @@ class WildlifeInsightsControl(QObject):
             finally:
                 process.deleteLater()
                 self.refresh()
+                self.render()
                 if self.menu_waiting and operation == "status":
                     self.menu_waiting = False
                     if succeeded and not self.closed and self.folder == folder:
