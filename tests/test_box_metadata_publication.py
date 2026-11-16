@@ -958,3 +958,84 @@ def test_final_receipt_history_current_paths_and_retry(tmp_path):
     publish_final_receipt(storage, second.local_folder, second.state)
     assert json.loads(data(RECEIPT)) == failed
     assert json.loads(data(archived))["verified"] is True
+
+
+def test_cancelled_publication_drafts_have_independent_hash_evidence(tmp_path):
+    from cassn.core.staging_cleanup import _publication_files
+    publication = prepare(FakeBox(), tmp_path, [row('bird.wav')])
+    publication.fail(RuntimeError('Upload cancelled before metadata publication'))
+    draft = publication.attempt_dir / 'audio_file_metadata.csv.candidate'
+    record = json.loads((publication.attempt_dir / 'attempt.json').read_text())['files']['audio_file_metadata.csv']
+    assert 'saved' not in record
+    assert record['candidate'] == dict(name=draft.name, size=draft.stat().st_size,
+                                       sha256=hashlib.sha256(draft.read_bytes()).hexdigest())
+    assert draft in _publication_files(tmp_path)
+    draft.write_bytes(draft.read_bytes() + b'changed')
+    assert draft not in _publication_files(tmp_path)
+
+
+def test_old_cancelled_draft_requires_exact_reconstruction(tmp_path):
+    from cassn.core.staging_cleanup import _publication_files
+    publication = prepare(FakeBox(), tmp_path, [row('bird.wav')])
+    publication.state['files']['audio_file_metadata.csv'].pop('candidate')
+    publication.fail(RuntimeError('cancelled'))
+    draft = publication.attempt_dir / 'audio_file_metadata.csv.candidate'
+    assert draft in _publication_files(tmp_path)
+    draft.write_bytes(payload([row('different.wav')]))
+    assert draft not in _publication_files(tmp_path)
+    unknown = publication.attempt_dir / 'personal.csv.candidate'
+    unknown.write_bytes(b'keep me')
+    assert unknown not in _publication_files(tmp_path)
+
+
+def test_changed_candidate_replaces_its_draft_evidence(tmp_path):
+    from cassn.core.staging_cleanup import _publication_files
+    publication = prepare(FakeBox(), tmp_path, [row('bird.wav')])
+    name = 'audio_file_metadata.csv'
+    new = payload([row('bird.wav', notes='new draft')])
+    publication._save_candidate(name, new)
+    draft = publication.attempt_dir / (name + '.candidate')
+    assert draft in _publication_files(tmp_path)
+    assert publication.state['files'][name]['candidate']['sha256'] == hashlib.sha256(new).hexdigest()
+
+
+def test_old_draft_match_requires_same_published_event_and_path(tmp_path):
+    from cassn.core.staging_cleanup import _publication_files
+    api = FakeBox()
+    publication = prepare(api, tmp_path, [row('bird.wav')])
+    # Use the application's actual approved manual-input name.
+    from cassn.box.metadata_merge import WI_INPUT_NAMES
+    name = WI_INPUT_NAMES['ML']
+    data = b'deployment_id\ncamera\n'
+    publication.state['files'][name] = dict(source=None, status='read')
+    draft = publication.attempt_dir / (name.replace('/', '__') + '.candidate')
+    draft.write_bytes(data)
+    publication.fail(RuntimeError('cancelled'))
+    assert draft not in _publication_files(tmp_path)
+    later = EventPublication(BoxStorage(api), 'other-event', tmp_path)
+    later.state['files'][name] = dict(status='verified', saved=dict(sha1=hashlib.sha1(data).hexdigest()))
+    later._save()
+    assert draft not in _publication_files(tmp_path)
+    later.state['folder_id'] = 'event'
+    later._save()
+    assert draft in _publication_files(tmp_path)
+    draft.write_bytes(data + b'changed\n')
+    assert draft not in _publication_files(tmp_path)
+
+
+def test_old_qc_draft_matches_all_values_regardless_of_object_order(tmp_path):
+    from cassn.core.staging_cleanup import _publication_files
+    publication = prepare(FakeBox(), tmp_path, [row('bird.wav')])
+    name = 'qc/qc_report.json'
+    local = b'{"history":{"session_checks":[],"devices":{}}}'
+    stem = publication.attempt_dir / 'qc__qc_report.json'
+    Path(str(stem) + '.local').write_bytes(local)
+    draft = Path(str(stem) + '.candidate')
+    draft.write_text(json.dumps(json.loads(merge_qc(None, local)), sort_keys=True))
+    publication.state['files'][name] = dict(source=None, status='read')
+    publication.fail(RuntimeError('cancelled'))
+    assert draft in _publication_files(tmp_path)
+    changed = json.loads(draft.read_bytes())
+    changed['extra'] = 'unrecorded content'
+    draft.write_text(json.dumps(changed))
+    assert draft not in _publication_files(tmp_path)

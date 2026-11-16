@@ -19,6 +19,8 @@ import re
 import plistlib
 import stat
 import sys
+import shutil
+import tempfile
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -31,7 +33,7 @@ from cassn.core.wi_requests import require_wi_complete, staging_write_lock
 from cassn.box.upload_state import require_uploads_complete
 from cassn.box.publication import STATE_PATH, batch_remote_path, require_publication_complete
 from cassn.box.verification import collect_box_file_hashes, is_orphan_on_box, recorded_archive_paths
-from cassn.box.metadata_merge import CSV_NAMES, merge_csv, merge_event, read_csv, read_object
+from cassn.box.metadata_merge import CSV_NAMES, merge_csv, merge_event, merge_qc, read_csv, read_object
 from cassn.box.metadata_store import BoxFileStore
 from cassn.config import CONFIG_JSON, DEFAULT_STAGING_ROOT, LOCK_DIR, VERSION
 from cassn.profile import PROFILE
@@ -95,7 +97,7 @@ class StagingCleanupPlan:
     config_path: Path = CONFIG_JSON
     field_data_folder_id: str = ""
     storage: BoxStorage | None = field(default=None, repr=False)
-    checks: dict = field(default_factory=lambda: {name: {"status": "incomplete"} for name in
+    checks: dict = field(default_factory=lambda: {name: {"status": "Not checked"} for name in
                                                  ("Local staging", "Box", "Wildlife Insights", "SoundHub")})
     warnings: list[str] = field(default_factory=list)
     staged_files_signature: str = ""
@@ -589,7 +591,10 @@ def _inspect_event(plan, staging_root, progress):
             except (OSError, ValueError, TypeError):
                 owned = False
             if not owned:
-                plan.reasons.append(f"Move {relative} outside the event folder, then run Check again.")
+                if relative.startswith("qc/box_publications/"):
+                    plan.reasons.append(f"FDM could not verify recovery file {relative}. Keep it for review; do not delete it to bypass this check.")
+                else:
+                    plan.reasons.append(f"Move {relative} outside the event folder, then run Check again.")
             continue
         local_uploadable.add(relative)
         if relative.startswith("raw_data/"):
@@ -636,6 +641,8 @@ def _inspect_event(plan, staging_root, progress):
     # checks.  Fix the local evidence first, then rerun the dry run.
     if plan.reasons:
         plan.checks["Local staging"]["status"] = "blocked"
+        for name in ("Box", "Wildlife Insights", "SoundHub"):
+            plan.checks[name].update(status="Not checked", reason="The local staging check must pass first.")
         return plan
 
     plan.checks["Local staging"] = {"status": "passed", "originals": plan.file_count}
@@ -833,6 +840,8 @@ def _inspect_event(plan, staging_root, progress):
 def _publication_files(folder):
     from cassn.box.metadata_merge import SHARED_NAMES, WI_INPUT_NAMES, WI_STAGED_NAMES
     owned = set()
+    journals = []
+    published = {}
     for journal in (folder / "qc/box_publications").glob("*/attempt.json"):
         attempt = journal.parent.name
         if not re.fullmatch(r"[0-9]{8}T[0-9]{6}_[0-9a-f]{32}", attempt):
@@ -840,6 +849,13 @@ def _publication_files(folder):
         state = _read_json(journal)
         if state.get("attempt_id") != attempt:
             continue
+        journals.append((journal, state))
+        for name, record in state.get("files", {}).items():
+            saved = record.get("saved") or {}
+            if state.get("folder_id") and record.get("status") == "verified" and saved.get("sha1"):
+                published.setdefault((state["folder_id"], name), set()).add(saved["sha1"])
+    for journal, state in journals:
+        attempt = journal.parent.name
         owned.add(journal)
         delivery = journal.parent / "receipt_delivery.json"
         if delivery.is_file():
@@ -864,13 +880,116 @@ def _publication_files(folder):
                     read_object(local.read_bytes())
                 owned.add(local)
             candidate = Path(str(base) + ".candidate")
-            if candidate.is_file() and compute_file_sha1(candidate) == (record.get("saved") or {}).get("sha1"):
-                owned.add(candidate)
+            if candidate.is_file():
+                draft = record.get("candidate")
+                if draft is not None:
+                    if (isinstance(draft, dict) and draft.get("name") == candidate.name
+                            and type(draft.get("size")) is int and candidate.stat().st_size == draft["size"]
+                            and sha256(candidate) == draft.get("sha256")):
+                        owned.add(candidate)
+                elif compute_file_sha1(candidate) == (record.get("saved") or {}).get("sha1"):
+                    owned.add(candidate)
+                elif (state.get("status") == "needs_recovery" and record.get("status") == "read"
+                      and compute_file_sha1(candidate) in published.get((state.get("folder_id"), name), set())):
+                    # An unchanged old draft may be proved by a later publication
+                    # of this same metadata path to this same event folder.
+                    owned.add(candidate)
+                elif _legacy_unpublished_candidate(journal, state, name, candidate):
+                    owned.add(candidate)
             for index, update in enumerate(record.get("wi_updates", []), 1):
                 path = Path(str(base) + f".wi-{index}.source")
                 if path.is_file() and compute_file_sha1(path) == update.get("current", {}).get("sha1"):
                     owned.add(path)
     return owned
+
+
+def _legacy_unpublished_candidate(journal, state, name, candidate):
+    """Rebuild a narrow legacy draft from retained inputs, never invent a receipt.
+
+    Only first-publication shared metadata with no remote baseline qualifies.
+    Other old drafts remain blocked for review.
+    """
+    from cassn.box.metadata_merge import SHARED_NAMES
+    if (name not in SHARED_NAMES or state.get("phase") != "initial"
+            or state.get("status") != "needs_recovery"):
+        return False
+    record = state["files"][name]
+    if record.get("status") != "read" or "source" not in record or record["source"] is not None:
+        return False
+    local = journal.parent / (name.replace("/", "__") + ".local")
+    if not local.is_file() or local.is_symlink():
+        return False
+    before = local.read_bytes()
+    if name in CSV_NAMES:
+        expected = merge_csv(None, before)
+    elif name == "qc/qc_report.json":
+        expected = merge_qc(None, before)
+        # The historical merger iterated a set of device labels. JSON object
+        # order can differ across processes; every key and value must match.
+        return read_object(candidate.read_bytes()) == read_object(expected)
+    elif name == "deployment_event_record.json":
+        count = 0
+        for csv_name in CSV_NAMES:
+            entry = state["files"].get(csv_name, {})
+            if "source" not in entry or entry["source"] is not None:
+                return False
+            csv_local = journal.parent / (csv_name + ".local")
+            if csv_local.is_symlink():
+                return False
+            if csv_local.is_file():
+                count += len(read_csv(csv_local.read_bytes())[1])
+        if read_object(before).get("file_count") != count:
+            return False
+        expected = merge_event(None, before, file_count=count)
+    else:
+        return False
+    return candidate.read_bytes() == expected
+
+
+def _archive_publication_files(plan, report):
+    """Keep verified publication evidence outside the event before any removal."""
+    folder = plan.deployment_folder
+    files = _publication_files(folder)
+    state = folder / STATE_PATH
+    if state.is_file():
+        files.add(state)
+    if not files:
+        return None
+    destination = report.with_suffix(".publication-records")
+    if destination.resolve().is_relative_to(folder.resolve()):
+        raise StagingCleanupError("Publication archive overlaps the event.")
+    with tempfile.TemporaryDirectory(dir=report.parent) as temporary:
+        archive = Path(temporary) / "records"
+        archive.mkdir()
+        manifest = {}
+        for source in sorted(files):
+            if source.is_symlink():
+                raise StagingCleanupError("Linked publication evidence cannot be archived.")
+            relative = source.relative_to(folder).as_posix()
+            target = archive / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            digest = sha256(source)
+            with source.open("rb") as src, target.open("xb") as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+            if sha256(target) != digest or sha256(source) != digest:
+                raise StagingCleanupError("Publication evidence changed while being archived.")
+            manifest[relative] = {"sha256": digest, "size": target.stat().st_size}
+        atomic_json(archive / "manifest.json", {"event": plan.event_name, "files": manifest})
+        for directory in [*(p for p in archive.rglob("*") if p.is_dir()), archive]:
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        archive.rename(destination)
+        fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return destination
 
 
 def _owned_local_file(path, folder, relative, publication_files, inventory):
@@ -947,14 +1066,23 @@ def _remove_unchanged_deployment(plan, folder):
         raise StagingCleanupError("Deployment changed after cleanup preflight.")
     report = save_cleanup_report(plan, "removal started")
     evidence = plan.report()
+    removal_started = False
     try:
+        archive = _archive_publication_files(plan, report)
+        evidence["publication_archive"] = str(archive) if archive else None
+        # Copying must not hide a change between verification and removal.
+        if _tree_snapshot(folder) != tree:
+            raise StagingCleanupError("Deployment changed while preserving publication records.")
+        atomic_json(report, evidence)
+        removal_started = True
         _remove_snapshot(folder, tree)
         if folder.exists() or (plan.staged_flacs and plan.staged_files_signature != _signature(
                 {str(path): _identity(path.lstat()) for path in plan.staged_flacs})):
             raise StagingCleanupError("Could not confirm the event and independent SoundHub files after removal.")
         evidence["outcome"] = "cleared"
     except Exception as exc:
-        evidence.update(outcome="removal incomplete", folder_exists=folder.exists(), error=_report_reason(str(exc)))
+        evidence.update(outcome="removal incomplete" if removal_started else "removal not started",
+                        folder_exists=folder.exists(), error=_report_reason(str(exc)))
         raise StagingCleanupError(f"Inspect {folder} and {report}: {exc}") from exc
     finally:
         atomic_json(report, evidence)

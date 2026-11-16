@@ -6,6 +6,7 @@ the local attempt journal records partial publication and blocks cleanup.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -89,6 +90,17 @@ class EventPublication:
     def fail(self, exc):
         self.state.update(status="needs_recovery", error=str(exc))
         self._save()
+
+    def _save_candidate(self, name, payload):
+        """Record draft identity before writing, including cancelled publications."""
+        path = self.attempt_dir / (name.replace("/", "__") + ".candidate")
+        self.state["files"][name]["candidate"] = {
+            "name": path.name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        self._save()
+        with path.open("wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def validate_batch_inventory(self, inventory):
         """Bind the local CSV rows to this batch, never to older Box-only rows."""
@@ -218,7 +230,7 @@ class EventPublication:
             ref = self.refs[name]
             if ref and not ref.can_upload:
                 raise MetadataConflict(f"No permission to update {name}")
-            (self.attempt_dir / (name.replace("/", "__") + ".candidate")).write_bytes(payload)
+            self._save_candidate(name, payload)
         self.state["status"] = "prepared"
         self._save()
 
@@ -323,7 +335,7 @@ class EventPublication:
         Path(str(stem) + ".source").write_bytes(newer)
         if name in self.candidates:
             self.candidates[name] = candidate
-            (self.attempt_dir / (name + ".candidate")).write_bytes(candidate)
+            self._save_candidate(name, candidate)
         self.remote[name] = newer
         self.refs[name] = current
         updates.append({"previous": asdict(ref), "current": asdict(current)})

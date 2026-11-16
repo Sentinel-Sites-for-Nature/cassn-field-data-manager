@@ -612,3 +612,57 @@ def test_box_lookup_extra_blocks_even_when_manifest_hash_matches(tmp_path):
     plan = inspect_deployment_for_cleanup(event, staging, storage, "field-root")
     assert not plan.clearable
     assert any("folder contents differ" in r for r in plan.reasons)
+
+
+def _recovery_draft(event):
+    attempt = '20261115T000000_' + 'a' * 32
+    directory = event / 'qc/box_publications' / attempt
+    directory.mkdir(parents=True)
+    draft = directory / 'qc__qc_report.json.candidate'
+    draft.write_bytes((event / 'qc/qc_report.json').read_bytes())
+    journal = directory / 'attempt.json'
+    journal.write_text(json.dumps(dict(attempt_id=attempt, status='needs_recovery', phase='initial', files={
+        'qc/qc_report.json': dict(status='read', source=None, candidate=dict(
+            name=draft.name, size=draft.stat().st_size, sha256=hashlib.sha256(draft.read_bytes()).hexdigest()))})))
+    return draft, journal
+
+
+def test_clearance_archives_recovery_records_before_removal(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    draft, journal = _recovery_draft(event)
+    original = {p.relative_to(event).as_posix(): p.read_bytes() for p in (draft, journal)}
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert plan.clearable, plan.reasons
+    result = clear_verified_deployment(plan)
+    report = json.loads(result.report_path.read_text())
+    archive = Path(report['publication_archive'])
+    assert not archive.is_relative_to(event)
+    assert not event.exists()
+    manifest = json.loads((archive / 'manifest.json').read_text())['files']
+    for name, data in original.items():
+        assert (archive / name).read_bytes() == data
+        assert manifest[name]['sha256'] == hashlib.sha256(data).hexdigest()
+
+
+def test_failed_recovery_archive_preserves_entire_event(tmp_path, monkeypatch):
+    from cassn.core import staging_cleanup
+    staging, event, storage = _build_event(tmp_path)
+    _recovery_draft(event)
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert plan.clearable, plan.reasons
+    before = {p.relative_to(event): p.read_bytes() for p in event.rglob('*') if p.is_file()}
+    monkeypatch.setattr(staging_cleanup.shutil, 'copyfileobj', lambda src, dst: dst.write(b'corrupt'))
+    with pytest.raises(StagingCleanupError, match='changed while being archived'):
+        clear_verified_deployment(plan)
+    assert before == {p.relative_to(event): p.read_bytes() for p in event.rglob('*') if p.is_file()}
+
+
+def test_changed_recovery_draft_blocks_and_explains_skipped_checks(tmp_path):
+    staging, event, storage = _build_event(tmp_path)
+    draft, _ = _recovery_draft(event)
+    draft.write_bytes(b'changed')
+    plan = inspect_deployment_for_cleanup(event, staging, storage, 'field-root')
+    assert not plan.clearable
+    assert any('Keep it for review' in reason for reason in plan.reasons)
+    for name in ('Box', 'Wildlife Insights', 'SoundHub'):
+        assert plan.checks[name] == dict(status='Not checked', reason='The local staging check must pass first.')
