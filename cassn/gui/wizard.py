@@ -3543,6 +3543,9 @@ class FieldDataWizard(QMainWindow):
         if recorded is not None:
             event_bar(self.upload_progress_bar, recorded, total, "files uploaded")
             self.upload_progress_bar.show()
+            if started and total:
+                self.upload_group.show_progress(
+                    recorded, total, "Event files recorded as uploaded; Box verification is still required")
             self.box_history_label.setText(
                 f"{recorded:,} of {total:,} event files recorded as uploaded · {total - recorded:,} await confirmation.")
             self.box_history_label.show()
@@ -3592,8 +3595,14 @@ class FieldDataWizard(QMainWindow):
         self.upload_progress_bar.show()
         FieldDataWizard._show_box_count_summary(self)
         complete = verified and current == total
-        if not complete:
+        if total:
+            self.upload_group.show_progress(
+                current, total,
+                "Event files verified against Box" if complete else "Event files present on Box; verification is still required",
+                complete=complete)
+        else:
             self.upload_group.hide_progress()
+        if not complete:
             self.upload_metrics_label.clear()
         self.box_upload_complete = complete
         self.box_panel_button.setEnabled(not complete and self.upload_now_btn.isEnabled() and bool(self.file_inventory))

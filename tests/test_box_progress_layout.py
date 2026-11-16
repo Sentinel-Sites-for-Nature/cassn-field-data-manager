@@ -335,6 +335,9 @@ def test_event_bars_count_each_new_file_once_and_keep_earlier_results(monkeypatc
         state_path.write_text(json.dumps(state))
         window._show_saved_box_result(False)
         assert window.upload_progress_bar.text() == "1 of 2 files uploaded · 50%"
+        assert not window.upload_group.activity.isHidden()
+        assert window.upload_group.activity_percent.text() == "50%"
+        assert window.upload_group.activity_check.isHidden()
         assert "Ready to continue" in window.upload_status_label.text()
         assert "Legacy" not in window.upload_status_label.text()
         state["error"] = "A Box file changed during publication"
