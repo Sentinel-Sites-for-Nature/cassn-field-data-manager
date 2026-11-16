@@ -362,6 +362,26 @@ def test_deployment_rows_format_coordinates_to_eight_decimal_places(deployment):
     assert row["latitude"] == "36.84449545"
 
 
+def test_recording_template_matches_export_schema():
+    from datetime import datetime
+
+    template = Path(__file__).resolve().parents[1] / "templates" / "soundhub_recording_template.csv"
+    with template.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == SOUNDHUB_RECORDING_FIELDS
+        rows = list(reader)
+    assert rows
+    for row in rows:
+        assert row["path"].startswith(row["deployment_id"] + "/")
+        assert row["path"].endswith(".flac")
+        for key in ("start", "end"):
+            moment = datetime.fromisoformat(row[key])
+            assert moment.utcoffset() is not None
+            assert moment.isoformat(sep=" ") == row[key]
+        assert int(row["sample_rate"]) > 0
+        assert row["notes"] == ""
+
+
 def test_recording_rows_use_flac_names_and_offsets(deployment):
     rows = build_recording_rows(read_bd_audio_rows(deployment))
     assert list(rows[0]) == SOUNDHUB_RECORDING_FIELDS

@@ -1,0 +1,3 @@
+deployment_id,path,start,end,sample_rate,notes
+UC_QuailRidge_plot1_BD_20260118,UC_QuailRidge_plot1_BD_20260118/UC_QuailRidge_plot1_BD_20260118_00001.flac,2025-12-28 20:00:00-08:00,2025-12-28 20:01:00-08:00,48000,
+UC_QuailRidge_plot1_BD_20260118,UC_QuailRidge_plot1_BD_20260118/UC_QuailRidge_plot1_BD_20260118_00002.flac,2025-12-28 20:10:00-08:00,2025-12-28 20:11:00-08:00,48000,
