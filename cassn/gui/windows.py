@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QSaveFile, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from cassn.core.event_lock import ResourceBusy, ResourceLease, deployment_keys
 from cassn.config import CONFIG_JSON, LOCK_DIR, APP_TITLE
@@ -102,6 +102,7 @@ class DeploymentWindow(FieldDataWizard):
         self._staging_pending = False
         self._staging_lease = None
         self._closed = False
+        self._cleared_event = None
         self._callback_depth = 0
         self._pending_box_reconnect = None
         self._initializing = True
@@ -169,6 +170,9 @@ class DeploymentWindow(FieldDataWizard):
             self.offer_resume_session(sessions)
 
     def _refresh_workspace_context(self, *_args):
+        if self._cleared_event:
+            self.setWindowTitle(f"{self._cleared_event.name} — Local staging cleared — {APP_TITLE}")
+            return
         super()._refresh_workspace_context()
         event = self.metadata.get("deployment_event_id") if self.current_deployment_folder else None
         self.setWindowTitle(f"{event or 'New deployment'} — {APP_TITLE}")
@@ -239,6 +243,60 @@ class DeploymentWindow(FieldDataWizard):
         if self._deployment_lease:
             self._deployment_lease.release()
             self._deployment_lease = None
+
+    def show_cleared_event(self, folder, report_path):
+        """Keep a completed window visible without retaining a writable session."""
+        self._cleared_event = folder
+        self.clearance_report_path = report_path
+        self.current_deployment_folder = None
+        self._release_deployment()
+        self._release_idle_cloud()
+        for name in ("_session_picker_timer", "_card_ejection_timer", "_queue_timer", "_hosted_timer", "_lease_timer"):
+            timer = getattr(self, name, None)
+            if timer:
+                timer.stop()
+        if getattr(self, "wi_control", None):
+            self.wi_control.close()
+
+        # Retain the old widgets for normal close handling, but remove every
+        # route back to editing or saving the deleted event.
+        workspace = self.takeCentralWidget()
+        workspace.setEnabled(False)
+        pages = QStackedWidget(self)
+        pages.addWidget(workspace)
+        confirmation = QWidget()
+        layout = QVBoxLayout(confirmation)
+        layout.setContentsMargins(36, 32, 36, 32)
+        layout.setSpacing(18)
+        heading = QLabel("✓ Local staging is cleared.")
+        heading.setStyleSheet("color: #18715b; font-size: 24px; font-weight: 700;")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        self.clearance_confirmation = QLabel(
+            f"All files in {folder.name}’s local staging folder were deleted.\n\n"
+            "Box files, Wildlife Insights uploads, and the separate SoundHub staging folder remain in place.\n\n"
+            "You can now quit the app."
+        )
+        self.clearance_confirmation.setTextFormat(Qt.PlainText)
+        self.clearance_confirmation.setWordWrap(True)
+        self.clearance_confirmation.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.clearance_confirmation)
+        self.clearance_quit_btn = QPushButton("Quit app")
+        self.clearance_quit_btn.clicked.connect(self.manager.close_all)
+        layout.addWidget(self.clearance_quit_btn, 0, Qt.AlignLeft)
+        layout.addStretch()
+        pages.addWidget(confirmation)
+        self.setCentralWidget(pages)
+        pages.setCurrentWidget(confirmation)
+        for action in self.file_menu.actions():
+            if action not in (self.exit_btn, self.new_window_action) and action.menuRole() != QAction.QuitRole:
+                action.setEnabled(False)
+        for action in self.menuBar().actions():
+            if action.menu() and action.menu() is not self.file_menu:
+                action.setEnabled(False)
+        self.statusBar().clearMessage()
+        self._refresh_workspace_context()
+        self.clearance_quit_btn.setFocus()
 
     def open_different_deployment(self):
         self.manager.new_window(open_sessions=True)

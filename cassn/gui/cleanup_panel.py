@@ -298,10 +298,8 @@ class CleanupPanel(QGroupBox):
             self.status("Check required")
             self.message.setText(escape(worker.error or "Check cancelled."))
         elif worker.preview:
-            self.window.current_deployment_folder = None
-            next_window = self.window.manager.new_window(open_sessions=True)
-            next_window.statusBar().showMessage(f"Cleared {worker.folder.name}. Report: {worker.result.report_path}")
-            self.window.close()
+            self.plan = None
+            self.window.show_cleared_event(worker.folder, worker.result.report_path)
         else:
             self.plan = worker.result
             self.status("Ready to clear" if self.plan.clearable else "Keep local files")

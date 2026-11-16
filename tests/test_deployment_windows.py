@@ -644,12 +644,31 @@ def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, 
     for _ in range(400):
         QApplication.processEvents()
         time.sleep(.01)
-        if w not in manager.windows:
+        if w._cleared_event:
             break
-    assert w not in manager.windows
+    assert manager.windows == [w]
+    assert w.isVisible()
+    assert w.current_deployment_folder is None
+    assert w._deployment_lease is None
+    assert not w.workspace.isEnabled()
+    assert not w.new_btn.isEnabled()
+    assert "All files in" in w.clearance_confirmation.text()
+    assert event.name in w.clearance_confirmation.text()
+    assert "You can now quit the app." in w.clearance_confirmation.text()
+    assert "Local staging cleared" in w.windowTitle()
+    assert not event.exists()
+    w.save_session()
     assert not event.exists()
     report, = (tmp_path / "profile/cleanup-reports").glob("*.json")
     assert json.loads(report.read_text())["outcome"] == "cleared"
+    assert w.clearance_report_path == report
+    # Quitting from the confirmation still protects work in another window.
+    other = manager.new_window(open_sessions=False)
+    other._box_operation_active = True
+    w.clearance_quit_btn.click()
+    assert manager.windows == [other]
+    assert not event.exists()
+    other._box_operation_active = False
 
 
 def test_collapsed_cleanup_header_fills_panel(manager):
