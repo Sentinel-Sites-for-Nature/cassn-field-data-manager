@@ -573,6 +573,13 @@ changed rows in each project CSV, and totals for the entire batch. **Open Stagin
 After cancellation or failure, reopen the event and choose
 **Stage Bird Audio** in the panel. The app shows completed and remaining recording counts.
 It checks completed FLACs and reuses them. Unfinished events stay in `.cassn_work/` beside the upload folder.
+After each verified conversion, the app saves the recording's size and SHA-256 checksum in `.cassn_work/.checksums/`.
+On restart, it reads every byte and compares the checksum with that saved value.
+A matching checksum replaces the separate FLAC decoding check; file size and modification time alone never permit reuse.
+A mismatch stops staging and preserves the saved checksum.
+Older recordings, missing checksums, and incomplete checksum records require a full FLAC decoding check before saving a checksum.
+Checksum records stay outside the upload folder and use an atomic write with a filesystem flush.
+Recovery also checks recordings after an interruption during folder moves or CSV updates.
 Staging checks available disk space before conversion, including space for temporary files.
 If disk space runs out, free space and continue the same event.
 The app moves each completed recorder folder with one rename.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import json
+import os
 import re
 import shutil
 import struct
@@ -668,6 +670,202 @@ def test_stage_is_idempotent(deployment, tmp_path):
     second = stage_deployment(deployment, rows, staging)
     assert second["converted"] == 0
     assert second["skipped"] == 3
+
+
+@needs_flac
+@pytest.mark.parametrize("finished", [False, True])
+def test_restart_hashes_each_completed_recording_once_without_decoding(
+    deployment, tmp_path, monkeypatch, finished,
+):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    prepared = []
+    first = stage_deployment(
+        deployment, rows, staging,
+        recording_prepared=lambda *args: prepared.append(args),
+        is_cancelled=lambda: not finished and len(prepared) == 2,
+    )
+    assert first["cancelled"] is not finished
+    assert len(list((work_root(staging) / ".checksums").glob("*/*.json"))) == len(prepared)
+    hashes, decodes = [], []
+    original_hash, run = module.hashing.sha256, module.subprocess.run
+
+    def hash_once(path):
+        hashes.append(path.name)
+        return original_hash(path)
+
+    def track_decode(command, **kwargs):
+        if "--test" in command:
+            decodes.append(command)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(module.hashing, "sha256", hash_once)
+    monkeypatch.setattr(module.subprocess, "run", track_decode)
+    result = stage_deployment(deployment, rows, staging)
+    assert result["skipped"] == len(prepared)
+    assert len(hashes) == len(set(hashes)) == 3
+    assert not decodes
+    assert {p.suffix for p in project_root(staging).rglob("*") if p.is_file()} == {".csv", ".flac"}
+
+
+@needs_flac
+@pytest.mark.parametrize("damage", ["same_size", "truncated", "valid_flac"])
+def test_restart_rejects_changed_recording_and_preserves_checksum(
+    deployment, tmp_path, damage,
+):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+    prepared = []
+    stage_deployment(deployment, rows, staging,
+                     recording_prepared=lambda *args: prepared.append(args),
+                     is_cancelled=lambda: bool(prepared))
+    media = next(work_root(staging).glob("*/*.flac"))
+    checkpoint = module._checksum_path(staging, media)
+    saved = checkpoint.read_bytes()
+    original = media.stat()
+    if damage == "valid_flac":
+        source = tmp_path / "different.wav"
+        make_wav(source, seconds=0.1)
+        module.convert_wav_to_flac(source, media)
+    else:
+        data = bytearray(media.read_bytes())
+        data[-1] ^= 1
+        media.write_bytes(data if damage == "same_size" else data[:-50])
+    os.utime(media, ns=(original.st_atime_ns, original.st_mtime_ns))
+    with pytest.raises(SoundHubStagingError, match="checksum check"):
+        stage_deployment(deployment, rows, staging)
+    assert checkpoint.read_bytes() == saved
+    assert not (work_root(staging) / "pending.json").exists()
+
+
+@needs_flac
+@pytest.mark.parametrize("checkpoint_state", ["missing", "truncated", "wrong_identity", "wrong_type"])
+def test_legacy_or_incomplete_checkpoint_requires_decode_before_saving(
+    deployment, tmp_path, monkeypatch, checkpoint_state,
+):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)[:1]
+    stage_deployment(deployment, rows, staging)
+    media = next(project_root(staging).glob("*/*.flac"))
+    checkpoint = module._checksum_path(staging, media)
+    if checkpoint_state == "missing":
+        checkpoint.unlink()
+    elif checkpoint_state == "truncated":
+        checkpoint.write_text('{"version":')
+    elif checkpoint_state == "wrong_type":
+        checkpoint.write_text("[]")
+    else:
+        saved = json.loads(checkpoint.read_text())
+        saved["deployment_id"] = "another_recorder"
+        checkpoint.write_text(json.dumps(saved))
+    decodes = []
+    run = module.subprocess.run
+
+    def track_decode(command, **kwargs):
+        if "--test" in command:
+            decodes.append(command)
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", track_decode)
+    stage_deployment(deployment, rows, staging)
+    assert len(decodes) == 1
+    assert json.loads(checkpoint.read_text())["sha256"] == module.hashing.sha256(media)
+    stage_deployment(deployment, rows, staging)
+    assert len(decodes) == 1
+
+
+@needs_flac
+def test_failed_legacy_integrity_check_does_not_save_a_checksum(deployment, tmp_path):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    row = read_bd_audio_rows(deployment)[0]
+    media = work_root(staging) / row["deployment_id"] / Path(row["filename"]).with_suffix(".flac")
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"damaged recording")
+    with pytest.raises(SoundHubStagingError, match="integrity check"):
+        stage_deployment(deployment, [row], staging)
+    assert not module._checksum_path(staging, media).exists()
+
+
+@needs_flac
+def test_interrupted_checksum_save_requires_decode_on_restart(deployment, tmp_path, monkeypatch):
+    from cassn.soundhub import staging as module
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)[:1]
+    replace = Path.replace
+
+    def fail_checkpoint(path, target):
+        if path.name.startswith(".checksum-"):
+            raise OSError("drive disconnected while saving checksum")
+        return replace(path, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail_checkpoint)
+        with pytest.raises(OSError, match="drive disconnected"):
+            stage_deployment(deployment, rows, staging)
+    media = next(work_root(staging).glob("*/*.flac"))
+    assert not module._checksum_path(staging, media).exists()
+    # A missing checkpoint must not allow a damaged completed file through.
+    media.write_bytes(b"disconnected drive left a damaged file")
+    with pytest.raises(SoundHubStagingError, match="integrity check"):
+        stage_deployment(deployment, rows, staging)
+
+
+@needs_flac
+def test_file_change_during_hash_does_not_save_a_checksum(deployment, tmp_path, monkeypatch):
+    from cassn.soundhub import staging as module
+
+    original_hash = module.hashing.sha256
+
+    def change_during_hash(path):
+        digest = original_hash(path)
+        with path.open("ab") as stream:
+            stream.write(b"changed")
+        return digest
+
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(module.hashing, "sha256", change_during_hash)
+    with pytest.raises(SoundHubStagingError, match="changed during its integrity check"):
+        stage_deployment(deployment, read_bd_audio_rows(deployment), staging)
+    assert not list((work_root(staging) / ".checksums").glob("*/*.json"))
+
+
+@needs_flac
+@pytest.mark.parametrize("promoted", [False, True])
+def test_completion_recovery_checks_recordings_after_disconnect(
+    deployment, tmp_path, monkeypatch, promoted,
+):
+    from cassn.soundhub import export
+
+    staging = tmp_path / "staging"
+    rows = read_bd_audio_rows(deployment)
+
+    def interrupt(*args):
+        raise OSError("drive disconnected during completion")
+
+    with monkeypatch.context() as patch:
+        if promoted:
+            patch.setattr(export, "refresh_project_csvs", interrupt)
+        else:
+            patch.setattr(Path, "rename", interrupt)
+        with pytest.raises(SoundHubStagingError, match="drive disconnected"):
+            stage_deployment(deployment, rows, staging)
+    root = project_root(staging) if promoted else work_root(staging)
+    media = next(root.glob("*/*.flac"))
+    data = bytearray(media.read_bytes())
+    data[-1] ^= 1
+    media.write_bytes(data)
+    with pytest.raises(SoundHubStagingError, match="checksum check"):
+        recover_staging(staging)
+    assert (work_root(staging) / "pending.json").exists()
 
 
 @needs_flac
