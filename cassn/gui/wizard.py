@@ -70,7 +70,7 @@ from cassn.box.threads import (
     ProvenanceUploadThread,
 )
 from cassn.gui.soundhub_thread import SoundHubStageThread, SoundHubUploadThread
-from cassn.gui.review_page import ReviewPage
+from cassn.gui.review_page import ReviewCard, ReviewPage
 from cassn.gui.platform_links import box_web_url, open_platform_url
 from cassn.gui.progress_table import ProgressTable
 from cassn.gui.activity_log import ActivityLog, operation_message
@@ -792,8 +792,6 @@ class FieldDataWizard(QMainWindow):
         self.device_tree.setMinimumHeight(100 if compact else 190)
         self.card_jobs_scroll.setMinimumHeight(140 if compact else 0)
         self.collection_splitter.setSizes([190, 300] if compact else [400, 660])
-        self.review_splitter.setOrientation(Qt.Vertical if compact else Qt.Horizontal)
-        self.review_splitter.setSizes([420, 480])
         self._reflow_card_panels()
 
     def create_metadata_tab(self):
@@ -1215,50 +1213,33 @@ class FieldDataWizard(QMainWindow):
         heading.addWidget(workspace_label("Review & upload", "pageTitle", wrap=True), 1)
         layout.addLayout(heading)
 
-        # Summary text
-        summary_group = QGroupBox("Collection summary")
-        summary_layout = QVBoxLayout()
+        layout.addWidget(workspace_label("Review Event", "sectionTitle", wrap=True))
+        self.review_overview = QWidget()
+        self.review_overview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        overview_layout = QVBoxLayout(self.review_overview)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(16)
 
+        self.summary_group = ReviewCard("Collection Summary")
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
         self.summary_text.setFixedHeight(220)
-        summary_layout.addWidget(self.summary_text)
+        self.summary_group.body.addWidget(self.summary_text)
+        overview_layout.addWidget(self.summary_group)
 
-        summary_group.setLayout(summary_layout)
-
-        # Native logical tree: expandable and width-safe, but deliberately
-        # bounded so opening Review never enumerates tens of thousands of media
-        # files from raw_data device folders.
-        tree_group = QGroupBox("Staged Deployment Event")
-        tree_layout = QVBoxLayout()
+        self.staged_event_group = ReviewCard("Staged Deployment Event")
+        self.staged_event_label = workspace_label(
+            "No local staging folder selected.", "", wrap=True,
+        )
+        self.staged_event_group.body.addWidget(self.staged_event_label)
         self.open_event_folder_btn = QPushButton("Open in Finder" if platform.system() == "Darwin" else "Open Folder")
-        self.open_event_folder_btn.setToolTip("Open this event’s local staging folder.")
+        self.open_event_folder_btn.setToolTip("Open this event’s local staging folder to review its files.")
         self.open_event_folder_btn.setEnabled(False)
         self.open_event_folder_btn.clicked.connect(self.open_staging_folder)
-        tree_layout.addWidget(self.open_event_folder_btn, alignment=Qt.AlignRight)
-        self.staged_event_tree = QTreeWidget()
-        self.staged_event_tree.setHeaderLabels(["Folder / File", "Contents"])
-        self.staged_event_tree.setFixedHeight(self.summary_text.height())
-        header = self.staged_event_tree.header()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.staged_event_tree.setAlternatingRowColors(True)
-        tree_layout.addWidget(self.staged_event_tree)
-        tree_group.setLayout(tree_layout)
-
-        self.review_splitter = review_splitter = QSplitter(Qt.Horizontal)
-        # The overview has its own scrolling. Do not give it the extra height
-        # requested by expanded platform panels farther down the page.
-        review_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        review_splitter.setChildrenCollapsible(False)
-        review_splitter.addWidget(summary_group)
-        review_splitter.addWidget(tree_group)
-        review_splitter.setStretchFactor(0, 1)
-        review_splitter.setStretchFactor(1, 1)
-        review_splitter.setSizes([330, 260])
+        self.staged_event_group.body.addWidget(self.open_event_folder_btn, alignment=Qt.AlignLeft)
+        overview_layout.addWidget(self.staged_event_group)
         layout.setAlignment(Qt.AlignTop)
-        layout.addWidget(review_splitter)
+        layout.addWidget(self.review_overview)
         layout.addWidget(scroll.progress_heading)
 
         # Box upload and staging panels remain available throughout review.
@@ -3362,119 +3343,28 @@ class FieldDataWizard(QMainWindow):
             f"<table cellspacing='6'>{table}</table>"
             f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
             "<h3>Before you finish</h3>"
-            "<p>Review the staged event tree and resolve any QC findings. "
+            "<p>Open the staged event folder to review its files and resolve any QC findings. "
             "Use the <b>Box</b> panel to upload, then wait for file-list and hash verification.</p>"
             "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
             "<p>For bird audio, the <b>Wildlife Sound Hub</b> panel adds this event to the "
             "local staging batch. No SoundHub upload is performed from this screen.</p>"
         )
-        self._populate_staged_event_tree()
+        self._update_staged_event_folder()
 
-    def _populate_staged_event_tree(self) -> None:
-        """Render a bounded logical directory tree for the review screen.
-
-        ``raw_data`` stops at one node per device and uses inventory counts;
-        individual media files are never enumerated. Other generated folders
-        show their immediate children, capped to keep the UI responsive.
-        """
-        tree = self.staged_event_tree
-        tree.clear()
+    def _update_staged_event_folder(self) -> None:
+        """Describe the selected folder without enumerating its contents."""
         root = Path(self.current_deployment_folder) if self.current_deployment_folder else None
         folder_exists = root is not None and root.is_dir()
         self.open_event_folder_btn.setEnabled(folder_exists)
         if root is None:
-            tree.addTopLevelItem(QTreeWidgetItem(["No staging folder selected", ""]))
-            return
-
-        device_counts: Counter[str] = Counter(
-            str(row.get("device_label", "") or "").strip()
-            for row in self.file_inventory
-            if str(row.get("device_label", "") or "").strip()
-        )
-        root_item = QTreeWidgetItem(
-            [f"{root.name}/", f"{len(self.file_inventory):,} inventoried files"]
-        )
-        root_item.setToolTip(0, str(root))
-        tree.addTopLevelItem(root_item)
-
-        if not folder_exists:
-            root_item.addChild(QTreeWidgetItem(["Folder not found", ""]))
-            root_item.setExpanded(True)
-            return
-
-        def visible_children(folder: Path) -> list[Path]:
-            try:
-                children = [
-                    path for path in folder.iterdir()
-                    if not path.name.startswith(".")
-                ]
-            except OSError:
-                return []
-            return sorted(
-                children,
-                key=lambda path: (not path.is_dir(), path.name.casefold()),
-            )
-
-        for path in visible_children(root):
-            if path.is_dir():
-                children = visible_children(path)
-                folder_item = QTreeWidgetItem(
-                    [f"{path.name}/", f"{len(children):,} items"]
-                )
-                folder_item.setToolTip(0, str(path))
-                root_item.addChild(folder_item)
-
-                if path.name == "raw_data":
-                    device_dirs = {
-                        child.name: child for child in children if child.is_dir()
-                    }
-                    for label in sorted(
-                        set(device_dirs) | set(device_counts), key=str.casefold
-                    ):
-                        count = device_counts.get(label, 0)
-                        noun = "file" if count == 1 else "files"
-                        detail = f"{count:,} inventoried {noun}"
-                        if label not in device_dirs:
-                            detail += " — folder missing"
-                        device_item = QTreeWidgetItem([f"{label}/", detail])
-                        if label in device_dirs:
-                            device_item.setToolTip(0, str(device_dirs[label]))
-                        folder_item.addChild(device_item)
-                else:
-                    displayed = children[:50]
-                    for child in displayed:
-                        if child.is_dir():
-                            label = f"{child.name}/"
-                            detail = "Folder"
-                        else:
-                            label = child.name
-                            try:
-                                detail = f"{child.stat().st_size:,} bytes"
-                            except OSError:
-                                detail = "File"
-                        child_item = QTreeWidgetItem([label, detail])
-                        child_item.setToolTip(0, str(child))
-                        folder_item.addChild(child_item)
-                    if len(children) > len(displayed):
-                        folder_item.addChild(
-                            QTreeWidgetItem(
-                                [f"… {len(children) - len(displayed)} more items", ""]
-                            )
-                        )
-            else:
-                try:
-                    detail = f"{path.stat().st_size:,} bytes"
-                except OSError:
-                    detail = "File"
-                file_item = QTreeWidgetItem([path.name, detail])
-                file_item.setToolTip(0, str(path))
-                root_item.addChild(file_item)
-
-        root_item.setExpanded(True)
-        for index in range(root_item.childCount()):
-            child = root_item.child(index)
-            if child.text(0) == "raw_data/":
-                child.setExpanded(True)
+            text = "No local staging folder selected."
+        elif not folder_exists:
+            text = f"{root.name} — local staging folder is unavailable."
+        else:
+            browser = "Finder" if platform.system() == "Darwin" else "your file browser"
+            text = f"Open {root.name} in {browser} to review its files."
+        self.staged_event_label.setText(text)
+        self.staged_event_label.setToolTip(str(root) if root else "")
 
     # ------------------------------------------------------------------
     # Box upload + post-upload verification
@@ -5614,6 +5504,7 @@ class FieldDataWizard(QMainWindow):
             self.device_tree.clear()
             self.log_text.clear()
             self.summary_text.clear()
+            self._update_staged_event_folder()
             self.upload_group.disclosure.setChecked(False)
             self.upload_status_label.setText("No event files are ready to upload.")
             self.upload_progress_bar.hide()

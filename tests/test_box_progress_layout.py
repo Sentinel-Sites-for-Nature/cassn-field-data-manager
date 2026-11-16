@@ -421,15 +421,15 @@ def test_review_overview_does_not_grow_when_platforms_expand(monkeypatch, zoom, 
             panel.show()
         for _ in range(3):
             app.processEvents()
-        overview_height = max(window.review_splitter.height(), window.review_splitter.minimumSizeHint().height())
+        overview_height = max(window.review_overview.height(), window.review_overview.minimumSizeHint().height())
         for expanded in (True, False, True):
             for panel in panels:
                 panel.disclosure.setChecked(expanded)
             for _ in range(3):
                 app.processEvents()
-            assert window.review_splitter.height() <= overview_height + 2
+            assert window.review_overview.height() <= overview_height + 2
             page = window.tabs.widget(2)
-            gap = page.progress_heading.y() - window.review_splitter.geometry().bottom() - 1
+            gap = page.progress_heading.y() - window.review_overview.geometry().bottom() - 1
             assert gap <= page.widget().layout().spacing() + 2
             assert page.horizontalScrollBar().maximum() == 0
     finally:

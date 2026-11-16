@@ -809,26 +809,9 @@ def test_gui_runs_two_card_jobs_concurrently_and_frees_both_slots(
             assert all(row.text(0).startswith(device) for row in visible)
             assert any("Camera timezone QC" in row.text(0) and row.text(1) == "Error" for row in visible)
 
-        window._populate_staged_event_tree()
-        tree_root = window.staged_event_tree.topLevelItem(0)
-        assert tree_root.text(0) == "event/"
-        raw_item = next(
-            tree_root.child(index)
-            for index in range(tree_root.childCount())
-            if tree_root.child(index).text(0) == "raw_data/"
-        )
-        assert [
-            raw_item.child(index).text(0)
-            for index in range(raw_item.childCount())
-        ] == ["p1_ML/", "p2_ML/"]
-        assert [
-            raw_item.child(index).text(1)
-            for index in range(raw_item.childCount())
-        ] == ["1 inventoried file", "1 inventoried file"]
-        assert "image1.jpg" not in [
-            raw_item.child(index).text(0)
-            for index in range(raw_item.childCount())
-        ]
+        window._update_staged_event_folder()
+        assert window.open_event_folder_btn.isEnabled()
+        assert "event" in window.staged_event_label.text()
 
         # Completed panels remain as safe-to-eject confirmations, then vanish
         # once their source volumes disappear.
