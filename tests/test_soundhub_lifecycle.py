@@ -20,7 +20,7 @@ from cassn.soundhub.provenance import (
     plan_submission_provenance,
 )
 from cassn.soundhub.staging import fragments_root, project_root
-from utils.prep_soundhub import cmd_clear_completed
+from cassn.soundhub.cli import cmd_clear_completed
 
 
 FIELDS = [
@@ -243,7 +243,7 @@ def test_clear_cli_is_dry_run_by_default_then_applies(
     staging, box_year, event_roots = _fixture(tmp_path)
     _complete(staging, box_year, event_roots)
     monkeypatch.setattr(
-        "utils.prep_soundhub.load_soundhub_config",
+        "cassn.soundhub.cli.load_soundhub_config",
         lambda: {"staging_root": str(staging)},
     )
 
@@ -277,7 +277,7 @@ def test_force_cleanup_allows_missing_flacs_and_cli_stays_dry_run(
     assert not plan_submission_provenance(staging, box_year).ok
 
     monkeypatch.setattr(
-        'utils.prep_soundhub.load_soundhub_config',
+        'cassn.soundhub.cli.load_soundhub_config',
         lambda: {'staging_root': str(staging)},
     )
     args = SimpleNamespace(
@@ -362,3 +362,23 @@ def test_force_soundhub_clears_orphan_fragments_only(tmp_path):
     clear_completed_batch(plan)
     assert staging.exists()
     assert not fragments.exists()
+
+
+def test_prep_soundhub_wrapper_runs_the_package_cli():
+    import subprocess
+    import sys
+
+    import utils.prep_soundhub as wrapper
+    from cassn.soundhub import cli
+
+    assert wrapper.main is cli.main
+    assert wrapper.cmd_clear_completed is cli.cmd_clear_completed
+    repo = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, str(repo / "utils" / "prep_soundhub.py"), "--help"],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+    )
+    assert result.returncode == 0
+    assert "clear-completed" in result.stdout

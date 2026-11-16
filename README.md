@@ -597,7 +597,8 @@ Staging does not initiate an upload. CSU does not expose the UC staging destinat
 
 `utils/prep_soundhub.py` covers the backlog — deployments ingested before this step
 existed. It shares the app's code, so a deployment prepared here is identical to one
-prepared in the GUI.
+prepared in the GUI. The command code is in `cassn/soundhub/cli.py`; the `utils` file is a
+small wrapper that keeps these commands working.
 
 ```bash
 # One deployment
@@ -1180,7 +1181,7 @@ cassn-field-data-manager/
 │   ├── box_auth_setup.py             # Box OAuth authentication utility
 │   ├── clear_box_verified_staging.py # Box-verified local staging cleanup
 │   ├── install_macos_app.py          # Dock-ready macOS launcher installer
-│   └── prep_soundhub.py              # SoundHub FLAC staging + S3 upload
+│   └── prep_soundhub.py              # Wrapper for the SoundHub CLI in cassn/soundhub/cli.py
 ├── packaging/                        # PyInstaller specification and build requirements
 ├── services/box-auth/                # Hosted Box OAuth Worker and service tests
 ├── assets/                           # Application icons and welcome/workspace artwork
