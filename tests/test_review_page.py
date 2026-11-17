@@ -25,6 +25,8 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
         window.show()
         page = window.tabs.widget(2)
         assert not page.progress_heading.isHidden()
+        assert window.summary_group.content.isHidden()
+        window.summary_group.disclosure.setChecked(True)
         groups = [window.upload_group, window.hash_group, window.soundhub_group, window.wi_control.group]
         for group in groups:
             group.show()
@@ -62,7 +64,7 @@ def test_simultaneous_progress_preserves_overview_and_titles(monkeypatch):
         app.processEvents()
 
 
-def test_review_cards_collapse_independently_and_open_selected_folder(tmp_path, monkeypatch):
+def test_summary_defaults_collapsed_and_finder_card_stays_visible(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(FieldDataWizard, "load_config", lambda w: setattr(w, "wi_upload_helper", "sample"))
     monkeypatch.setattr(FieldDataWizard, "check_box_auth", lambda _: False)
@@ -75,13 +77,23 @@ def test_review_cards_collapse_independently_and_open_selected_folder(tmp_path, 
         window.tabs.setCurrentIndex(2)
         window.show()
         window.summary_text.setPlainText("Keep this summary")
-        window.current_deployment_folder = tmp_path
-        window._update_staged_event_folder()
+        event = tmp_path / "UC_PinonRidge_20261021"
+        event.mkdir()
+        window.current_deployment_folder = event
+        window.update_review_tab()
+        assert "Before you finish" not in window.summary_text.toPlainText()
+        window.summary_text.setPlainText("Keep this summary")
+        assert window.staged_event_label.text() == "Open UC PinonRidge 2026-10-21 in Finder to review its files."
         assert window.open_event_folder_btn.isEnabled()
         window.open_event_folder_btn.click()
-        assert opened == [["open", str(tmp_path)]]
+        assert opened == [["open", str(event)]]
         assert not hasattr(window, "staged_event_tree")
-        for card in (window.summary_group, window.staged_event_group):
+        assert window.summary_group.content.isHidden()
+        assert not hasattr(window.staged_event_group, "disclosure")
+        window.summary_group.disclosure.click()
+        for _ in range(3):
+            app.processEvents()
+        for card in (window.summary_group,):
             app.processEvents()
             expanded_height = window.review_overview.height()
             card.disclosure.click()

@@ -28,6 +28,7 @@ class ReviewPage(QScrollArea):
                 text-align: left; border: none; padding: 14px;
                 font-size: 18px; font-weight: 700;
             }
+            QLabel[role="reviewTitle"] { font-size: 18px; font-weight: 700; }
             QWidget#reviewContent QGroupBox::title {
                 subcontrol-origin: border; subcontrol-position: top left;
                 left: 12px; top: 6px; padding: 0;
@@ -62,7 +63,7 @@ class ReviewCard(QGroupBox):
         self.body.setContentsMargins(14, 0, 14, 14)
         layout.addWidget(self.content)
         self.disclosure.toggled.connect(self._set_expanded)
-        self.disclosure.setChecked(True)
+        self._set_expanded(False)
 
     def _set_expanded(self, expanded):
         self.content.setVisible(expanded)

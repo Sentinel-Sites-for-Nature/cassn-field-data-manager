@@ -196,7 +196,7 @@ def test_four_platform_panels_fit_wide_narrow_and_restored_review_window(monkeyp
             sizes.append((window.upload_progress_bar.width(), status.height()))
             if width == 930:
                 page.ensureWidgetVisible(window.cancel_upload_btn)
-                assert page.verticalScrollBar().value() > 0
+                assert page.viewport().rect().contains(window.cancel_upload_btn.mapTo(page.viewport(), window.cancel_upload_btn.rect().center()))
 
         assert sizes[0] == sizes[2]
         assert sizes[1][0] < sizes[0][0]

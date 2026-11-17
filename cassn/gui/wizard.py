@@ -1215,7 +1215,7 @@ class FieldDataWizard(QMainWindow):
 
         layout.addWidget(workspace_label("Review Event", "sectionTitle", wrap=True))
         self.review_overview = QWidget()
-        self.review_overview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.review_overview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         overview_layout = QVBoxLayout(self.review_overview)
         overview_layout.setContentsMargins(0, 0, 0, 0)
         overview_layout.setSpacing(16)
@@ -1227,16 +1227,25 @@ class FieldDataWizard(QMainWindow):
         self.summary_group.body.addWidget(self.summary_text)
         overview_layout.addWidget(self.summary_group)
 
-        self.staged_event_group = ReviewCard("Staged Deployment Event")
+        self.staged_event_group = QGroupBox()
+        self.staged_event_group.setProperty("role", "reviewCard")
+        self.staged_event_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        event_row = QHBoxLayout(self.staged_event_group)
+        event_row.setContentsMargins(14, 14, 14, 14)
+        event_row.setSpacing(16)
+        event_description = QVBoxLayout()
+        event_description.setSpacing(4)
+        event_description.addWidget(workspace_label("Staged Deployment Event", "reviewTitle", wrap=True))
+        event_row.addLayout(event_description, 1)
         self.staged_event_label = workspace_label(
             "No local staging folder selected.", "", wrap=True,
         )
-        self.staged_event_group.body.addWidget(self.staged_event_label)
+        event_description.addWidget(self.staged_event_label)
         self.open_event_folder_btn = QPushButton("Open in Finder" if platform.system() == "Darwin" else "Open Folder")
         self.open_event_folder_btn.setToolTip("Open this event’s local staging folder to review its files.")
         self.open_event_folder_btn.setEnabled(False)
         self.open_event_folder_btn.clicked.connect(self.open_staging_folder)
-        self.staged_event_group.body.addWidget(self.open_event_folder_btn, alignment=Qt.AlignLeft)
+        event_row.addWidget(self.open_event_folder_btn, alignment=Qt.AlignRight | Qt.AlignVCenter)
         overview_layout.addWidget(self.staged_event_group)
         layout.setAlignment(Qt.AlignTop)
         layout.addWidget(self.review_overview)
@@ -3342,12 +3351,6 @@ class FieldDataWizard(QMainWindow):
         self.summary_text.setHtml(
             f"<table cellspacing='6'>{table}</table>"
             f"<p>{file_types}</p><h3>Devices</h3><table cellspacing='8'>{devices}</table>"
-            "<h3>Before you finish</h3>"
-            "<p>Open the staged event folder to review its files and resolve any QC findings. "
-            "Use the <b>Box</b> panel to upload, then wait for file-list and hash verification.</p>"
-            "<p>Keep the original SD cards until Box verification passes and QC issues are resolved.</p>"
-            "<p>For bird audio, the <b>Wildlife Sound Hub</b> panel adds this event to the "
-            "local staging batch. No SoundHub upload is performed from this screen.</p>"
         )
         self._update_staged_event_folder()
 
@@ -3362,7 +3365,13 @@ class FieldDataWizard(QMainWindow):
             text = f"{root.name} — local staging folder is unavailable."
         else:
             browser = "Finder" if platform.system() == "Darwin" else "your file browser"
-            text = f"Open {root.name} in {browser} to review its files."
+            prefix, _, date = root.name.rpartition("_")
+            try:
+                date = datetime.strptime(date, "%Y%m%d").strftime("%Y-%m-%d")
+                name = f"{prefix.replace('_', ' ')} {date}"
+            except ValueError:
+                name = root.name.replace("_", " ")
+            text = f"Open {name} in {browser} to review its files."
         self.staged_event_label.setText(text)
         self.staged_event_label.setToolTip(str(root) if root else "")
 
