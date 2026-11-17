@@ -350,7 +350,7 @@ class ChunkUploader:
 
     def _remote_parts(self, session, size, part_size):
         result = {}
-        for receipt in self.backend.parts(session):
+        for receipt in self._read_parts(session):
             offset = receipt['offset']
             if (not isinstance(offset, int) or offset < 0 or offset >= size
                     or offset % part_size or offset in result
@@ -358,6 +358,25 @@ class ChunkUploader:
                 raise UploadPaused('Invalid/overlapping Box upload part coverage')
             result[offset] = receipt
         return result
+
+    def _read_parts(self, session):
+        # A failed reconciliation read proves neither presence nor absence.
+        # Finish the complete listing before allowing any missing-part resend.
+        for attempt in range(3):
+            self.runtime.check_cancelled()
+            try:
+                return list(self.backend.parts(session))
+            except Exception as exc:
+                if not uncertain_request(exc):
+                    raise
+                self.runtime.metrics.add(part_listing_failures=1)
+                if attempt == 2:
+                    raise UploadPaused(
+                        'Box could not confirm the saved upload parts. Upload progress is retained; '
+                        'use Continue Box Upload to resume later.') from exc
+                _, headers = error_response(exc)
+                delay = retry_after(headers)
+                self.runtime.sleep(delay if delay is not None else 2 ** (attempt + 1))
 
     def _send(self, session, offset, data, total):
         for attempt in range(3):
@@ -372,7 +391,7 @@ class ChunkUploader:
                 if not uncertain_request(exc):
                     raise
                 # An immutable part may have landed before the reply was lost.
-                for receipt in self.backend.parts(session):
+                for receipt in self._read_parts(session):
                     if receipt['offset'] == offset:
                         return _check_receipt(receipt, offset, data)
                 if attempt == 2:

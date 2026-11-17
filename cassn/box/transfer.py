@@ -181,6 +181,26 @@ class UploadRuntime:
         if self.cancel.is_set():
             raise UploadCancelled('Upload cancelled; local files and recovery records retained')
 
+    def retry_auth(self, request):
+        """Retry only temporary credential-service failures, before payload I/O."""
+        from cassn.box.hosted import HostedError
+        for attempt in range(5):
+            self.check_cancelled()
+            self.wait_cooldown()
+            try:
+                return request()
+            except HostedError as exc:
+                if exc.kind not in ('busy', 'network'):
+                    raise
+                self.metrics.add(auth_temporary_failures=1)
+                delay = retry_after({'Retry-After': exc.retry_after})
+                self.cooldown.defer(delay if delay is not None else 2.1 * 2 ** attempt, self.clock)
+                if attempt == 4:
+                    raise UploadPaused(
+                        'Box sign-in service is temporarily unavailable. Upload progress is saved; '
+                        'use Continue Box Upload to resume later.') from exc
+                self.metrics.add(auth_retries=1)
+
     def sleep(self, seconds):
         self.check_cancelled()
         if seconds > self.max_wait:

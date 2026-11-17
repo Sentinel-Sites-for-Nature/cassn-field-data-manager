@@ -50,8 +50,9 @@ _LOGIN_FAILURES = frozenset({"declined", "account_not_approved", "folder_access_
 
 
 class HostedError(RuntimeError):
-    def __init__(self, kind):
+    def __init__(self, kind, *, retry_after=None):
         self.kind = kind
+        self.retry_after = retry_after
         super().__init__(_MESSAGES.get(kind, _MESSAGES["invalid"]))
 
 
@@ -85,7 +86,10 @@ class Transport:
             with response:
                 status = response.code
                 if status not in (200, 201, 202):
-                    return status, {}  # Never expose or parse arbitrary error bodies.
+                    # Retain only a validated wait, never arbitrary error bodies.
+                    from cassn.box.transfer import retry_after
+                    delay = retry_after(getattr(response, "headers", {}))
+                    return status, {"retry_after": delay} if delay is not None else {}
                 raw = response.read(32_769)
                 if len(raw) > 32_768:
                     raise HostedError("invalid")
@@ -221,14 +225,15 @@ class SessionStore:
             raise HostedError("storage") from None
 
 
-def _status(status):
+def _status(status, data=None):
     if status == 401:
         raise HostedError("reconnect")
     if status == 403:
         raise HostedError("denied")
     if status == 429:
-        raise HostedError("busy")
-    raise HostedError("network" if status >= 500 else "invalid")
+        raise HostedError("busy", retry_after=(data or {}).get("retry_after"))
+    raise HostedError("network" if status >= 500 else "invalid",
+                      retry_after=(data or {}).get("retry_after"))
 
 
 def _token(data, session, now, profile="csu"):
@@ -424,7 +429,7 @@ class SessionManager:
                 status, data = self.request(session.path + "/token", proof=session.proof,
                                             payload={"force_refresh": True} if force else None)
                 if status != 200:
-                    _status(status)
+                    _status(status, data)
                 access, lifetime = _token(data, session, self.wall(), self.profile)
                 if force and access == previous:
                     raise HostedError("reconnect")
@@ -467,16 +472,24 @@ class HostedAuthentication(Authentication):
         self.manager = manager
         self.last_token = None
 
+    def _token(self, network_session, **kwargs):
+        network = getattr(network_session, "network_client", None)
+        runtime = getattr(network, "runtime", None)
+        request = lambda: self.manager.token(**kwargs)
+        # Only the uploader opts into cancellable recovery. Retry authentication
+        # before preparing/sending Box payloads, including a rejected-token refresh.
+        return runtime.retry_auth(request) if runtime is not None else request()
+
     def retrieve_token(self, *, network_session=None):
-        token = self.manager.token()
+        token = self._token(network_session)
         self.last_token = token.access_token
         return token
 
     def retrieve_authorization_header(self, *, network_session=None):
-        return "Bearer " + self.retrieve_token().access_token
+        return "Bearer " + self.retrieve_token(network_session=network_session).access_token
 
     def refresh_token(self, *, network_session=None):
-        token = self.manager.token(force=True, rejected=self.last_token)
+        token = self._token(network_session, force=True, rejected=self.last_token)
         self.last_token = token.access_token
         return token
 

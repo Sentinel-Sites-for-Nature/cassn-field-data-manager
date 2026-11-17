@@ -160,3 +160,19 @@ def test_other_upload_failures_keep_the_plain_warning(monkeypatch):
     warning.assert_called_once()
     context.set_box_connection_state.assert_not_called()
     context.upload_to_box.assert_not_called()
+
+
+def test_transient_upload_failure_explains_resume_without_raw_sdk_dump():
+    import requests
+    from box_sdk_gen.box.errors import BoxSDKError
+    error = BoxSDKError(message='private SDK request details', error=requests.ReadTimeout('read timed out'))
+    text = threads._upload_failures_message([
+        ('raw_data/p1_BD/a.wav', threads._upload_error_text(HostedError('busy'))),
+        ('raw_data/p4_BD/b.wav', threads._upload_error_text(error)),
+    ])
+    assert '2 file(s) did not finish' in text
+    assert '• raw_data/p1_BD/a.wav:' in text
+    assert '• raw_data/p4_BD/b.wav:' in text
+    assert 'Continue Box Upload' in text
+    assert 'metadata publication have not completed' in text
+    assert 'Timestamp' not in text and 'private SDK request details' not in text

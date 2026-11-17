@@ -33,7 +33,7 @@ from cassn.core.ingest_safety import require_no_ingest_holds
 from cassn.box.client import BoxStorage
 from cassn.box.scheduling import upload_results
 from cassn.box.transfer import (
-    UploadCancelled, UploadRuntime, error_response, prepare_upload_client, retry_after,
+    UploadCancelled, UploadRuntime, error_response, prepare_upload_client, retry_after, uncertain_request,
 )
 from cassn.box.upload_state import STATE_DIRECTORY, require_uploads_complete
 from cassn.config import CHUNKED_UPLOAD_THRESHOLD
@@ -50,6 +50,22 @@ from cassn.core.quality_control import append_qc_report, qc_path_for
 # Box API field projection for the verify/fixity walks: enough to navigate and
 # to read each file's server-side SHA-1 without pulling full item payloads.
 _SHA1_FIELDS = ["id", "type", "name", "sha1"]
+
+
+def _upload_error_text(exc):
+    if uncertain_request(exc):
+        return "Box could not confirm the transfer after a connection or server error. Saved progress will be checked on resume."
+    return str(exc)[:300]
+
+
+def _upload_failures_message(failures):
+    details = "\n".join(f"• {path}: {reason}" for path, reason in failures[:10])
+    if len(failures) > 10:
+        details += f"\n• {len(failures) - 10} more files did not finish."
+    return (f"{len(failures)} file(s) did not finish uploading.\n\n{details}\n\n"
+            "Keep local staging. Use Continue Box Upload to resume. "
+            "Completed files will be checked and skipped. "
+            "Final verification and metadata publication have not completed.")
 
 
 def _publication_error(publication, exc):
@@ -332,7 +348,7 @@ class BoxUploadThread(QThread):
                         self.needs_reconnect = True
                         self._cancel_event.set()
                     metrics.add(failed_files=1)
-                    return ("fail", rel_path.as_posix(), str(exc)[:200])
+                    return ("fail", rel_path.as_posix(), _upload_error_text(exc))
 
             metrics.set_stage('transferring')
             for file_path, fut in upload_results(
@@ -344,7 +360,7 @@ class BoxUploadThread(QThread):
                     status, rel_path, payload = fut.result()
                 except Exception as exc:
                     rel_path = file_path.relative_to(self.deployment_folder).as_posix()
-                    status, payload = "fail", str(exc)[:200]
+                    status, payload = "fail", _upload_error_text(exc)
 
                 with self._state_lock:
                     if status == "ok":
@@ -407,7 +423,7 @@ class BoxUploadThread(QThread):
                 return
 
             if failed_uploads:
-                raise RuntimeError(f"{len(failed_uploads)} file upload(s) failed: {failed_uploads[:10]}")
+                raise RuntimeError(_upload_failures_message(failed_uploads))
 
             # Only publish accumulated metadata after the batch's media is
             # verified. Earlier archive rows never become local inventory rows.

@@ -222,3 +222,92 @@ def test_final_failed_read_does_not_wait_for_an_unused_retry():
     with pytest.raises(Exception): network.fetch(options)
     assert clock.waits==[]
     assert http.calls==1
+
+
+def test_hosted_busy_before_payload_recovers_without_sending_twice():
+    from cassn.box.hosted import HostedAuthentication
+    from test_hosted_box import fixture, result
+    manager, store, clock, calls, replies = fixture(old=True)
+    replies[:] = [(429, {}), (200, result(clock))]
+    auth = HostedAuthentication(manager)
+    runtime, network, options, _, http = setup(
+        [(201, {})], auth=auth, file_stream=io.BytesIO(b'original-bytes'),
+        content_type='application/octet-stream')
+    runtime.clock = clock
+    runtime.wait = lambda delay: clock.sleep(delay) or False
+    assert network.fetch(options).status == 201
+    assert http.calls == 1
+    assert http.bodies == [b'original-bytes']
+    assert len(calls) == 2
+
+
+def test_hosted_busy_during_401_refresh_recovers_after_rejected_request():
+    from cassn.box.hosted import HostedAuthentication
+    from test_hosted_box import fixture, result
+    manager, store, clock, calls, replies = fixture(old=True)
+    manager.token()
+    replies[:] = [(429, {}), (200, result(clock, access='new-access'))]
+    auth = HostedAuthentication(manager)
+    runtime, network, options, _, http = setup(
+        [(401, {}), (201, {})], auth=auth, file_stream=io.BytesIO(b'original-bytes'),
+        content_type='application/octet-stream')
+    runtime.clock = clock
+    runtime.wait = lambda delay: clock.sleep(delay) or False
+    assert network.fetch(options).status == 201
+    assert http.calls == 2  # Rejected request, then one successful upload.
+    assert http.bodies == [b'original-bytes', b'original-bytes']
+
+
+@pytest.mark.parametrize('kind', ['busy', 'network'])
+def test_auth_retry_is_bounded_and_sends_no_payload_on_exhaustion(kind):
+    from cassn.box.hosted import HostedAuthentication, HostedError
+    calls = []
+    def token(**kwargs):
+        calls.append(True)
+        raise HostedError(kind)
+    auth = HostedAuthentication(NS(token=token))
+    runtime, network, options, clock, http = setup([], auth=auth)
+    with pytest.raises(UploadPaused, match='Continue Box Upload'):
+        network.fetch(options)
+    assert len(calls) == 5
+    assert http.calls == 0
+    assert runtime.metrics.snapshot()['auth_retries'] == 4
+
+
+@pytest.mark.parametrize('kind', ['reconnect', 'denied', 'storage', 'invalid', 'keychain_approval'])
+def test_auth_retry_does_not_retry_permanent_errors(kind):
+    from cassn.box.hosted import HostedAuthentication, HostedError
+    calls = []
+    def token(**kwargs):
+        calls.append(True)
+        raise HostedError(kind)
+    runtime, network, options, clock, http = setup([], auth=HostedAuthentication(NS(token=token)))
+    with pytest.raises(HostedError) as caught:
+        network.fetch(options)
+    assert caught.value.kind == kind
+    assert len(calls) == 1 and http.calls == 0
+    assert clock.waits == []
+
+
+def test_auth_retry_honors_server_wait_and_can_be_cancelled():
+    from cassn.box.hosted import HostedAuthentication, HostedError
+    calls = []
+    def token(**kwargs):
+        calls.append(True)
+        raise HostedError('busy', retry_after=120)
+    runtime, network, options, clock, http = setup([], auth=HostedAuthentication(NS(token=token)))
+    def cancel(delay):
+        assert delay == 120
+        runtime.cancel.set()
+        return True
+    runtime.wait = cancel
+    with pytest.raises(UploadCancelled): network.fetch(options)
+    assert len(calls) == 1 and http.calls == 0
+
+
+def test_auth_retry_obeys_maximum_wait():
+    from cassn.box.hosted import HostedAuthentication, HostedError
+    def token(**kwargs): raise HostedError('busy', retry_after=7200)
+    runtime, network, options, clock, http = setup([], auth=HostedAuthentication(NS(token=token)))
+    with pytest.raises(UploadPaused, match='wait budget'): network.fetch(options)
+    assert http.calls == 0 and clock.waits == []

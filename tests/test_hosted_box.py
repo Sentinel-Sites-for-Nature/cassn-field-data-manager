@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+
 from cassn.box.auth import BoxConfig, csu_config, get_box_client
 from cassn.box.hosted import (DeviceSession, HostedAuthentication, HostedError,
     SessionManager, SessionStore, _authorization_url)
@@ -390,3 +391,18 @@ def test_account_switch_explains_how_to_recover():
     with pytest.raises(HostedError, match="disconnect before changing accounts"):
         m.login(lambda _: None, lambda: False)
     assert store.session == previous
+
+
+@pytest.mark.parametrize('header,expected', [('17', {'retry_after': 17.0}), ('invalid', {})])
+def test_transport_preserves_only_validated_retry_delay(header, expected):
+    import io
+    from urllib.error import HTTPError
+    from types import SimpleNamespace
+    from cassn.box.hosted import Transport
+
+    transport = Transport()
+    def reject(*args, **kwargs):
+        raise HTTPError(transport.origin, 429, 'busy', {'Retry-After': header},
+                        io.BytesIO(b'private error body'))
+    transport.opener = SimpleNamespace(open=reject)
+    assert transport('/sessions/example/token') == (429, expected)

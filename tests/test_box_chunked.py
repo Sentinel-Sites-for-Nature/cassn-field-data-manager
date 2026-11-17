@@ -444,3 +444,72 @@ def test_uncertain_session_creation_keeps_record_for_review(tmp_path):
     assert state(uploader)['state'] == 'creating' and state(uploader)['session_id'] is None
     with pytest.raises(UploadPaused, match='creation outcome is unknown'):
         uploader.upload(path, 'parent', 'source.wav')
+
+
+def test_lost_part_reply_then_listing_timeout_recovers_without_resending(tmp_path):
+    path, api, runtime, uploader = prepared(tmp_path, workers=1)
+    api.lost_parts = {0}
+    original = api.parts
+    failures = []
+    def parts(session):
+        if api.sent and not failures:
+            failures.append(True)
+            raise requests.ReadTimeout('temporary part-list timeout')
+        return original(session)
+    api.parts = parts
+    assert uploader.upload(path, 'parent', 'source.wav') == 'file-1'
+    assert Counter(api.sent) == Counter([0, 8, 16, 24, 32])
+    assert api.created == 1
+
+
+def test_persistent_part_listing_outage_retains_session_and_can_resume(tmp_path):
+    path, api, runtime, uploader = prepared(tmp_path, workers=1)
+    api.lost_parts = {0}
+    original = api.parts
+    failed_reads = []
+    def parts(session):
+        if api.sent:
+            failed_reads.append(True)
+            raise requests.ReadTimeout('temporary part-list timeout')
+        return original(session)
+    api.parts = parts
+    with pytest.raises(UploadPaused, match='could not confirm the saved upload parts'):
+        uploader.upload(path, 'parent', 'source.wav')
+    assert len(failed_reads) == 3
+    assert api.sent == [0]
+    state = json.loads(next(uploader.journal_dir.glob('*.json')).read_text())
+    assert state['session_id'] == 'session-1' and state['state'] == 'uploading'
+    api.parts = original
+    assert uploader.upload(path, 'parent', 'source.wav') == 'file-1'
+    assert api.created == 1
+    assert Counter(api.sent) == Counter([0, 8, 16, 24, 32])
+
+
+def test_part_listing_retry_cancelled_without_resending(tmp_path):
+    path, api, runtime, uploader = prepared(tmp_path, workers=1)
+    api.lost_parts = {0}
+    original = api.parts
+    def parts(session):
+        if api.sent: raise requests.ReadTimeout('timeout')
+        return original(session)
+    api.parts = parts
+    runtime.wait = lambda seconds: runtime.cancel.set() or True
+    with pytest.raises(UploadCancelled): uploader.upload(path, 'parent', 'source.wav')
+    assert api.sent == [0] and api.created == 1
+
+
+def test_partial_listing_is_discarded_before_resend_decision(tmp_path):
+    path, api, runtime, uploader = prepared(tmp_path, workers=1)
+    api.lost_parts = {8}
+    original = api.parts
+    failures = []
+    def parts(session):
+        if 8 in api.sent and not failures:
+            failures.append(True)
+            yield original(session)[0]
+            raise requests.ReadTimeout('second page unavailable')
+        yield from original(session)
+    api.parts = parts
+    assert uploader.upload(path, 'parent', 'source.wav') == 'file-1'
+    assert Counter(api.sent) == Counter([0, 8, 16, 24, 32])
+    assert api.created == 1
