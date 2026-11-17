@@ -275,15 +275,15 @@ class DeploymentWindow(FieldDataWizard):
         self.clearance_confirmation = QLabel(
             f"All files in {folder.name}’s local staging folder were deleted.\n\n"
             "Box files, Wildlife Insights uploads, and the separate SoundHub staging folder remain in place.\n\n"
-            "You can now quit the app."
+            "You can now close this window. Other session windows will stay open."
         )
         self.clearance_confirmation.setTextFormat(Qt.PlainText)
         self.clearance_confirmation.setWordWrap(True)
         self.clearance_confirmation.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.clearance_confirmation)
-        self.clearance_quit_btn = QPushButton("Quit app")
-        self.clearance_quit_btn.clicked.connect(self.manager.close_all)
-        layout.addWidget(self.clearance_quit_btn, 0, Qt.AlignLeft)
+        self.clearance_exit_btn = QPushButton("Exit This Window")
+        self.clearance_exit_btn.clicked.connect(self.close)
+        layout.addWidget(self.clearance_exit_btn, 0, Qt.AlignHCenter)
         layout.addStretch()
         pages.addWidget(confirmation)
         self.setCentralWidget(pages)
@@ -296,7 +296,7 @@ class DeploymentWindow(FieldDataWizard):
                 action.setEnabled(False)
         self.statusBar().clearMessage()
         self._refresh_workspace_context()
-        self.clearance_quit_btn.setFocus()
+        self.clearance_exit_btn.setFocus()
 
     def open_different_deployment(self):
         self.manager.new_window(open_sessions=True)

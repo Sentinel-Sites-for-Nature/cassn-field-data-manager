@@ -47,6 +47,7 @@ else:
         if stage=='verified':
             row['integrity']=dict(kind='integrity_verified_image_batch',manifest_sha256='a'*64,image_count=s['images'],receipt_sha256='b'*64)
             if (root/'upgraded').exists(): row['integrity']['originals_sha256']='d'*64
+        if (root/'cleanup-state').exists(): row['cleanup_state']=(root/'cleanup-state').read_text()
         if stage=='verifying':
             row['verified_count']=int((root/'verified-count').read_text()) if (root/'verified-count').exists() else 1
         if stage=='delivery':
@@ -194,7 +195,7 @@ def test_one_plot_concurrent_reopen_and_receipt(work, tmp_path):
     (tmp_path / "stage").write_text("verified")
     ctrl.poll()
     wait_for(lambda: ctrl.process is None)
-    assert "upload verified" in ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format()
+    assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format() == "Verified · 100%"
     assert ctrl.verified_summary.text() == "2 cameras verified · 4 photos"
     assert not ctrl.group.disclosure.isChecked()
     ctrl.group.disclosure.click()
@@ -660,3 +661,110 @@ def test_collapsed_wi_header_shows_waiting_then_confirmed_progress(work, tmp_pat
         row.update(stage='held', confirmed=0)
     ctrl.render()
     assert ctrl.group.activity.isHidden()
+
+
+def test_verified_cleanup_changes_keep_receipt_and_completion(work, tmp_path):
+    """Real helper replies update cleanup without resubmission or losing verification."""
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / 'stage').write_text('verified')
+    (tmp_path / 'upgraded').touch()
+    (tmp_path / 'cleanup-state').write_text('pending')
+    start(ctrl, QDialogButtonBox.Ok)
+    key = next(iter(ctrl.jobs))
+    original_proof = dict(ctrl.jobs[key]['rows'][0]['integrity'])
+    ctrl.group.disclosure.setChecked(False)
+    for state, text in [('pending', 'Temporary-file cleanup queued.'),
+                        ('running', 'Removing the uploader’s temporary photo copies.'),
+                        ('failed', 'Temporary-file cleanup needs attention. The upload remains verified.'),
+                        ('complete', None)]:
+        (tmp_path / 'cleanup-state').write_text(state)
+        ctrl.poll()
+        wait_for(lambda: ctrl.process is None)
+        assert ctrl.jobs[key]['rows'][0]['cleanup_state'] == state
+        assert ctrl.jobs[key]['rows'][0]['integrity'] == original_proof
+        assert ctrl.selection_complete()
+        assert ctrl.group.activity_percent.text() == '100%'
+        assert not ctrl.group.activity_check.isHidden()
+        assert not ctrl.group.disclosure.isChecked()
+        assert ctrl.timer.isActive() == (state != 'complete')
+        for i in range(ctrl.tree.topLevelItemCount()):
+            item = ctrl.tree.topLevelItem(i)
+            bar = ctrl.bar_for_item(item)
+            assert bar.format() == 'Verified · 100%'
+            assert bar.value() == bar.maximum() == 2
+        # Qt retains old cell widgets until their deferred deletion runs.
+        labels = [label.text() for i in range(ctrl.tree.topLevelItemCount())
+                  for column in (0, 1)
+                  for label in ctrl.tree.itemWidget(ctrl.tree.topLevelItem(i), column).findChildren(QLabel)]
+        if text:
+            assert any(text in label for label in labels)
+        else:
+            assert not any('cleanup' in label.lower() for label in labels)
+    assert read_requests(ctrl.folder)[key]['rows'][0]['cleanup_state'] == 'complete'
+    assert (tmp_path / 'calls').read_text().splitlines().count('submit') == 1
+
+
+def test_camera_verified_before_other_camera_finishes(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    start(ctrl, QDialogButtonBox.Ok)
+    key = next(iter(ctrl.jobs))
+    rows = [dict(row) for row in ctrl.jobs[key]['rows']]
+    rows[0].update(stage='verified', cleanup_state='running', integrity=dict(
+        kind='integrity_verified_image_batch', manifest_sha256='a'*64,
+        image_count=2, receipt_sha256='b'*64, originals_sha256='d'*64))
+    rows[1].update(stage='verifying', confirmed=2, verified_count=1)
+    ctrl.accept_status(key, dict(rows=rows))
+    assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format() == 'Verified · 100%'
+    assert ctrl.bar_for_item(ctrl.tree.topLevelItem(1)).format() == 'Verifying 1 of 2 photos · 50%'
+    assert ctrl.verified_summary.text() == '1 camera verified · 2 photos'
+    assert not ctrl.selection_complete()
+    assert ctrl.group.activity_check.isHidden()
+    assert ctrl.timer.isActive()
+
+
+def test_legacy_cleaning_waits_for_receipt_instead_of_claiming_verified(work, tmp_path):
+    window = work()
+    prepare(window)
+    ctrl = window.wi_control
+    (tmp_path / 'stage').write_text('cleaning')
+    start(ctrl, QDialogButtonBox.Ok)
+    assert ctrl.bar_for_item(ctrl.tree.topLevelItem(0)).format() == 'Verifying receipt'
+    assert not ctrl.selection_complete()
+    assert ctrl.verified_summary.isHidden()
+    assert ctrl.timer.isActive()
+    assert ctrl.group.activity_check.isHidden()
+
+
+@pytest.mark.parametrize('cleanup', ['pending', 'running', 'complete', 'failed'])
+def test_cleanup_never_substitutes_for_integrity_proof(cleanup):
+    scope = dict(deployment='camera', images=2, selection_sha256='a'*64)
+    row = dict(scope, stage='verified', confirmed=2, manifest_sha256='b'*64, cleanup_state=cleanup)
+    with pytest.raises(ValueError, match='receipt'):
+        checked_status([scope], [row])
+
+
+@pytest.mark.parametrize('cleanup', ['', 'verified', None, [], {}])
+def test_invalid_cleanup_status_rejected(cleanup):
+    scope = dict(deployment='camera', images=2, selection_sha256='a'*64)
+    row = dict(scope, stage='queued', confirmed=0, cleanup_state=cleanup)
+    with pytest.raises(ValueError, match='cleanup status'):
+        checked_status([scope], [row])
+
+
+def test_cleanup_update_cannot_change_verified_evidence():
+    from cassn.core.wi_requests import verified_row_update
+    scope = dict(deployment='camera', images=2, selection_sha256='a'*64)
+    row = dict(scope, stage='verified', confirmed=2, manifest_sha256='b'*64,
+               integrity=dict(kind='integrity_verified_image_batch', image_count=2,
+                              manifest_sha256='b'*64, receipt_sha256='c'*64, originals_sha256='d'*64))
+    updated = dict(row, cleanup_state='failed')
+    assert verified_row_update(row, updated)
+    assert verified_row_update(updated, row)  # Older helpers may omit cleanup.
+    for key, value in [('confirmed', 1), ('manifest_sha256', 'e'*64),
+                       ('selection_sha256', 'f'*64), ('stage', 'cleaning'),
+                       ('integrity', dict(row['integrity'], receipt_sha256='f'*64))]:
+        assert not verified_row_update(row, dict(updated, **{key: value}))
