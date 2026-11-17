@@ -607,7 +607,8 @@ def test_reconnect_waits_for_finished_upload_and_retries_once(manager, monkeypat
     assert retry.call_count == int(accept and authenticated)
 
 
-def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, monkeypatch):
+@pytest.mark.parametrize("other_window_busy", [False, True])
+def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, monkeypatch, other_window_busy):
     import time
     from PySide6.QtTest import QTest
     from test_staging_cleanup import _build_event
@@ -654,7 +655,10 @@ def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, 
     assert not w.new_btn.isEnabled()
     assert "All files in" in w.clearance_confirmation.text()
     assert event.name in w.clearance_confirmation.text()
-    assert "You can now quit the app." in w.clearance_confirmation.text()
+    assert "You can now close this window." in w.clearance_confirmation.text()
+    assert w.clearance_exit_btn.text() == "Exit This Window"
+    confirmation = w.clearance_exit_btn.parentWidget()
+    assert abs(w.clearance_exit_btn.geometry().center().x() - confirmation.rect().center().x()) <= 1
     assert "Local staging cleared" in w.windowTitle()
     assert not event.exists()
     w.save_session()
@@ -662,11 +666,13 @@ def test_cleanup_panel_keyboard_and_cli_share_the_event_lock(manager, tmp_path, 
     report, = (tmp_path / "profile/cleanup-reports").glob("*.json")
     assert json.loads(report.read_text())["outcome"] == "cleared"
     assert w.clearance_report_path == report
-    # Quitting from the confirmation still protects work in another window.
+    # Exiting this session leaves both idle and busy session windows alone.
     other = manager.new_window(open_sessions=False)
-    other._box_operation_active = True
-    w.clearance_quit_btn.click()
+    other._box_operation_active = other_window_busy
+    w.clearance_exit_btn.click()
     assert manager.windows == [other]
+    assert other.isVisible()
+    assert other._box_operation_active == other_window_busy
     assert not event.exists()
     other._box_operation_active = False
 
