@@ -16,6 +16,8 @@ Layers, bottom up:
 * :mod:`cassn.soundhub.lifecycle` — guarded rollover of completed local batches.
 * :mod:`cassn.soundhub.submission` — the shared safe preflight-to-report
   workflow used by both the CLI and GUI.
+* :mod:`cassn.soundhub.cli` — the operator command line;
+  ``utils/prep_soundhub.py`` is a compatibility wrapper around it.
 
 None of these import Qt. The GUI wrappers live in
 :mod:`cassn.gui.soundhub_thread`.

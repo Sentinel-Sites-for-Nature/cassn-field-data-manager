@@ -569,6 +569,10 @@ to one pending local batch, then upload that batch when ready. This CLI also
 covers deployments downloaded before the SoundHub step existed. Both paths call
 the same submission code in `cassn/soundhub/`.
 
+The command code is in `cassn/soundhub/cli.py`. `utils/prep_soundhub.py` is a small
+compatibility wrapper, so every command below keeps working.
+`python -m cassn.soundhub.cli <command>` is equivalent.
+
 Replaces the retired `convert_to_flac.py` and `verify_flac_conversion.py`. Those
 rebuilt each `deployment_id` by parsing folder names, a derivation that dropped
 the organization prefix (`StrathearnRanch_plot1_BD_...` instead of
